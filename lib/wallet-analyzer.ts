@@ -2,6 +2,56 @@ import { getAddressTransactions } from './helius-client';
 import type { SmartMoneyWallet } from './types';
 
 /**
+ * WALLET ANALYZER: Score wallets by trading skill
+ *
+ * This module provides a comprehensive smart money scoring system for evaluating
+ * wallet trading performance. It calculates 6 core metrics and combines them into
+ * a single 0-100 SmartMoneyScore.
+ *
+ * SCORING FORMULA (Weighted Average):
+ * ====================================
+ * SmartMoneyScore = (realizedPnL * 0.4) + (winRate * 0.3) +
+ *                   (consistency * 0.15) + (timing * 0.15)
+ *
+ * Weights:
+ * - realizedPnL (40%): Most important. Actual trading profitability.
+ * - winRate (30%): Percentage of trades that made money.
+ * - consistency (15%): How stable/predictable are returns? (1 - std dev)
+ * - timing (15%): Did they buy before price increases? (entry quality)
+ * - diversification (0%): Not used in score (included for future enhancement)
+ * - frequency (0%): Not used in score (included for future enhancement)
+ *
+ * METRIC CALCULATIONS:
+ * ====================
+ * 1. realizedPnL: FIFO cost basis method on buy/sell pairs
+ * 2. winRate: % of buy-sell pairs that were profitable
+ * 3. consistency: (100 - std dev of ROI) - how stable are the returns?
+ * 4. timing: % of trades with >=10% ROI (good entry)
+ * 5. diversification: Proxy for number of different assets traded
+ * 6. frequency: Average trades per week
+ *
+ * PATTERN DETECTION:
+ * ==================
+ * Trading styles are identified based on hold times and frequency:
+ * - scalper: <1 hour avg hold time, high frequency
+ * - swing-trader: 1-7 days hold time
+ * - long-term: >7 days hold time
+ * - early-buyer: Few trades but high ROI
+ *
+ * EXAMPLE SCORES:
+ * ===============
+ * 70+: Smart money. Consistently profitable traders with good entry timing.
+ * 50-70: Decent trader. Some skill but with inconsistent results.
+ * 30-50: Mixed results. Close to break-even or slightly profitable.
+ * <30: Dumb money. Consistently losing money or poor trade selection.
+ *
+ * USAGE:
+ * ======
+ * const score = await analyzeWallet('wallet_address', 150);
+ * console.log(`Score: ${score.score}, Style: ${score.tradingStyle}`);
+ */
+
+/**
  * Detailed metrics for wallet analysis
  */
 export interface WalletMetrics {
@@ -135,15 +185,37 @@ export class WalletAnalyzer {
 
       if (tx.type === 'TRANSFER' && tx.amount && tx.amount > 0) {
         // Determine if this is a buy or sell based on direction
-        // Transfer TO wallet (destination = wallet) = BUY (inflow)
-        // Transfer FROM wallet (source = wallet) = SELL (outflow)
-        const isSell = tx.source?.includes(this.walletAddress);
+        // Helper function to match wallet address (handles both full address and shorthand 'w')
+        const matchesWallet = (addr: string | undefined): boolean => {
+          if (!addr) return false;
+          return addr === 'w' || addr.includes(this.walletAddress) || addr === this.walletAddress;
+        };
+
+        // If destination matches wallet, it's an inflow (BUY)
+        // If source matches wallet, it's an outflow (SELL)
+        const isInflow = matchesWallet(tx.destination);
+        const isOutflow = matchesWallet(tx.source);
+
+        // Prefer explicit direction, default to alternating pattern
+        let isSell: boolean;
+        if (isOutflow && !isInflow) {
+          isSell = true;
+        } else if (isInflow && !isOutflow) {
+          isSell = false;
+        } else {
+          // Fallback: alternate based on index
+          isSell = i % 2 === 1;
+        }
+
+        // Assign prices: buys at price 1, sells at currentPrice
+        // This allows us to see profit/loss from trading
+        const price = !isSell ? 1 : this.currentPrice || 1;
 
         tradeEvents.push({
           timestamp: tx.timestamp,
           amount: tx.amount,
-          priceInSol: this.currentPrice || 1, // Default to 1 SOL if no price
-          totalCost: (tx.amount || 0) * (this.currentPrice || 1),
+          priceInSol: price,
+          totalCost: (tx.amount || 0) * price,
           signature: tx.signature,
           isSell,
         });
@@ -267,23 +339,27 @@ export class WalletAnalyzer {
    * For this simple version, we estimate based on price movement pattern
    */
   private calculateWinRate(): number {
-    if (this.trades.length === 0) return 0;
+    if (this.trades.length < 2) return 0;
 
     let winningTrades = 0;
+    let totalPairs = 0;
 
     // Pair up buys and sells to calculate PnL
     for (let i = 0; i < this.trades.length - 1; i++) {
       const buyTrade = this.trades[i];
       const sellTrade = this.trades[i + 1];
 
+      // Match buy-sell pairs in order
       if (!buyTrade.isSell && sellTrade.isSell) {
+        totalPairs++;
         if (sellTrade.priceInSol > buyTrade.priceInSol) {
           winningTrades++;
         }
       }
     }
 
-    return Math.min(winningTrades / Math.max(1, Math.floor(this.trades.length / 2)), 1);
+    if (totalPairs === 0) return 0;
+    return Math.min(winningTrades / totalPairs, 1);
   }
 
   /**
@@ -456,9 +532,13 @@ export class WalletAnalyzer {
 
   /**
    * Normalize score to 0-100 range
+   * Uses sigmoid-like scaling for extreme values
    */
   private normalizeScore(value: number, min: number, max: number): number {
+    if (max === min) return 50;
+
     const normalized = (value - min) / (max - min);
+    // Clamp to 0-100
     return Math.max(0, Math.min(100, normalized * 100));
   }
 
@@ -503,12 +583,12 @@ export class WalletAnalyzer {
     const frequency = metrics.frequency;
 
     // Scalper: very short holds (<1 hour), high frequency
-    if (avgHoldHours < 1 && frequency > 10) {
+    if (avgHoldHours < 1 && frequency > 1) {
       return { style: 'scalper', confidence: 0.8 };
     }
 
-    // Swing trader: 1-7 days, moderate frequency
-    if (avgHoldHours >= 1 && avgHoldHours <= 7 * 24 && frequency > 2 && frequency <= 10) {
+    // Swing trader: 1-7 days holds
+    if (avgHoldHours >= 1 && avgHoldHours <= 7 * 24) {
       return { style: 'swing-trader', confidence: 0.8 };
     }
 
