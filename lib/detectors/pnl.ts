@@ -1,12 +1,5 @@
 import { getAddressTransactions } from '../helius-client';
 import type { SmartMoneyWallet, HolderInfo } from '../types';
-import { SOL_DECIMALS } from '../solana';
-
-interface WalletTrade {
-  address: string;
-  buys: TradeEvent[];
-  sells: TradeEvent[];
-}
 
 interface TradeEvent {
   timestamp: number;
@@ -20,6 +13,13 @@ interface TradeEvent {
  * Detect smart-money wallets by PnL ranking
  * Strategy: For top holders, calculate realized PnL from buy/sell history
  * FIFO cost basis method: first tokens bought are first sold
+ *
+ * LIMITATION: Current implementation is a heuristic due to unparsed transaction data.
+ * For production accuracy, this needs:
+ * 1. Proper transaction instruction parsing (decode SPL token transfers)
+ * 2. Historical price lookups (not current price for all trades)
+ * 3. Cross-token analysis (trades on Raydium, Orca, etc.)
+ * This MVP flags high-activity wallets; real PnL requires full instruction parsing.
  */
 export async function detectSmartMoney(
   mint: string,

@@ -8,9 +8,23 @@ import { isValidPublicKey } from '@/lib/solana';
 import { getTokenPrice } from '@/lib/utils';
 import type { TokenInsiderReport, HolderInfo, AnalysisResponse } from '@/lib/types';
 
+// Rate limit config
 const RATE_LIMIT = new Map<string, { count: number; resetTime: number }>();
-const RATE_LIMIT_WINDOW = 60 * 1000; // 1 minute
-const RATE_LIMIT_MAX = 10; // 10 requests per minute
+const RATE_LIMIT_WINDOW = 60 * 1000;
+const RATE_LIMIT_MAX = 10;
+const CLEANUP_INTERVAL = 5 * 60 * 1000; // Clean up every 5 minutes
+
+// Periodic cleanup of expired rate limit entries
+if (typeof globalThis !== 'undefined') {
+  setInterval(() => {
+    const now = Date.now();
+    for (const [ip, limit] of RATE_LIMIT.entries()) {
+      if (now > limit.resetTime) {
+        RATE_LIMIT.delete(ip);
+      }
+    }
+  }, CLEANUP_INTERVAL);
+}
 
 function checkRateLimit(ip: string): boolean {
   const now = Date.now();
@@ -32,61 +46,64 @@ function checkRateLimit(ip: string): boolean {
 export async function POST(request: NextRequest): Promise<NextResponse<AnalysisResponse>> {
   const ip = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
 
-  // Rate limiting
   if (!checkRateLimit(ip)) {
     return NextResponse.json(
-      { success: false, error: 'Rate limit exceeded' },
-      { status: 429 }
+      { success: false, error: 'Rate limit exceeded (10 req/min)' },
+      { status: 429, headers: { 'Retry-After': '60' } }
     );
   }
 
   try {
     const body = await request.json();
-    const { mint } = body;
+    let { mint } = body;
 
     if (!mint || typeof mint !== 'string') {
       return NextResponse.json(
-        { success: false, error: 'Invalid mint address' },
+        { success: false, error: 'Missing or invalid mint address' },
+        { status: 400 }
+      );
+    }
+
+    mint = mint.trim().toUpperCase();
+    if (mint.length > 100) {
+      return NextResponse.json(
+        { success: false, error: 'Mint address too long' },
         { status: 400 }
       );
     }
 
     if (!isValidPublicKey(mint)) {
       return NextResponse.json(
-        { success: false, error: 'Invalid public key format' },
+        { success: false, error: 'Invalid Solana public key format' },
         { status: 400 }
       );
     }
 
-    // Initialize Helius
     try {
       initHelius();
     } catch (error) {
       return NextResponse.json(
         { success: false, error: 'Helius API not configured' },
-        { status: 500 }
+        { status: 503 }
       );
     }
 
-    // Fetch token metadata
     const metadata = await getTokenMetadata(mint);
     if (!metadata) {
       return NextResponse.json(
-        { success: false, error: 'Token not found' },
+        { success: false, error: 'Token not found or metadata unavailable' },
         { status: 404 }
       );
     }
 
-    // Fetch top holders
     const holders = await getTopHolders(mint, 100);
     if (holders.length === 0) {
       return NextResponse.json(
-        { success: false, error: 'No holders found' },
+        { success: false, error: 'Token has no holders' },
         { status: 404 }
       );
     }
 
-    // Convert to HolderInfo format
     const holderInfos: HolderInfo[] = holders.map((h) => ({
       address: h.address,
       amount: h.amount,
@@ -95,17 +112,16 @@ export async function POST(request: NextRequest): Promise<NextResponse<AnalysisR
       isEarlyBuyer: false,
     }));
 
-    // Get current price
     const currentPrice = await getTokenPrice(mint);
 
-    // Run detectors in parallel
-    const [creator, bundles, smartMoney] = await Promise.all([
+    // Run all detectors in parallel
+    const [creator, bundles, smartMoney, clusters] = await Promise.all([
       detectCreator(mint),
       detectSnipers(mint),
       detectSmartMoney(mint, holderInfos, currentPrice),
+      detectClusters(holderInfos), // Moved here: parallel instead of sequential
     ]);
 
-    // Mark creator and early buyers
     if (creator) {
       const creatorIndex = holderInfos.findIndex((h) => h.address === creator.address);
       if (creatorIndex >= 0) {
@@ -119,10 +135,6 @@ export async function POST(request: NextRequest): Promise<NextResponse<AnalysisR
       }
     }
 
-    // Detect clusters
-    const clusters = await detectClusters(holderInfos);
-
-    // Build report
     const report: TokenInsiderReport = {
       mint,
       name: metadata.name,
@@ -137,9 +149,9 @@ export async function POST(request: NextRequest): Promise<NextResponse<AnalysisR
       } : null,
       clusters,
       snipers: bundles,
-      smartMoney: smartMoney.slice(0, 20), // Top 20 smart money wallets
+      smartMoney: smartMoney.slice(0, 20),
       analyzedAt: Date.now(),
-      cacheExpiry: Date.now() + 24 * 60 * 60 * 1000, // 24 hour cache
+      cacheExpiry: Date.now() + 24 * 60 * 60 * 1000,
     };
 
     return NextResponse.json({
@@ -149,14 +161,14 @@ export async function POST(request: NextRequest): Promise<NextResponse<AnalysisR
     });
   } catch (error) {
     console.error('Analysis error:', error);
+    const errorMsg = error instanceof Error ? error.message : 'Analysis failed';
     return NextResponse.json(
-      { success: false, error: error instanceof Error ? error.message : 'Analysis failed' },
+      { success: false, error: errorMsg },
       { status: 500 }
     );
   }
 }
 
-// GET endpoint for health check
 export async function GET(): Promise<NextResponse> {
   return NextResponse.json({ status: 'ok', service: 'insider-tracker-api' });
 }

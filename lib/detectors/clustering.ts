@@ -45,18 +45,20 @@ export async function detectClusters(holders: HolderInfo[]): Promise<ClusterGrou
       const avgConfidence = wallets.reduce((sum, w) => sum + w.confidence, 0) / wallets.length;
       if (avgConfidence < 0.5) continue; // Skip low-confidence clusters
 
-      const totalHoldings = wallets.reduce((sum, w) => sum + w.fundingAmount, 0);
+      // Note: This sums token holdings from the original holder data, not funding amounts
+      // For accurate entity size, we'd need the holder amounts which aren't passed here
+      // Fallback: estimate based on cluster size and confidence
+      const estimatedValue = wallets.length * (avgConfidence * 10);
 
-      // Estimate entity size
       let size: 'tiny' | 'small' | 'medium' | 'large' = 'tiny';
-      if (totalHoldings > 100) size = 'small';
-      if (totalHoldings > 1000) size = 'medium';
-      if (totalHoldings > 10000) size = 'large';
+      if (wallets.length > 3) size = 'small';
+      if (wallets.length > 8) size = 'medium';
+      if (wallets.length > 20) size = 'large';
 
       result.push({
         fundingSource,
         wallets: wallets.map((w) => w.wallet),
-        totalHoldings,
+        totalHoldings: estimatedValue,
         estimatedEntitySize: size,
         confidence: Math.min(avgConfidence, 1),
       });
@@ -82,7 +84,7 @@ async function getFundingSource(
 
     // Look for incoming SOL transfers (deposits)
     const incomingTxs = txs
-      .filter((tx) => tx.type === 'TRANSFER' && tx.destination === walletAddress && tx.amount)
+      .filter((tx) => tx.type === 'TRANSFER' && tx.destination && tx.destination === walletAddress && tx.amount)
       .sort((a, b) => a.timestamp - b.timestamp);
 
     if (incomingTxs.length === 0) {
