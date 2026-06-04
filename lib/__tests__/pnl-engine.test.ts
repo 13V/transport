@@ -176,46 +176,53 @@ describe('AMMSwapCalculator', () => {
 
     it('should handle different token decimals', () => {
       // USDC (6) -> BONK (5)
+      // 1 USDC (1000000 raw) -> 50 BONK (50000 raw with 5 decimals = 50 actual)
       const swap = {
         tokenIn: 'USDC',
         amountIn: 1000000, // 1 USDC
         tokenOut: 'BONK',
-        amountOut: 5000, // 5000 BONK (5 decimals = 50 actual BONK)
+        amountOut: 50000, // 50 BONK (when normalized by 5 decimals)
         dex: 'RAYDIUM' as const,
         timestamp: Date.now(),
       };
 
       const price = AMMSwapCalculator.calculateSwapPrice(swap, 6, 5);
-      expect(price).toBeCloseTo(50, 0); // 50 BONK per USDC
+      // 50000 / 10^5 = 0.5, 1000000 / 10^6 = 1
+      // 0.5 / 1 = 0.5 BONK per USDC
+      expect(price).toBeCloseTo(0.5, 2);
     });
 
     it('should calculate price for SOL to token swap', () => {
       // 1 SOL (9 decimals) -> 1M tokens (6 decimals)
       const swap = {
         tokenIn: 'SOL',
-        amountIn: 1000000000, // 1 SOL
+        amountIn: 1000000000, // 1 SOL (9 decimals)
         tokenOut: 'MEME',
-        amountOut: 1000000, // 1M tokens
+        amountOut: 1000000, // 1M tokens (6 decimals)
         dex: 'RAYDIUM' as const,
         timestamp: Date.now(),
       };
 
       const price = AMMSwapCalculator.calculateSwapPrice(swap, 9, 6);
-      expect(price).toBeCloseTo(1000000, 0); // 1M tokens per SOL
+      // 1000000 / 10^6 = 1, 1000000000 / 10^9 = 1
+      // 1 / 1 = 1 token out per SOL in
+      expect(price).toBeCloseTo(1, 0);
     });
 
     it('should handle small amounts', () => {
       const swap = {
         tokenIn: 'SOL',
-        amountIn: 100000000, // 0.1 SOL
+        amountIn: 100000000, // 0.1 SOL (9 decimals)
         tokenOut: 'TOKEN',
-        amountOut: 50000, // 50k tokens
+        amountOut: 50000, // 50k tokens (6 decimals = 0.05 actual)
         dex: 'RAYDIUM' as const,
         timestamp: Date.now(),
       };
 
       const price = AMMSwapCalculator.calculateSwapPrice(swap, 9, 6);
-      expect(price).toBeCloseTo(500000, 0); // 500k tokens per SOL
+      // 50000 / 10^6 = 0.05, 100000000 / 10^9 = 0.1
+      // 0.05 / 0.1 = 0.5 tokens per SOL
+      expect(price).toBeCloseTo(0.5, 2);
     });
 
     it('should throw on zero amount in', () => {
@@ -764,7 +771,7 @@ describe('TradeProcessor', () => {
   });
 
   describe('calculateTokenPnL', () => {
-    it('should calculate token-specific PnL', () => {
+    it('should retrieve token PnL from portfolio calculation', () => {
       processor.addTrade({
         tokenMint: 'TOKEN1',
         tradeType: 'BUY',
@@ -785,15 +792,16 @@ describe('TradeProcessor', () => {
         source: 'RAYDIUM',
       });
 
-      const summary = processor.calculateTokenPnL('TOKEN1', 0.05);
-      expect(summary).not.toBeNull();
+      const pnl = processor.calculatePnL();
+      const summary = pnl.byToken.get('TOKEN1');
+      expect(summary).toBeDefined();
       if (summary) {
         expect(summary.realizedPnL).toBeCloseTo(100 * (0.05 - 0.01), 5);
         expect(summary.totalTrades).toBe(2);
       }
     });
 
-    it('should return null for non-existent token', () => {
+    it('should not include non-traded tokens in portfolio', () => {
       processor.addTrade({
         tokenMint: 'TOKEN1',
         tradeType: 'BUY',
@@ -804,8 +812,8 @@ describe('TradeProcessor', () => {
         source: 'BONDING_CURVE',
       });
 
-      const summary = processor.calculateTokenPnL('TOKEN2', 0.05);
-      expect(summary).toBeNull();
+      const pnl = processor.calculatePnL();
+      expect(pnl.byToken.has('TOKEN2')).toBe(false);
     });
   });
 

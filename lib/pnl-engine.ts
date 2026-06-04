@@ -576,51 +576,89 @@ export class TradeProcessor {
     let winningTrades = 0;
     let losingTrades = 0;
     let totalHoldTime = 0;
-    let trades_with_hold_time = 0;
+    let completedTrades = 0; // Count of completed buy-sell pairs
     let totalWinSize = 0;
     let totalLossSize = 0;
     let largestWin = 0;
     let largestLoss = 0;
 
     // Build summary for each token that had trades
-    const tradedTokens = new Set(this.trades.map((t) => t.tokenMint));
+    for (const [tokenMint, history] of this.tokenPnLHistory) {
+      const buyTrades = history.trades.filter((t) => t.tradeType === 'BUY');
+      const sellTrades = history.trades.filter((t) => t.tradeType === 'SELL');
 
-    for (const tokenMint of tradedTokens) {
-      const summary = this.calculateTokenPnL(tokenMint, 0);
-      if (summary) {
-        byToken.set(tokenMint, summary);
-        totalRealizedPnL += summary.realizedPnL;
-        totalCostBasis += summary.totalCostBasis;
+      const totalQuantityPurchased = buyTrades.reduce((sum, t) => sum + t.amount, 0);
+      const totalQuantitySold = sellTrades.reduce((sum, t) => sum + t.amount, 0);
+      const quantityHeld = totalQuantityPurchased - totalQuantitySold;
 
-        // Count winning/losing trades
-        const tokenTrades = this.trades.filter((t) => t.tokenMint === tokenMint);
-        const buyTrades = tokenTrades.filter((t) => t.tradeType === 'BUY');
-        const sellTrades = tokenTrades.filter((t) => t.tradeType === 'SELL');
+      const realizedPnL = history.realizedGain;
+      const realizedPnLPct = history.costBasis > 0 ? (realizedPnL / history.costBasis) * 100 : 0;
 
-        for (const buyTrade of buyTrades) {
-          const correspondingSellTrade = sellTrades.find((s) => s.date > buyTrade.date);
-          if (correspondingSellTrade) {
-            const tradeGain = (correspondingSellTrade.pricePerToken - buyTrade.pricePerToken) * buyTrade.amount;
-            if (tradeGain > 0) {
-              winningTrades++;
-              totalWinSize += tradeGain;
-              largestWin = Math.max(largestWin, tradeGain);
-            } else {
-              losingTrades++;
-              totalLossSize += tradeGain;
-              largestLoss = Math.min(largestLoss, tradeGain);
-            }
-            totalHoldTime += (correspondingSellTrade.date.getTime() - buyTrade.date.getTime()) / (1000 * 60 * 60);
-            trades_with_hold_time++;
+      const unrealizedPnL = 0; // Will calculate later with current prices if available
+      const unrealizedPnLPct = 0;
+
+      const holdTimes: number[] = [];
+      for (const buyTrade of buyTrades) {
+        // Find corresponding sells in chronological order
+        const futureSellTrades = sellTrades.filter((s) => s.date > buyTrade.date).sort((a, b) => a.date.getTime() - b.date.getTime());
+
+        let remainingFromThisBuy = buyTrade.amount;
+
+        for (const sellTrade of futureSellTrades) {
+          if (remainingFromThisBuy <= 0) break;
+
+          const soldFromThisBuy = Math.min(remainingFromThisBuy, sellTrade.amount);
+          const holdTimeHours = (sellTrade.date.getTime() - buyTrade.date.getTime()) / (1000 * 60 * 60);
+          holdTimes.push(holdTimeHours);
+
+          const tradeGain = (sellTrade.pricePerToken - buyTrade.pricePerToken) * soldFromThisBuy;
+          if (tradeGain > 0) {
+            winningTrades++;
+            totalWinSize += tradeGain;
+            largestWin = Math.max(largestWin, tradeGain);
+          } else if (tradeGain < 0) {
+            losingTrades++;
+            totalLossSize += tradeGain;
+            largestLoss = Math.min(largestLoss, tradeGain);
+          } else {
+            // Break-even trades count towards completed trades but not win/loss
+            completedTrades++;
           }
+          completedTrades++;
+          remainingFromThisBuy -= soldFromThisBuy;
         }
-
-        totalTrades += summary.totalTrades;
       }
+
+      const avgHoldTimeHoursForToken = holdTimes.length > 0 ? holdTimes.reduce((a, b) => a + b) / holdTimes.length : 0;
+
+      const summary: TokenPnLSummary = {
+        mint: tokenMint,
+        totalCostBasis: history.costBasis,
+        totalSaleProceeds: history.saleProceeds,
+        realizedPnL,
+        realizedPnLPct,
+        unrealizedPnL,
+        unrealizedPnLPct,
+        totalTrades: history.trades.length,
+        winningTrades: 0, // Will be updated in aggregate
+        totalQuantityPurchased,
+        totalQuantitySold,
+        quantityHeld,
+        avgHoldTimeHours: avgHoldTimeHoursForToken,
+        firstBuyDate: buyTrades.length > 0 ? buyTrades[0].date : null,
+        lastSellDate: sellTrades.length > 0 ? sellTrades[sellTrades.length - 1].date : null,
+      };
+
+      byToken.set(tokenMint, summary);
+      totalRealizedPnL += realizedPnL;
+      totalCostBasis += history.costBasis;
+      totalTrades += history.trades.length;
+      totalHoldTime += holdTimes.reduce((a, b) => a + b, 0);
     }
 
-    const avgHoldTimeHours = trades_with_hold_time > 0 ? totalHoldTime / trades_with_hold_time : 0;
-    const winRate = totalTrades > 0 ? winningTrades / totalTrades : 0;
+    const totalCompletedTrades = winningTrades + losingTrades;
+    const avgHoldTimeHours = completedTrades > 0 ? totalHoldTime / completedTrades : 0;
+    const winRate = totalCompletedTrades > 0 ? winningTrades / totalCompletedTrades : 0;
     const avgWinSize = winningTrades > 0 ? totalWinSize / winningTrades : 0;
     const avgLossSize = losingTrades > 0 ? totalLossSize / losingTrades : 0;
     const profitFactor = Math.abs(totalLossSize) > 0 ? totalWinSize / Math.abs(totalLossSize) : 0;
