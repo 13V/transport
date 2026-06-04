@@ -14,6 +14,9 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import { HeliusDataFetcher } from '../../../lib/helius-data-fetcher';
+import { TradeProcessor } from '../../../lib/pnl-engine';
+import { WalletAnalyzer } from '../../../lib/wallet-analyzer';
 
 // ============================================================================
 // TYPE DEFINITIONS
@@ -154,7 +157,7 @@ interface CachedLeaderboard {
 }
 
 let cachedLeaderboard: CachedLeaderboard | null = null;
-const LEADERBOARD_CACHE_TTL = 60 * 1000; // 1 minute
+const LEADERBOARD_CACHE_TTL = 5 * 60 * 1000; // 5 minutes (increased from 1 minute for real data)
 
 function getLeaderboardFromCache(): LeaderboardResponse | null {
   if (!cachedLeaderboard) return null;
