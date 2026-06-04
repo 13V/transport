@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { TokenInsiderReport } from '@/lib/types';
+import { calculateRiskScore } from '@/lib/risk-score';
 import ReportView from '@/components/ReportView';
 import LoadingState from '@/components/LoadingState';
 
@@ -63,6 +64,12 @@ export default function TokenPage() {
         <div className="card border-red-800 bg-red-900/20 text-red-200">
           <p className="font-semibold">Analysis Error</p>
           <p>{error}</p>
+          <button
+            onClick={() => window.location.reload()}
+            className="btn btn-primary mt-4"
+          >
+            Retry
+          </button>
         </div>
       </div>
     );
