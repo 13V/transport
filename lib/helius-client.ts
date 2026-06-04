@@ -6,35 +6,51 @@ let heliusApiKey: string | null = null;
 export function initHelius(): string {
   if (!heliusApiKey) {
     heliusApiKey = process.env.HELIUS_API_KEY || null;
-    if (!heliusApiKey) {
-      throw new Error('HELIUS_API_KEY environment variable not set');
-    }
+    // Optional - Helius key is not required if using public RPC
   }
-  return heliusApiKey;
+  return heliusApiKey || '';
 }
 
 function getHeliusUrl(): string {
   const key = initHelius();
-  return `https://mainnet.helius-rpc.com/?api-key=${key}`;
+  // Use Solana public RPC as fallback (free, no auth required)
+  // This handles rate limiting better for free tier
+  if (key) {
+    return `https://mainnet.helius-rpc.com/?api-key=${key}`;
+  }
+  return 'https://api.mainnet-beta.solana.com';
 }
 
-async function heliusRpc(method: string, params: any[] = []): Promise<any> {
-  try {
-    const response = await axios.post(getHeliusUrl(), {
-      jsonrpc: '2.0',
-      id: '1',
-      method,
-      params,
-    });
+function getHeliusEnhancedUrl(): string {
+  const key = initHelius();
+  return `https://api-mainnet.helius-rpc.com/v0`;
+}
 
-    if (response.data.error) {
-      throw new Error(response.data.error.message || 'RPC error');
+async function heliusRpc(method: string, params: any[] = [], retries = 3): Promise<any> {
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      const response = await axios.post(getHeliusUrl(), {
+        jsonrpc: '2.0',
+        id: '1',
+        method,
+        params,
+      }, { timeout: 10000 });
+
+      if (response.data.error) {
+        throw new Error(response.data.error.message || 'RPC error');
+      }
+
+      return response.data.result;
+    } catch (error) {
+      if (attempt === retries - 1) {
+        console.error(`Helius RPC error (${method}):`, error);
+        throw error;
+      }
+      // Exponential backoff: 1s, 2s, 4s
+      const delay = Math.pow(2, attempt) * 1000;
+      console.log(`RPC retry ${attempt + 1}/${retries} after ${delay}ms...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
     }
-
-    return response.data.result;
-  } catch (error) {
-    console.error(`Helius RPC error (${method}):`, error);
-    throw error;
   }
 }
 
