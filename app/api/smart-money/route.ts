@@ -248,7 +248,7 @@ function generateMockWalletDetails(address: string): WalletDetailsResponse {
 export async function GET(
   request: NextRequest,
   { params }: { params: Record<string, string | string[]> }
-): Promise<NextResponse<LeaderboardResponse | WalletDetailsResponse | ErrorResponse>> {
+): Promise<NextResponse<LeaderboardResponse | WalletDetailsResponse | HistoryResponse | ErrorResponse>> {
   try {
     // Get client identifier and check rate limit
     const clientId = getClientIdentifier(request);

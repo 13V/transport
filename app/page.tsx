@@ -4,6 +4,8 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { isValidPublicKey } from '@/lib/solana';
 import SearchBar from '@/components/SearchBar';
+import Link from 'next/link';
+import { Zap } from 'lucide-react';
 
 export default function Home() {
   const router = useRouter();
@@ -49,15 +51,35 @@ export default function Home() {
         </p>
       </div>
 
-      {/* Search */}
-      <div className="max-w-2xl mx-auto">
-        <SearchBar onSearch={handleSearch} loading={loading} />
-        {error && (
-          <div className="mt-4 p-4 bg-red-900/20 border border-red-800 rounded-lg text-red-200">
-            {error}
-          </div>
-        )}
+      {/* CTA Buttons */}
+      <div className="flex flex-col sm:flex-row justify-center gap-4 max-w-2xl mx-auto">
+        <div className="flex-1">
+          <p className="text-sm text-gray-500 mb-2 font-semibold">Analyze a Token</p>
+          <SearchBar onSearch={handleSearch} loading={loading} buttonText="Analyze Token" />
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <Link
+            href="/smart-money"
+            className="btn btn-primary text-center flex items-center justify-center gap-2 whitespace-nowrap"
+          >
+            <Zap className="w-5 h-5" />
+            Smart Money Leaderboard
+          </Link>
+          <Link
+            href="/smart-money/discovery"
+            className="btn btn-secondary text-center whitespace-nowrap"
+          >
+            🔍 Discover Wallets
+          </Link>
+        </div>
       </div>
+
+      {error && (
+        <div className="max-w-2xl mx-auto p-4 bg-red-900/20 border border-red-800 rounded-lg text-red-200">
+          {error}
+        </div>
+      )}
 
       {/* Features */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">

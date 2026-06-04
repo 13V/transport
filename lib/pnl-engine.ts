@@ -688,16 +688,6 @@ export class TradeProcessor {
 
 /**
  * ============================================================================
- * EXPORT
+ * All types exported above as they were declared
  * ============================================================================
  */
-
-export {
-  PriceLevel,
-  CostLot,
-  Trade,
-  ResolvedLot,
-  TokenPnLSummary,
-  PortfolioPnL,
-  SwapInstruction,
-};

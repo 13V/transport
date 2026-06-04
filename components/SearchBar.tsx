@@ -6,9 +6,16 @@ import { Search } from 'lucide-react';
 interface SearchBarProps {
   onSearch: (mint: string) => void;
   loading?: boolean;
+  placeholder?: string;
+  buttonText?: string;
 }
 
-export default function SearchBar({ onSearch, loading = false }: SearchBarProps) {
+export default function SearchBar({
+  onSearch,
+  loading = false,
+  placeholder = "Enter token mint address (e.g., EPjFWaJy47gwhAj6CzjwucEgCwqPEfequpZiSymphony1111)",
+  buttonText = "Analyze Token",
+}: SearchBarProps) {
   const [input, setInput] = useState('');
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -21,7 +28,7 @@ export default function SearchBar({ onSearch, loading = false }: SearchBarProps)
       <div className="relative">
         <input
           type="text"
-          placeholder="Enter token mint address (e.g., EPjFWaJy47gwhAj6CzjwucEgCwqPEfequpZiSymphony1111)"
+          placeholder={placeholder}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           disabled={loading}
@@ -38,10 +45,10 @@ export default function SearchBar({ onSearch, loading = false }: SearchBarProps)
         {loading ? (
           <>
             <span className="inline-block animate-spin mr-2">⏳</span>
-            Analyzing...
+            Searching...
           </>
         ) : (
-          'Analyze Token'
+          buttonText
         )}
       </button>
     </form>

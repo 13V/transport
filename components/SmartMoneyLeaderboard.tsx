@@ -1,0 +1,492 @@
+'use client';
+
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useRouter } from 'next/navigation';
+import {
+  ChevronUp,
+  ChevronDown,
+  Search,
+  Loader,
+  ExternalLink,
+  Copy,
+  Check,
+  ChevronLeft,
+  ChevronRight,
+} from 'lucide-react';
+import CopyButton from './CopyButton';
+
+interface LeaderboardWallet {
+  rank: number;
+  address: string;
+  score: number;
+  pnl: number;
+  winRate: number;
+  consistency: number;
+  tokensHeld: number;
+  updatedAt: string;
+}
+
+interface LeaderboardResponse {
+  leaderboard: LeaderboardWallet[];
+  totalWallets: number;
+  pagination: {
+    offset: number;
+    limit: number;
+    hasMore: boolean;
+  };
+  lastUpdated: string;
+  cacheAge: number;
+}
+
+type SortField = 'rank' | 'score' | 'pnl' | 'winRate' | 'updatedAt';
+type SortDirection = 'asc' | 'desc';
+type PageSize = 10 | 25 | 50;
+
+export default function SmartMoneyLeaderboard() {
+  const router = useRouter();
+  const [data, setData] = useState<LeaderboardWallet[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [sortField, setSortField] = useState<SortField>('rank');
+  const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
+  const [currentPage, setCurrentPage] = useState(0);
+  const [pageSize, setPageSize] = useState<PageSize>(25);
+  const [totalWallets, setTotalWallets] = useState(0);
+  const [lastUpdated, setLastUpdated] = useState<string>('');
+  const [lastSearches, setLastSearches] = useState<string[]>([]);
+  const [showSearchHistory, setShowSearchHistory] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+
+  // Fetch leaderboard data
+  const fetchLeaderboard = useCallback(async (offset = 0) => {
+    try {
+      setRefreshing(true);
+      const response = await fetch(`/api/smart-money?limit=100&offset=${offset}`);
+      if (!response.ok) throw new Error('Failed to fetch leaderboard');
+
+      const json = (await response.json()) as LeaderboardResponse;
+      setData(json.leaderboard);
+      setTotalWallets(json.totalWallets);
+      setLastUpdated(json.lastUpdated);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load leaderboard');
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, []);
+
+  // Initial fetch
+  useEffect(() => {
+    fetchLeaderboard();
+  }, [fetchLeaderboard]);
+
+  // Auto-refresh every 5 minutes
+  useEffect(() => {
+    const interval = setInterval(() => fetchLeaderboard(), 5 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [fetchLeaderboard]);
+
+  // Load search history from localStorage
+  useEffect(() => {
+    const saved = localStorage.getItem('smartMoneySearches');
+    if (saved) {
+      setLastSearches(JSON.parse(saved));
+    }
+  }, []);
+
+  // Filter and sort data
+  const filteredData = useMemo(() => {
+    let result = [...data];
+
+    // Apply search filter
+    if (searchQuery.trim()) {
+      const query = searchQuery.toLowerCase();
+      result = result.filter((w) => w.address.toLowerCase().includes(query));
+    }
+
+    // Apply sorting
+    result.sort((a, b) => {
+      let aVal = a[sortField];
+      let bVal = b[sortField];
+
+      if (typeof aVal === 'string') {
+        aVal = aVal.toLowerCase();
+        bVal = (bVal as string).toLowerCase();
+      }
+
+      if (sortDirection === 'asc') {
+        return aVal < bVal ? -1 : aVal > bVal ? 1 : 0;
+      } else {
+        return aVal > bVal ? -1 : aVal < bVal ? 1 : 0;
+      }
+    });
+
+    return result;
+  }, [data, searchQuery, sortField, sortDirection]);
+
+  // Paginate filtered data
+  const paginatedData = useMemo(() => {
+    const start = currentPage * pageSize;
+    return filteredData.slice(start, start + pageSize);
+  }, [filteredData, currentPage, pageSize]);
+
+  const maxPage = Math.ceil(filteredData.length / pageSize);
+
+  // Handle wallet click
+  const handleWalletClick = (address: string) => {
+    router.push(`/smart-money/${address}`);
+  };
+
+  // Handle search
+  const handleSearch = (query: string) => {
+    setSearchQuery(query);
+    setCurrentPage(0);
+
+    // Save to history
+    if (query.trim()) {
+      const updated = [query, ...lastSearches.filter((s) => s !== query)].slice(0, 5);
+      setLastSearches(updated);
+      localStorage.setItem('smartMoneySearches', JSON.stringify(updated));
+    }
+  };
+
+  // Handle sort
+  const handleSort = (field: SortField) => {
+    if (sortField === field) {
+      setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortField(field);
+      setSortDirection('asc');
+    }
+    setCurrentPage(0);
+  };
+
+  // Get score color
+  const getScoreColor = (score: number) => {
+    if (score >= 70) return 'text-green-400 bg-green-900/20';
+    if (score >= 30) return 'text-yellow-400 bg-yellow-900/20';
+    return 'text-red-400 bg-red-900/20';
+  };
+
+  // Get score badge
+  const getScoreBadge = (score: number) => {
+    if (score >= 70) return 'badge-success';
+    if (score >= 30) return 'badge-warning';
+    return 'badge-danger';
+  };
+
+  const SortHeader = ({ field, label }: { field: SortField; label: string }) => (
+    <button
+      onClick={() => handleSort(field)}
+      className="flex items-center gap-1 font-semibold hover:text-blue-400 transition-colors"
+      aria-label={`Sort by ${label}`}
+    >
+      {label}
+      {sortField === field && (
+        sortDirection === 'asc' ? (
+          <ChevronUp className="w-4 h-4" />
+        ) : (
+          <ChevronDown className="w-4 h-4" />
+        )
+      )}
+    </button>
+  );
+
+  if (loading) {
+    return (
+      <div className="space-y-6">
+        <div className="text-center py-12">
+          <Loader className="w-8 h-8 mx-auto animate-spin text-blue-400 mb-4" />
+          <p className="text-gray-400">Loading smart money leaderboard...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="space-y-2">
+        <h2 className="text-3xl font-bold">Smart Money Leaderboard</h2>
+        <p className="text-gray-400">
+          Top {totalWallets.toLocaleString()} wallets ranked by trading performance
+          {lastUpdated && (
+            <span className="text-xs text-gray-500 ml-2">
+              (Updated: {new Date(lastUpdated).toLocaleTimeString()})
+            </span>
+          )}
+        </p>
+      </div>
+
+      {/* Search Bar */}
+      <div className="max-w-2xl space-y-3">
+        <div className="relative">
+          <input
+            type="text"
+            placeholder="Search by wallet address..."
+            value={searchQuery}
+            onChange={(e) => {
+              handleSearch(e.target.value);
+              setShowSearchHistory(true);
+            }}
+            onFocus={() => setShowSearchHistory(true)}
+            onBlur={() => setTimeout(() => setShowSearchHistory(false), 200)}
+            className="input w-full pl-10 pr-4 py-2"
+            aria-label="Search wallets"
+          />
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
+
+          {/* Search History Dropdown */}
+          {showSearchHistory && lastSearches.length > 0 && !searchQuery && (
+            <div className="absolute top-full mt-2 w-full bg-gray-800 border border-gray-700 rounded-lg shadow-lg z-10">
+              <div className="p-2 space-y-1">
+                <p className="text-xs font-semibold text-gray-400 px-2 py-1">Recent Searches</p>
+                {lastSearches.map((search) => (
+                  <button
+                    key={search}
+                    onClick={() => {
+                      handleSearch(search);
+                      setShowSearchHistory(false);
+                    }}
+                    className="w-full text-left px-3 py-2 hover:bg-gray-700 rounded text-sm text-gray-300 transition-colors"
+                  >
+                    {search}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {searchQuery && (
+          <p className="text-sm text-gray-400">
+            Found {filteredData.length} wallet{filteredData.length !== 1 ? 's' : ''}
+          </p>
+        )}
+      </div>
+
+      {error && (
+        <div className="p-4 bg-red-900/20 border border-red-800 rounded-lg text-red-200">
+          {error}
+        </div>
+      )}
+
+      {/* Controls */}
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+        <div className="flex gap-2">
+          <span className="text-sm text-gray-400">Per page:</span>
+          {([10, 25, 50] as PageSize[]).map((size) => (
+            <button
+              key={size}
+              onClick={() => {
+                setPageSize(size);
+                setCurrentPage(0);
+              }}
+              className={`px-3 py-1 rounded text-sm transition-colors ${
+                pageSize === size
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+              }`}
+              aria-pressed={pageSize === size}
+            >
+              {size}
+            </button>
+          ))}
+        </div>
+
+        <button
+          onClick={() => fetchLeaderboard()}
+          disabled={refreshing}
+          className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 text-white text-sm transition-colors"
+          aria-label="Refresh data"
+        >
+          {refreshing ? (
+            <>
+              <Loader className="w-4 h-4 inline-block mr-2 animate-spin" />
+              Refreshing...
+            </>
+          ) : (
+            '🔄 Refresh'
+          )}
+        </button>
+      </div>
+
+      {/* Table */}
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-gray-800 text-left text-gray-300">
+              <th className="px-4 py-3 font-semibold">
+                <SortHeader field="rank" label="Rank" />
+              </th>
+              <th className="px-4 py-3 font-semibold">Wallet Address</th>
+              <th className="px-4 py-3 font-semibold">
+                <SortHeader field="score" label="Score" />
+              </th>
+              <th className="px-4 py-3 font-semibold text-right">
+                <SortHeader field="pnl" label="PnL" />
+              </th>
+              <th className="px-4 py-3 font-semibold text-right">
+                <SortHeader field="winRate" label="Win Rate" />
+              </th>
+              <th className="hidden sm:table-cell px-4 py-3 font-semibold">Consistency</th>
+              <th className="hidden md:table-cell px-4 py-3 font-semibold text-right">
+                <SortHeader field="updatedAt" label="Last Trade" />
+              </th>
+              <th className="px-4 py-3 font-semibold text-right">Links</th>
+            </tr>
+          </thead>
+          <tbody>
+            {paginatedData.length === 0 ? (
+              <tr>
+                <td colSpan={8} className="px-4 py-8 text-center text-gray-400">
+                  {searchQuery
+                    ? 'No wallets found matching your search'
+                    : 'No data available'}
+                </td>
+              </tr>
+            ) : (
+              paginatedData.map((wallet) => (
+                <tr
+                  key={wallet.address}
+                  className="table-row cursor-pointer hover:bg-gray-800/50"
+                  onClick={() => handleWalletClick(wallet.address)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      handleWalletClick(wallet.address);
+                    }
+                  }}
+                >
+                  <td className="px-4 py-3 font-bold text-gray-300">#{wallet.rank}</td>
+                  <td className="px-4 py-3">
+                    <div className="flex items-center gap-2">
+                      <code className="text-xs bg-gray-800 px-2 py-1 rounded text-gray-300 font-mono">
+                        {wallet.address.slice(0, 8)}...{wallet.address.slice(-4)}
+                      </code>
+                      <CopyButton text={wallet.address} label="wallet address" />
+                    </div>
+                  </td>
+                  <td className="px-4 py-3">
+                    <span
+                      className={`inline-block px-3 py-1 rounded-full text-xs font-semibold ${getScoreBadge(
+                        wallet.score
+                      )} ${getScoreColor(wallet.score)}`}
+                    >
+                      {wallet.score.toFixed(1)}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-right">
+                    <span
+                      className={
+                        wallet.pnl >= 0 ? 'text-green-400 font-semibold' : 'text-red-400'
+                      }
+                    >
+                      {wallet.pnl >= 0 ? '+' : ''}${(wallet.pnl / 1000).toFixed(1)}k
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-right font-semibold">
+                    {(wallet.winRate * 100).toFixed(0)}%
+                  </td>
+                  <td className="hidden sm:table-cell px-4 py-3 text-gray-400">
+                    {wallet.consistency.toFixed(0)}/100
+                  </td>
+                  <td className="hidden md:table-cell px-4 py-3 text-gray-400 text-right text-xs">
+                    {new Date(wallet.updatedAt).toLocaleDateString()}
+                  </td>
+                  <td className="px-4 py-3 text-right">
+                    <div
+                      className="flex justify-end gap-2"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <a
+                        href={`https://solscan.io/address/${wallet.address}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="p-1 hover:bg-gray-700 rounded transition-colors text-blue-400"
+                        title="View on Solscan"
+                        aria-label={`View ${wallet.address} on Solscan`}
+                      >
+                        <ExternalLink className="w-4 h-4" />
+                      </a>
+                      <a
+                        href={`https://dexscreener.com/solana/${wallet.address}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="p-1 hover:bg-gray-700 rounded transition-colors text-green-400"
+                        title="View on DEXScreener"
+                        aria-label={`View ${wallet.address} on DEXScreener`}
+                      >
+                        📊
+                      </a>
+                    </div>
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Pagination */}
+      {maxPage > 1 && (
+        <div className="flex flex-col sm:flex-row justify-between items-center gap-4 mt-6">
+          <p className="text-sm text-gray-400">
+            Page {currentPage + 1} of {maxPage} ({filteredData.length} total results)
+          </p>
+
+          <div className="flex gap-2">
+            <button
+              onClick={() => setCurrentPage(Math.max(0, currentPage - 1))}
+              disabled={currentPage === 0}
+              className="p-2 rounded-lg bg-gray-800 hover:bg-gray-700 disabled:bg-gray-900 disabled:text-gray-600 transition-colors"
+              aria-label="Previous page"
+            >
+              <ChevronLeft className="w-5 h-5" />
+            </button>
+
+            {/* Page numbers */}
+            <div className="flex gap-1">
+              {Array.from({ length: Math.min(5, maxPage) }, (_, i) => {
+                const offset = Math.max(0, Math.min(currentPage - 2, maxPage - 5));
+                const pageNum = offset + i;
+                return (
+                  <button
+                    key={pageNum}
+                    onClick={() => setCurrentPage(pageNum)}
+                    className={`px-3 py-2 rounded text-sm transition-colors ${
+                      currentPage === pageNum
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+                    }`}
+                    aria-pressed={currentPage === pageNum}
+                  >
+                    {pageNum + 1}
+                  </button>
+                );
+              })}
+            </div>
+
+            <button
+              onClick={() => setCurrentPage(Math.min(maxPage - 1, currentPage + 1))}
+              disabled={currentPage >= maxPage - 1}
+              className="p-2 rounded-lg bg-gray-800 hover:bg-gray-700 disabled:bg-gray-900 disabled:text-gray-600 transition-colors"
+              aria-label="Next page"
+            >
+              <ChevronRight className="w-5 h-5" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Footer Info */}
+      <div className="text-xs text-gray-500 text-center py-4 border-t border-gray-800">
+        <p>Click any wallet to view detailed analysis. Scores are updated every 5 minutes.</p>
+      </div>
+    </div>
+  );
+}

@@ -1,0 +1,21 @@
+trader_id,name,contact,discord_handle,twitter_handle,trading_style,experience_level,trades_per_week,avg_portfolio_size,primary_focus,recruitment_source,interview_scheduled,notes
+T001,ScalpKing,scalp.trader@email.com,ScalpKing#4521,@scalp_pro_sol,Day Scalper,Advanced,12,50000,Pump.fun launches,Solana Discord,Yes,High volume trader - 2+ years Solana experience
+T002,Luna_Hodler,luna.swing@email.com,LunaH#7823,@luna_hodler_sol,Swing Trader,Intermediate,4,15000,Community tokens,Twitter referral,Yes,EU-based part-time trader - searches Twitter KOLs
+T003,AlphaHunter,alpha.hunter@email.com,AlphaHunter#2134,@alpha_hunter_pro,Day Scalper,Advanced,10,75000,Multi-token tracking,Pump.fun Discord,Yes,Professional trader - monitors 15-20 wallets daily
+T004,SolaDreamer,sol.dreams@email.com,SolaDreamer#5678,@soladreamer_,Swing Trader,Beginner,2,3500,Learning/Discovery,Solana Reddit,Yes,New trader interested in copy-trading strategies
+T005,VolumeVince,volume.v@email.com,VolumeVince#9234,@volume_vince,Day Scalper,Advanced,8,40000,Volume-based entries,Twitter/X Community,Yes,Technical analyst - uses order book reading
+T006,TokenTina,tina.tokens@email.com,TokenTina#3456,@token_tina_sol,Swing Trader,Intermediate,5,22000,Emerging projects,Pump.fun Communities,Yes,Community researcher - tests emerging tokens
+T007,RippleRyan,ryan.ripple@email.com,RippleRyan#7890,@ripple_trader,Day Scalper,Intermediate,7,28000,Cross-DEX arbitrage,Solana Discord,Yes,Arbitrage specialist - bot-assisted trading
+T008,CryptoCarl,carl.crypto@email.com,CryptoCarl#1234,@crypto_carl_sol,Swing Trader,Advanced,6,55000,Bundle detection,ORCA/Raydium forum,Yes,Experienced DeFi trader - tracks wallet patterns
+T009,MemeQueen,meme.q@email.com,MemeQueen#5555,@meme_queen_sol,Meme Trader,Intermediate,9,18000,Memecoin launches,Pump.fun Discord,Yes,Community-driven strategy - early launch hunter
+T010,BlockBlake,blake.block@email.com,BlockBlake#2468,@block_blake,Day Scalper,Intermediate,8,32000,Momentum trading,Twitter Trading Community,Yes,Chart analyst - momentum-based decisions
+T011,SolSeeker,seeker.sol@email.com,SolSeeker#7777,@solseeker_pro,Swing Trader,Beginner,3,5000,Educational focus,Discord referral,Yes,Interested in learning from smart money
+T012,ProPete,pete.pro@email.com,ProPete#3333,@propete_trader,Day Scalper,Advanced,11,60000,Multi-token bundles,Pump.fun Discord,Yes,Bundle trader - trades 3-4 related tokens
+T013,TokenTasha,tasha.tokens@email.com,TokenTasha#8888,@tokentasha_sol,Swing Trader,Intermediate,5,19000,Technical patterns,Solana Discord,Yes,Pattern recognition specialist
+T014,DeFiDave,dave.defi@email.com,DeFiDave#4444,@defiDave_sol,Swing Trader,Advanced,7,45000,Liquidity pools,Raydium community,Yes,LP farming background - transitioning to trading
+T015,VolatileVal,val.vol@email.com,VolatileVal#6666,@volatile_val,Day Scalper,Intermediate,10,35000,High volatility tokens,Pump.fun Discord,Yes,Risk-taker - specialized in volatile assets
+T016,GemGrace,grace.gems@email.com,GemGrace#9999,@gem_grace_sol,Swing Trader,Beginner,2,4200,Undiscovered tokens,Twitter Community,Yes,Looking for edge in emerging tokens
+T017,QuickQuinn,quinn.quick@email.com,QuickQuinn#1111,@quickquinn_sol,Day Scalper,Advanced,9,38000,Fast exits,Solana Discord,Yes,Speed-focused trader - <30min holds
+T018,InsiderIvan,ivan.insider@email.com,InsiderIvan#2222,@insider_ivan,Swing Trader,Intermediate,6,26000,Insider patterns,Crypto newsletter,Yes,Researches wallet patterns and insider buys
+T019,TrendTom,tom.trend@email.com,TrendTom#3333,@trendtom_sol,Day Scalper,Intermediate,8,31000,Trend following,Twitter Trading Group,Yes,Uses moving averages and trend lines
+T020,WalletWendy,wendy.wallet@email.com,WalletWendy#4444,@wallet_wendy,Swing Trader,Beginner,1,2800,Portfolio tracking,Discord Community,Yes,Tracking personal portfolio - interested in smart money insights
