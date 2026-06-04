@@ -1,0 +1,21 @@
+wallet_address,loss_reason,rug_or_peak_reference,underwater_percentage,total_loss_sol
+CkMqRrSsNxZj9tAbRpHxQxYbQm2XqLkR3U8S9T0V1W2,FOMO Peak Buyer,Peak at 0.0001 SOL before 90% dump,87%,-320
+DlNrSsStOyAk0uBcSqIyRyZcRn3YrMlS4V9T0U1W2X3,Rug Pull Victim,Token authority burned,100%,-450
+EmOsStTuPzBl1vCdTrJzSzAdSo4ZsNmT5W0U1V2X3Y4,Peak Entry Failed,Bought near ATH,82%,-280
+FnPtTuUvQaYq3wDeEsKaXcVx6XaYm1nU6X1V2W3Y4Z5,FOMO Buyer Wave,Market peak FOMO,75%,-190
+GoQuUvVwRbZr4xEfFtLbYdWy7YbZn2oV7Y2W3X4Z5A6,Bridge Transfer Loss,Lost in bridge migration,100%,-580
+HpRvVwWxScAs5yFgGuMcZeXz8ZcAo3pW8Z3X4Y5A6B7,Memecoin Crash,Memecoin -95% crash,93%,-340
+IqSwWxXyTdBt6zGhHvNdAfYa9AdBp4qX9A4Y5Z6B7C8,HODL Through Crash,Held through -99% dump,98%,-510
+JrTxXyYzUeCu7aHiIwOeAgZb0BeAq5rY0B5Z6A7C8D9,MEV Slippage Heavy,Multiple MEV attacks,68%,-220
+KsUyYzZaVfDv8bIjJxPfBhAc1CfBr6sZ1C6A7B8D9E0,Pump Graduation Mistake,Bought at graduation then crashed,72%,-260
+LtVzZaAbWgEw9cJkKyQgCiBd2DgCs7tA2D7B8C9E0F1,Random Alt Picker,No research entries,45%,-150
+MuWaAbBcXhFx0dKlLzRhDjCe3EhDt8uB3E8C9D0F1G2,Tax Loss Recorded,Deliberate strategic loss,25%,-80
+NvXbBcCdYiGy1eLmMaRiEkDf4FiEu9vC4F9D0E1G2H3,Gambling Mentality,Random entries,60%,-280
+OwYcCdDeZjHz2fMnNbSjFlEg5GjFv0wD5G0E1F2H3I4,Airdrop Value Loss,Airdropped token crashed 95%,91%,-170
+PxZdDeEfAkIa3gNoOcTkGmFh6HkGw1xE6H1F2G3I4J5,Shitcoin Collector,Holds 50+ failed tokens,88%,-420
+QyAeEfFgBlJb4hOpPdUlHnGi7IlHx2yF7I2G3H4J5K6,Copy Cat Trader,Copies already-moved trades,76%,-310
+RzBfFgGhCmKc5iPqQeVmIoHj8JmIy3zG8J3H4I5K6L7,Discord Promoter Bag,Bought promoted tokens that dumped,84%,-380
+SaCgGhHiDnLd6jQrRfWnJpIk9KnJz4aH9K4I5J6L7M8,News Chaser,Always late to news,71%,-240
+TbDhHiIjEoMe7kRsSgXoKqJl0LoKa5bI0L5J6K7M8N9,Revenge Trading Loss,Revenge trades after losses,55%,-165
+UcEiIjJkFpNf8lStThYpLrKm1MpLb6cJ1M6K7L8N9O0,Lottery Ticket Mentality,Yolo bets on low caps,92%,-640
+VdFjJkKlGqOg9mTuUiZqMsLn2NqMc7dK2N7L8M9O0P1,Leverage Liquidation,Leveraged trades got liquidated,100%,-750
