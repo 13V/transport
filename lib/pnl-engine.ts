@@ -226,7 +226,7 @@ export class AMMSwapCalculator {
    * @param swap Swap instruction
    * @param inDecimals Token in decimals
    * @param outDecimals Token out decimals
-   * @returns Price per token
+   * @returns Price per token (amount out per amount in, normalized by decimals)
    */
   static calculateSwapPrice(
     swap: SwapInstruction,
@@ -235,10 +235,11 @@ export class AMMSwapCalculator {
   ): number {
     if (swap.amountIn === 0) throw new Error('Cannot calculate price with zero amount in');
 
-    // Normalize by decimals
+    // Normalize amounts by their decimals
     const normalizedAmountIn = swap.amountIn / Math.pow(10, inDecimals);
     const normalizedAmountOut = swap.amountOut / Math.pow(10, outDecimals);
 
+    // Price is: how many tokens out per token in
     return normalizedAmountOut / normalizedAmountIn;
   }
 
@@ -416,7 +417,16 @@ export class CostBasisTracker {
 export class TradeProcessor {
   private trades: Trade[] = [];
   private costTrackersByToken: Map<string, CostBasisTracker> = new Map();
-  private tokenPnLHistory: Map<string, { realizedGain: number; soldAmount: number }> = new Map();
+  private tokenPnLHistory: Map<
+    string,
+    {
+      realizedGain: number;
+      soldAmount: number;
+      costBasis: number;
+      saleProceeds: number;
+      trades: Trade[];
+    }
+  > = new Map();
 
   /**
    * Add a trade to the processor
@@ -447,6 +457,19 @@ export class TradeProcessor {
     this.costTrackersByToken.clear();
     this.tokenPnLHistory.clear();
 
+    // Initialize history for all tokens with trades
+    for (const trade of this.trades) {
+      if (!this.tokenPnLHistory.has(trade.tokenMint)) {
+        this.tokenPnLHistory.set(trade.tokenMint, {
+          realizedGain: 0,
+          soldAmount: 0,
+          costBasis: 0,
+          saleProceeds: 0,
+          trades: [],
+        });
+      }
+    }
+
     // Process each trade in chronological order
     for (const trade of this.trades) {
       if (!this.costTrackersByToken.has(trade.tokenMint)) {
@@ -454,22 +477,21 @@ export class TradeProcessor {
       }
 
       const tracker = this.costTrackersByToken.get(trade.tokenMint)!;
+      const history = this.tokenPnLHistory.get(trade.tokenMint)!;
+      history.trades.push(trade);
 
       if (trade.tradeType === 'BUY') {
         tracker.addBuy(trade.amount, trade.pricePerToken, trade.date, trade.txHash);
+        history.costBasis += trade.amount * trade.pricePerToken;
       } else {
         // SELL
         try {
           const resolvedLots = tracker.sellFIFO(trade.amount, trade.pricePerToken, trade.date);
-          const history = this.tokenPnLHistory.get(trade.tokenMint) || {
-            realizedGain: 0,
-            soldAmount: 0,
-          };
           for (const lot of resolvedLots) {
             history.realizedGain += lot.realizedGain;
             history.soldAmount += lot.soldAmount;
           }
-          this.tokenPnLHistory.set(trade.tokenMint, history);
+          history.saleProceeds += trade.amount * trade.pricePerToken;
         } catch (error) {
           // Insufficient holdings - skip or log error
           console.error(`Error selling ${trade.tokenMint}: ${error}`);

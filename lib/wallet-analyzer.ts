@@ -129,12 +129,15 @@ export class WalletAnalyzer {
 
     const tradeEvents: TradeEvent[] = [];
 
-    // Simple heuristic: alternate buys and sells, or detect based on direction
+    // Parse transactions: transfers TO wallet = buys, FROM wallet = sells
     for (let i = 0; i < txs.length; i++) {
       const tx = txs[i];
 
       if (tx.type === 'TRANSFER' && tx.amount && tx.amount > 0) {
-        const isSell = !tx.source?.includes(this.walletAddress) || i % 2 === 1;
+        // Determine if this is a buy or sell based on direction
+        // Transfer TO wallet (destination = wallet) = BUY (inflow)
+        // Transfer FROM wallet (source = wallet) = SELL (outflow)
+        const isSell = tx.source?.includes(this.walletAddress);
 
         tradeEvents.push({
           timestamp: tx.timestamp,
@@ -330,20 +333,24 @@ export class WalletAnalyzer {
       const buyTrade = this.trades[i];
       const sellTrade = this.trades[i + 1];
 
+      // Look for buy followed by sell
       if (!buyTrade.isSell && sellTrade.isSell) {
         totalTradePairs++;
 
-        // Good timing if they sold at >10% profit
-        const roi = (sellTrade.priceInSol - buyTrade.priceInSol) / buyTrade.priceInSol;
-        if (roi >= 0.1) {
-          goodTimingTrades++;
+        // Good timing if they sold at profit (price went up)
+        if (sellTrade.priceInSol > buyTrade.priceInSol) {
+          const roi = (sellTrade.priceInSol - buyTrade.priceInSol) / buyTrade.priceInSol;
+          // Good timing if ROI >= 10%, excellent if >= 20%
+          if (roi >= 0.1) {
+            goodTimingTrades++;
+          }
         }
       }
     }
 
     if (totalTradePairs === 0) return 50;
 
-    return (goodTimingTrades / totalTradePairs) * 100;
+    return Math.min(100, (goodTimingTrades / totalTradePairs) * 100);
   }
 
   /**
