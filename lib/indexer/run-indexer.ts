@@ -24,12 +24,32 @@ export interface IndexerResult {
   walletsUpdated: number;
   elapsedMs: number;
   error?: string;
+  debug?: Record<string, unknown>;
 }
 
 export interface IndexerOptions {
   maxTokens?: number;
   swapsPerToken?: number;
   timeBudgetMs?: number;
+}
+
+/** Snapshot of which relevant env vars the runtime actually sees (no secrets). */
+function envReport(): Record<string, unknown> {
+  const names = [
+    'SUPABASE_URL',
+    'SUPABASE_SERVICE_ROLE_KEY',
+    'HELIUS_API_KEY',
+  ];
+  const report: Record<string, unknown> = {};
+  for (const n of names) {
+    const v = process.env[n];
+    report[n] = { present: Boolean(v), length: (v ?? '').length };
+  }
+  // Surface any close-but-wrong names that got set by mistake.
+  report.relatedKeys = Object.keys(process.env).filter(
+    (k) => k.includes('HELIUS') || k.includes('SUPABASE')
+  );
+  return report;
 }
 
 export async function runIndexer(opts: IndexerOptions = {}): Promise<IndexerResult> {
@@ -46,6 +66,7 @@ export async function runIndexer(opts: IndexerOptions = {}): Promise<IndexerResu
       walletsUpdated: 0,
       elapsedMs: Date.now() - start,
       error: 'Supabase not configured (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing)',
+      debug: envReport(),
     };
   }
   if (!process.env.HELIUS_API_KEY) {
@@ -56,6 +77,7 @@ export async function runIndexer(opts: IndexerOptions = {}): Promise<IndexerResu
       walletsUpdated: 0,
       elapsedMs: Date.now() - start,
       error: 'HELIUS_API_KEY missing — cannot fetch real swaps',
+      debug: envReport(),
     };
   }
 
