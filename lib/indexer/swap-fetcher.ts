@@ -21,8 +21,10 @@ import type { Trade } from '../pnl-engine';
 const LAMPORTS_PER_SOL = 1_000_000_000;
 
 function heliusBase(): string | null {
+  // Use the current Enhanced API host (api-mainnet.helius-rpc.com). The legacy
+  // api.helius.xyz host rejects newer keys with 401 "Invalid API key".
   const key = process.env.HELIUS_API_KEY;
-  return key ? `https://api.helius.xyz/v0` : null;
+  return key ? `https://api-mainnet.helius-rpc.com/v0` : null;
 }
 
 interface RawTokenAmount {
@@ -153,6 +155,11 @@ export async function fetchWalletTradesForToken(
     txs = Array.isArray(data) ? data : [];
   } catch (err) {
     const status = (err as any)?.response?.status;
+    // An auth failure affects every token — surface it instead of pretending
+    // the token simply had no swaps (which masks the real problem).
+    if (status === 401 || status === 403) {
+      throw new Error(`Helius auth failed (status ${status}) — check HELIUS_API_KEY`);
+    }
     console.error(`[SWAPS] Failed for ${mint} (status ${status}):`, (err as Error).message);
     return [];
   }

@@ -73,7 +73,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'no mint to probe (universe empty)' }, { status: 500 });
   }
 
-  const base = `https://api.helius.xyz/v0/addresses/${mint}/transactions`;
+  const base = `https://api-mainnet.helius-rpc.com/v0/addresses/${mint}/transactions`;
 
   // Query 1: with the type=SWAP filter (what the indexer uses).
   const withFilter = await probe(base, { 'api-key': key, type: 'SWAP', limit: 100 });
