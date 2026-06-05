@@ -86,6 +86,7 @@ export async function runIndexer(opts: IndexerOptions = {}): Promise<IndexerResu
   const touchedWallets = new Set<string>();
   let tradesIngested = 0;
   let tokensScanned = 0;
+  const bySource: Record<string, number> = {};
 
   for (const token of tokens) {
     if (Date.now() - start > timeBudgetMs * 0.7) break;
@@ -93,6 +94,10 @@ export async function runIndexer(opts: IndexerOptions = {}): Promise<IndexerResu
 
     const walletTrades = await fetchWalletTradesForToken(token.mint, swapsPerToken);
     if (walletTrades.length === 0) continue;
+
+    for (const { trade } of walletTrades) {
+      bySource[trade.source] = (bySource[trade.source] ?? 0) + 1;
+    }
 
     const rows = walletTrades.map(({ wallet, trade }) => ({
       wallet,
@@ -194,5 +199,6 @@ export async function runIndexer(opts: IndexerOptions = {}): Promise<IndexerResu
     tradesIngested,
     walletsUpdated,
     elapsedMs: Date.now() - start,
+    debug: { bySource },
   };
 }

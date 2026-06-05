@@ -27,7 +27,9 @@ export interface UniverseToken {
 
 /**
  * Fetch a set of currently-active Solana token mints to scan.
- * Combines "top boosts" and "latest boosts" for a mix of established + fresh.
+ * Combines "top boosts" and "latest boosts" for a mix of established + fresh,
+ * then prioritizes pump.fun coins (mints ending in "pump") since they're the
+ * focus of the smart-money leaderboard.
  */
 export async function getTokenUniverse(limit = 30): Promise<UniverseToken[]> {
   const endpoints = [
@@ -48,12 +50,15 @@ export async function getTokenUniverse(limit = 30): Promise<UniverseToken[]> {
         if (!mint || seen.has(mint) || EXCLUDED_MINTS.has(mint)) continue;
         seen.add(mint);
         tokens.push({ mint });
-        if (tokens.length >= limit) return tokens;
       }
     } catch (err) {
       console.error(`[UNIVERSE] Failed to fetch ${url}:`, (err as Error).message);
     }
   }
 
-  return tokens;
+  // Pump.fun coins first, so the limited scan budget is spent where it matters.
+  const isPump = (m: string) => m.toLowerCase().endsWith('pump');
+  tokens.sort((a, b) => Number(isPump(b.mint)) - Number(isPump(a.mint)));
+
+  return tokens.slice(0, limit);
 }
