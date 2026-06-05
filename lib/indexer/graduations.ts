@@ -18,6 +18,17 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { fetchAllWalletTradesForToken } from './swap-fetcher';
 
 const DEXSCREENER_SEARCH = 'https://api.dexscreener.com/latest/dex/search';
+const DEXSCREENER_BOOSTS = [
+  'https://api.dexscreener.com/token-boosts/top/v1',
+  'https://api.dexscreener.com/token-boosts/latest/v1',
+];
+
+// Stablecoins / wrapped SOL — never full-scan these.
+const EXCLUDED = new Set<string>([
+  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+  'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB',
+  'So11111111111111111111111111111111111111112',
+]);
 
 export interface GraduatedCoin {
   mint: string;
@@ -25,37 +36,50 @@ export interface GraduatedCoin {
 }
 
 /**
- * Recently-active graduated coins: PumpSwap pairs on Solana from DexScreener.
- * pump.fun mints (ending "pump") are prioritized.
+ * Active Solana coins with real trader bases to fully ingest. Primary source is
+ * DexScreener's boosted/trending lists (the same reliable source the indexer
+ * uses); we also fold in a best-effort PumpSwap search. pump.fun mints first.
  */
-export async function getGraduatedCoins(limit = 30): Promise<GraduatedCoin[]> {
-  try {
-    const { data } = await axios.get(DEXSCREENER_SEARCH, {
-      params: { q: 'pumpswap' },
-      timeout: 12000,
-    });
-    const pairs: any[] = Array.isArray(data?.pairs) ? data.pairs : [];
-    const seen = new Set<string>();
-    const out: GraduatedCoin[] = [];
-    for (const p of pairs) {
-      if (p?.chainId !== 'solana') continue;
-      if (p?.dexId !== 'pumpswap') continue;
-      const mint: string | undefined = p?.baseToken?.address;
-      if (!mint || seen.has(mint)) continue;
-      seen.add(mint);
-      out.push({ mint, symbol: p?.baseToken?.symbol });
+export async function getGraduatedCoins(limit = 40): Promise<GraduatedCoin[]> {
+  const seen = new Set<string>();
+  const out: GraduatedCoin[] = [];
+
+  const add = (mint?: string, symbol?: string) => {
+    if (!mint || seen.has(mint) || EXCLUDED.has(mint)) return;
+    seen.add(mint);
+    out.push({ mint, symbol });
+  };
+
+  // 1. Boosted / trending Solana tokens — reliable, returns real active coins.
+  for (const url of DEXSCREENER_BOOSTS) {
+    try {
+      const { data } = await axios.get(url, { timeout: 10000 });
+      for (const it of Array.isArray(data) ? data : []) {
+        if (it?.chainId !== 'solana') continue;
+        add(it?.tokenAddress);
+      }
+    } catch (err) {
+      console.error('[GRAD] boosts fetch failed:', (err as Error).message);
     }
-    // pump.fun mints first.
-    out.sort(
-      (a, b) =>
-        Number(b.mint.toLowerCase().endsWith('pump')) -
-        Number(a.mint.toLowerCase().endsWith('pump'))
-    );
-    return out.slice(0, limit);
-  } catch (err) {
-    console.error('[GRAD] getGraduatedCoins failed:', (err as Error).message);
-    return [];
   }
+
+  // 2. Best-effort PumpSwap pairs from search (text match; may add a few).
+  try {
+    const { data } = await axios.get(DEXSCREENER_SEARCH, { params: { q: 'pumpswap' }, timeout: 10000 });
+    for (const p of Array.isArray(data?.pairs) ? data.pairs : []) {
+      if (p?.chainId !== 'solana' || p?.dexId !== 'pumpswap') continue;
+      add(p?.baseToken?.address, p?.baseToken?.symbol);
+    }
+  } catch {
+    /* search is optional */
+  }
+
+  // pump.fun mints first.
+  out.sort(
+    (a, b) =>
+      Number(b.mint.toLowerCase().endsWith('pump')) - Number(a.mint.toLowerCase().endsWith('pump'))
+  );
+  return out.slice(0, limit);
 }
 
 async function upsertInChunks(
