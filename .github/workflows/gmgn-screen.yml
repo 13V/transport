@@ -14,10 +14,13 @@ name: GMGN screen
 #      your machine (npm global, a release binary, go install, etc.). It is not
 #      in this repo, so CI cannot guess it.
 
+# Manual-only until gmgn-cli is available (e.g. on a VPS). Re-enable the
+# schedule below once the "Install gmgn-cli" step is filled in and secrets are
+# set, otherwise scheduled runs would fail on the placeholder install step.
 on:
-  schedule:
-    - cron: '20 */2 * * *' # every 2h, offset from the other jobs
   workflow_dispatch: {}
+  # schedule:
+  #   - cron: '20 */2 * * *' # every 2h, offset from the other jobs
 
 concurrency:
   group: gmgn-screen
