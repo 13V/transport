@@ -17,6 +17,60 @@ import { NextRequest, NextResponse } from 'next/server';
 import { HeliusDataFetcher } from '../../../lib/helius-data-fetcher';
 import { TradeProcessor } from '../../../lib/pnl-engine';
 import { WalletAnalyzer } from '../../../lib/wallet-analyzer';
+import { getSupabase, isSupabaseConfigured } from '../../../lib/supabase-client';
+
+/**
+ * Read the precomputed leaderboard straight from wallet_stats (fast, <100ms).
+ * This is the real, indexer-populated leaderboard. Returns null if the DB is
+ * not configured so the caller can fall back.
+ */
+async function readLeaderboardFromDb(
+  limit: number,
+  offset: number
+): Promise<LeaderboardResponse | null> {
+  if (!isSupabaseConfigured()) return null;
+
+  const supabase = getSupabase();
+
+  const { count } = await supabase
+    .from('wallet_stats')
+    .select('wallet', { count: 'exact', head: true });
+
+  const { data, error } = await supabase
+    .from('wallet_stats')
+    .select('wallet, score, realized_pnl, win_rate, consistency, tokens_traded, updated_at')
+    .order('score', { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  if (error) {
+    console.error('[LEADERBOARD] DB read failed:', error.message);
+    return null;
+  }
+
+  const rows = data ?? [];
+  const totalWallets = count ?? rows.length;
+
+  return {
+    leaderboard: rows.map((r: any, i: number) => ({
+      rank: offset + i + 1,
+      address: r.wallet,
+      score: Number(r.score),
+      pnl: Number(r.realized_pnl),
+      winRate: Number(r.win_rate),
+      consistency: Number(r.consistency),
+      tokensHeld: Number(r.tokens_traded),
+      updatedAt: r.updated_at,
+    })),
+    totalWallets,
+    pagination: {
+      offset,
+      limit,
+      hasMore: offset + limit < totalWallets,
+    },
+    lastUpdated: new Date().toISOString(),
+    cacheAge: 0,
+  };
+}
 
 // ============================================================================
 // TYPE DEFINITIONS
@@ -459,8 +513,30 @@ async function handleGetLeaderboard(
       });
     }
 
-    // Get leaderboard data (real blockchain data)
-    const fullLeaderboard = await generateRealLeaderboard(45);
+    // Read the real, indexer-populated leaderboard from the database (fast).
+    const dbLeaderboard = await readLeaderboardFromDb(limit, offset);
+    if (dbLeaderboard) {
+      if (offset === 0 && limit === 100) {
+        setLeaderboardCache(dbLeaderboard);
+      }
+      return NextResponse.json(dbLeaderboard, {
+        headers: {
+          'Cache-Control': 'public, max-age=60',
+          'X-Cache': 'MISS',
+          'X-Source': 'db',
+        },
+      });
+    }
+
+    // Fallback (DB not configured): return an empty leaderboard rather than
+    // running the slow, unreliable live pipeline.
+    const fullLeaderboard: LeaderboardResponse = {
+      leaderboard: [],
+      totalWallets: 0,
+      pagination: { offset, limit, hasMore: false },
+      lastUpdated: new Date().toISOString(),
+      cacheAge: 0,
+    };
 
     // Apply pagination
     const paginated: LeaderboardResponse = {
