@@ -1,0 +1,49 @@
+name: GMGN screen
+
+# Cheap pre-screen tier: runs gmgn-cli (which CANNOT run on Vercel) to fetch
+# GMGN's precomputed PnL for backlog wallets, then POSTs results to transport so
+# the expensive Helius deep-scan only verifies the promising ones.
+#
+# REQUIRED before this works:
+#   1. Repo secrets (Settings -> Secrets and variables -> Actions):
+#        GMGN_API_KEY   - key gmgn-cli uses
+#        CRON_SECRET    - only if transport has CRON_SECRET set
+#   2. Repo variable (or hardcode below):
+#        TRANSPORT_URL  - e.g. https://transport-topaz-eight.vercel.app
+#   3. Fill in the "Install gmgn-cli" step with however gmgn-cli is installed on
+#      your machine (npm global, a release binary, go install, etc.). It is not
+#      in this repo, so CI cannot guess it.
+
+on:
+  schedule:
+    - cron: '20 */2 * * *' # every 2h, offset from the other jobs
+  workflow_dispatch: {}
+
+concurrency:
+  group: gmgn-screen
+  cancel-in-progress: false
+
+jobs:
+  screen:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # TODO: replace with the real install for your gmgn-cli.
+      # Example (npm global):   npm i -g gmgn-cli
+      # Example (release binary): curl -L <url> -o gmgn-cli && chmod +x gmgn-cli && sudo mv gmgn-cli /usr/local/bin/
+      - name: Install gmgn-cli
+        run: |
+          echo "TODO: install gmgn-cli here" && exit 1
+
+      - name: Screen backlog via GMGN
+        env:
+          TRANSPORT_URL: ${{ vars.TRANSPORT_URL || 'https://transport-topaz-eight.vercel.app' }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
+          MAX_WALLETS: '200'
+        run: node scripts/gmgn-screen.mjs

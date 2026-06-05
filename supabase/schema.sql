@@ -56,6 +56,16 @@ alter table wallet_stats add column if not exists verified boolean not null defa
 alter table wallet_stats add column if not exists scored_at timestamptz;
 create index if not exists wallet_stats_verified_idx on wallet_stats (verified) where verified;
 
+-- Cheap GMGN pre-screen tier (written by an external gmgn-cli job via the ingest
+-- endpoint). screen_pass flags wallets worth the expensive Helius deep-scan, so
+-- we only verify the promising ones instead of every captured wallet.
+alter table wallet_stats add column if not exists screened_at timestamptz;
+alter table wallet_stats add column if not exists screen_pass boolean not null default false;
+alter table wallet_stats add column if not exists screen_profit_usd double precision;
+alter table wallet_stats add column if not exists screen_win_rate double precision;
+alter table wallet_stats add column if not exists screen_token_count integer;
+create index if not exists wallet_stats_screen_idx on wallet_stats (screen_pass) where screen_pass;
+
 -- Bookkeeping for the indexer (cursors, last run, etc.).
 create table if not exists indexer_state (
   key        text primary key,

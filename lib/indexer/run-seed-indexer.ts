@@ -51,6 +51,22 @@ export interface SeedIndexerOptions {
  */
 async function getCandidateWallets(supabase: SupabaseClient, limit: number): Promise<string[]> {
   const floor = Number(process.env.SCAN_MIN_TRADES ?? 0);
+
+  // Tier 1: wallets the cheap GMGN screen flagged as promising but not yet
+  // Helius-verified. Spending the expensive deep-scan here first is the whole
+  // point of the screen — verify likely winners, not every captured wallet.
+  const promising = await supabase
+    .from('wallet_stats')
+    .select('wallet, total_trades')
+    .eq('verified', false)
+    .eq('screen_pass', true)
+    .order('total_trades', { ascending: false })
+    .limit(limit);
+  if (!promising.error && promising.data && promising.data.length > 0) {
+    return promising.data.map((r: any) => r.wallet);
+  }
+
+  // Tier 2: general unverified backlog (most-active first).
   const backlog = await supabase
     .from('wallet_stats')
     .select('wallet, total_trades')
