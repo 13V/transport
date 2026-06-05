@@ -87,6 +87,8 @@ export async function runGraduationScan(
         mint: coin.mint,
         symbol: coin.symbol,
         pair: coin.pairAddress ?? null,
+        txns24h: coin.txns24h ?? null,
+        volumeUsd24h: coin.volumeUsd24h ?? null,
         trades: res.trades,
         wallets: res.wallets,
       });

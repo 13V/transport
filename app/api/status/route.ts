@@ -37,6 +37,14 @@ export async function GET() {
     .from('wallet_stats')
     .select('wallet', { count: 'exact', head: true });
 
+  // Definitive verified count — and whether the migration is even applied.
+  const vCount = await supabase
+    .from('wallet_stats')
+    .select('wallet', { count: 'exact', head: true })
+    .eq('verified', true);
+  const migrationApplied = !vCount.error;
+  const verifiedWallets = vCount.error ? 0 : vCount.count ?? 0;
+
   // Pull the top of the board to compute how many are "smart" and show a sample.
   const cols =
     'wallet, score, realized_pnl, win_rate, consistency, total_trades, tokens_traded, last_trade_at';
@@ -71,10 +79,14 @@ export async function GET() {
       generatedAt: new Date().toISOString(),
       lastIndexRun: state.last_run ?? null,
       lastRefineRun: state.last_seed_run ?? null,
+      migrationApplied,
+      ...(migrationApplied
+        ? {}
+        : { action: 'Run supabase/schema.sql in the Supabase SQL editor — the roi_pct/verified columns are missing, so nothing can be marked verified/smart.' }),
       totals: {
         walletsIndexed: totalWallets ?? 0,
         smartWallets: smart.length,
-        verifiedWallets: (rows ?? []).filter((r: any) => r.verified).length,
+        verifiedWallets,
       },
       criteria,
       topSmart: smart.slice(0, 10).map((r: any, i: number) => ({
