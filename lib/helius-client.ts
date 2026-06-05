@@ -6,19 +6,16 @@ let heliusApiKey: string | null = null;
 export function initHelius(): string {
   if (!heliusApiKey) {
     heliusApiKey = process.env.HELIUS_API_KEY || null;
-    // Optional - Helius key is not required if using public RPC
+    if (!heliusApiKey) {
+      throw new Error('HELIUS_API_KEY environment variable not set');
+    }
   }
-  return heliusApiKey || '';
+  return heliusApiKey;
 }
 
 function getHeliusUrl(): string {
   const key = initHelius();
-  // Use Solana public RPC as fallback (free, no auth required)
-  // This handles rate limiting better for free tier
-  if (key) {
-    return `https://mainnet.helius-rpc.com/?api-key=${key}`;
-  }
-  return 'https://api.mainnet-beta.solana.com';
+  return `https://mainnet.helius-rpc.com/?api-key=${key}`;
 }
 
 function getHeliusEnhancedUrl(): string {
