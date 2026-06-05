@@ -105,7 +105,7 @@ export async function GET(request: NextRequest) {
   const current = await probe(hosts.current, { 'api-key': key, type: 'SWAP', limit: 100 });
 
   return NextResponse.json({
-    buildMarker: 'dual-host-probe-v2',
+    buildMarker: 'raw-transfers-v3',
     mint,
     universeNote,
     keyLength: key.length,
