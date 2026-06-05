@@ -14,8 +14,9 @@ export function initHelius(): string {
 }
 
 function getHeliusUrl(): string {
-  const key = initHelius();
-  return `https://mainnet.helius-rpc.com/?api-key=${key}`;
+  // Use public Solana RPC (free, no auth required, no restrictions)
+  // Works for standard RPC methods needed for wallet analysis
+  return 'https://api.mainnet-beta.solana.com';
 }
 
 function getHeliusEnhancedUrl(): string {
