@@ -62,3 +62,16 @@ create table if not exists indexer_state (
   value      jsonb not null default '{}'::jsonb,
   updated_at timestamptz not null default now()
 );
+
+-- Coins we've fully ingested (every swap, every wallet). Tracks graduated
+-- pump.fun -> PumpSwap coins so the graduation scanner doesn't redo them.
+create table if not exists coins (
+  mint            text primary key,
+  symbol          text,
+  graduated       boolean not null default false,
+  full_scanned_at timestamptz,
+  trades_found    integer not null default 0,
+  wallets_found   integer not null default 0,
+  updated_at      timestamptz not null default now()
+);
+create index if not exists coins_scanned_idx on coins (full_scanned_at);

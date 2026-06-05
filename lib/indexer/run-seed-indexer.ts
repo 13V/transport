@@ -44,12 +44,26 @@ export interface SeedIndexerOptions {
 }
 
 /**
- * Self-source candidates from our OWN discovered wallets: the top-ranked
- * entries already in wallet_stats that have at least a couple of trades. These
- * get deep-scanned so their score reflects their full history, not just the
- * trades that happened to land on a token the token-first scan picked.
+ * Drain the analysis backlog: wallets we've captured (e.g. from graduated-coin
+ * ingestion) but not yet deep-scanned. These get full-history scored so their
+ * ROI is accurate, marked verified, and removed from the backlog. Most-active
+ * wallets first. Falls back to top-by-score if the verified column is absent.
  */
 async function getCandidateWallets(supabase: SupabaseClient, limit: number): Promise<string[]> {
+  const floor = Number(process.env.SCAN_MIN_TRADES ?? 0);
+  const backlog = await supabase
+    .from('wallet_stats')
+    .select('wallet, total_trades')
+    .eq('verified', false)
+    .gte('total_trades', floor)
+    .order('total_trades', { ascending: false })
+    .limit(limit);
+
+  if (!backlog.error && backlog.data && backlog.data.length > 0) {
+    return backlog.data.map((r: any) => r.wallet);
+  }
+
+  // Fallback (pre-migration, or backlog empty): top wallets by score.
   const { data, error } = await supabase
     .from('wallet_stats')
     .select('wallet, total_trades')
