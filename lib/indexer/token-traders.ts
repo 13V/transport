@@ -11,11 +11,13 @@
  */
 
 import { fetchAllWalletTradesForToken } from './swap-fetcher';
-import { TradeProcessor, type Trade } from '../pnl-engine';
+import type { Trade } from '../pnl-engine';
 
 export interface TokenTrader {
   wallet: string;
   realizedPnl: number; // SOL realized on this coin (cost-basis)
+  unrealizedPnl: number; // SOL paper PnL on tokens still held (marked at latest price)
+  totalPnl: number; // realized + unrealized
   roi: number; // realizedPnl / SOL spent buying (0..)
   solSpent: number; // total SOL paid across buys
   solReceived: number; // total SOL received across sells
@@ -32,10 +34,11 @@ export interface TokenTradersResult {
   mint: string;
   txScanned: number; // wallet-attributed swaps parsed
   traderCount: number;
+  markPrice: number; // SOL/token used to value remaining holdings (latest trade)
   traders: TokenTrader[];
 }
 
-function summarize(wallet: string, trades: Trade[], mint: string): TokenTrader {
+function summarize(wallet: string, trades: Trade[], mint: string, markPrice: number): TokenTrader {
   let solSpent = 0;
   let solReceived = 0;
   let buys = 0;
@@ -60,23 +63,29 @@ function summarize(wallet: string, trades: Trade[], mint: string): TokenTrader {
     if (!last || t.date > last) last = t.date;
   }
 
-  // Cost-basis realized PnL from the shared engine (handles partial sells).
-  const processor = new TradeProcessor();
-  processor.addTrades(trades);
-  const summary = processor.calculatePnL().byToken.get(mint);
-  const realizedPnl = summary ? summary.realizedPnL : solReceived - solSpent;
+  // Average-cost PnL: realized on tokens sold, plus unrealized on tokens still
+  // held marked at the coin's latest observed price. Self-consistent so that
+  // total = SOL out of sells + current bag value − SOL into buys.
+  const avgCost = tokensBought > 0 ? solSpent / tokensBought : 0;
+  const tokensRemaining = Math.max(0, tokensBought - tokensSold);
+  const realizedPnl = solReceived - tokensSold * avgCost;
+  const unrealizedPnl = tokensRemaining * (markPrice - avgCost);
+
+  const r4 = (n: number) => Math.round(n * 10000) / 10000;
 
   return {
     wallet,
-    realizedPnl: Math.round(realizedPnl * 10000) / 10000,
-    roi: solSpent > 0 ? Math.round((realizedPnl / solSpent) * 10000) / 10000 : 0,
-    solSpent: Math.round(solSpent * 10000) / 10000,
-    solReceived: Math.round(solReceived * 10000) / 10000,
+    realizedPnl: r4(realizedPnl),
+    unrealizedPnl: r4(unrealizedPnl),
+    totalPnl: r4(realizedPnl + unrealizedPnl),
+    roi: solSpent > 0 ? r4(realizedPnl / solSpent) : 0,
+    solSpent: r4(solSpent),
+    solReceived: r4(solReceived),
     buys,
     sells,
     tokensBought,
     tokensSold,
-    tokensRemaining: Math.max(0, tokensBought - tokensSold),
+    tokensRemaining,
     firstTradeAt: first ? first.toISOString() : null,
     lastTradeAt: last ? last.toISOString() : null,
   };
@@ -92,24 +101,34 @@ export async function analyzeTokenTraders(
 ): Promise<TokenTradersResult> {
   const walletTrades = await fetchAllWalletTradesForToken(mint, maxTxs);
 
+  // Mark price = the coin's most recently observed trade price, used to value
+  // tokens wallets are still holding.
+  let markPrice = 0;
+  let markAt = -Infinity;
   const byWallet = new Map<string, Trade[]>();
   for (const { wallet, trade } of walletTrades) {
     const list = byWallet.get(wallet);
     if (list) list.push(trade);
     else byWallet.set(wallet, [trade]);
+    const t = trade.date.getTime();
+    if (t > markAt) {
+      markAt = t;
+      markPrice = trade.pricePerToken;
+    }
   }
 
   const traders: TokenTrader[] = [];
   for (const [wallet, trades] of byWallet) {
-    traders.push(summarize(wallet, trades, mint));
+    traders.push(summarize(wallet, trades, mint, markPrice));
   }
 
-  traders.sort((a, b) => b.realizedPnl - a.realizedPnl);
+  traders.sort((a, b) => b.totalPnl - a.totalPnl);
 
   return {
     mint,
     txScanned: walletTrades.length,
     traderCount: traders.length,
+    markPrice,
     traders,
   };
 }

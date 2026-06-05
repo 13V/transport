@@ -8,10 +8,11 @@
  * inspectable: pick a coin → see who won.
  *
  * Query params:
- *   ?max=600      transactions to scan (default 600, max 2000)
- *   ?limit=100    traders to return (default 100)
- *   ?min_pnl=0    only return wallets with realized PnL >= this (SOL)
- *   ?winners=1    shorthand for min_pnl just above 0
+ *   ?max=600         transactions to scan (default 600, max 2000)
+ *   ?limit=100       traders to return (default 100)
+ *   ?sort=total      rank by total|realized PnL (default total)
+ *   ?min_pnl=0       only wallets with PnL (by the sort metric) >= this (SOL)
+ *   ?winners=1       shorthand for PnL just above 0
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -39,6 +40,9 @@ export async function GET(
   const { searchParams } = request.nextUrl;
   const max = Math.min(Math.max(parseInt(searchParams.get('max') || '600', 10) || 600, 100), 2000);
   const limit = Math.min(Math.max(parseInt(searchParams.get('limit') || '100', 10) || 100, 1), 500);
+  const sort = searchParams.get('sort') === 'realized' ? 'realized' : 'total';
+  const metric = (t: { totalPnl: number; realizedPnl: number }) =>
+    sort === 'realized' ? t.realizedPnl : t.totalPnl;
   const winners = searchParams.get('winners') === '1';
   const minPnl = winners
     ? 1e-9
@@ -46,13 +50,19 @@ export async function GET(
 
   try {
     const result = await analyzeTokenTraders(mint, max);
-    const filtered = result.traders.filter((t) => t.realizedPnl >= minPnl).slice(0, limit);
+    const ranked =
+      sort === 'realized'
+        ? [...result.traders].sort((a, b) => b.realizedPnl - a.realizedPnl)
+        : result.traders; // already total-sorted
+    const filtered = ranked.filter((t) => metric(t) >= minPnl).slice(0, limit);
 
     return NextResponse.json(
       {
         mint: result.mint,
         txScanned: result.txScanned,
         traderCount: result.traderCount,
+        markPrice: result.markPrice,
+        sort,
         returned: filtered.length,
         traders: filtered,
       },
