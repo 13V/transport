@@ -30,56 +30,85 @@ const EXCLUDED = new Set<string>([
   'So11111111111111111111111111111111111111112',
 ]);
 
+const DEXSCREENER_TOKENS = 'https://api.dexscreener.com/latest/dex/tokens';
+
 export interface GraduatedCoin {
   mint: string;
   symbol?: string;
+  txns24h?: number;
+  volumeUsd24h?: number;
 }
 
-/**
- * Active Solana coins with real trader bases to fully ingest. Primary source is
- * DexScreener's boosted/trending lists (the same reliable source the indexer
- * uses); we also fold in a best-effort PumpSwap search. pump.fun mints first.
- */
-export async function getGraduatedCoins(limit = 40): Promise<GraduatedCoin[]> {
+/** Collect a broad pool of candidate Solana mints from boosts + search. */
+async function getCandidateMints(): Promise<string[]> {
   const seen = new Set<string>();
-  const out: GraduatedCoin[] = [];
-
-  const add = (mint?: string, symbol?: string) => {
-    if (!mint || seen.has(mint) || EXCLUDED.has(mint)) return;
-    seen.add(mint);
-    out.push({ mint, symbol });
+  const add = (mint?: string) => {
+    if (mint && !seen.has(mint) && !EXCLUDED.has(mint)) seen.add(mint);
   };
 
-  // 1. Boosted / trending Solana tokens — reliable, returns real active coins.
   for (const url of DEXSCREENER_BOOSTS) {
     try {
       const { data } = await axios.get(url, { timeout: 10000 });
       for (const it of Array.isArray(data) ? data : []) {
-        if (it?.chainId !== 'solana') continue;
-        add(it?.tokenAddress);
+        if (it?.chainId === 'solana') add(it?.tokenAddress);
       }
     } catch (err) {
       console.error('[GRAD] boosts fetch failed:', (err as Error).message);
     }
   }
-
-  // 2. Best-effort PumpSwap pairs from search (text match; may add a few).
   try {
     const { data } = await axios.get(DEXSCREENER_SEARCH, { params: { q: 'pumpswap' }, timeout: 10000 });
     for (const p of Array.isArray(data?.pairs) ? data.pairs : []) {
-      if (p?.chainId !== 'solana' || p?.dexId !== 'pumpswap') continue;
-      add(p?.baseToken?.address, p?.baseToken?.symbol);
+      if (p?.chainId === 'solana') add(p?.baseToken?.address);
     }
   } catch {
-    /* search is optional */
+    /* optional */
+  }
+  return [...seen];
+}
+
+/**
+ * Active Solana coins with REAL trader bases, ranked by 24h trade count.
+ *
+ * Boosted lists alone surface tiny freshly-promoted coins (8-50 trades), which
+ * yield almost no wallets. So we pull a broad candidate pool, look up each
+ * coin's 24h activity via DexScreener's batched token endpoint, and return the
+ * busiest ones — those have the thousands of wallets worth ingesting.
+ */
+export async function getGraduatedCoins(limit = 12): Promise<GraduatedCoin[]> {
+  const minTxns = Number(process.env.GRAD_MIN_TXNS24H ?? 300);
+  const candidates = await getCandidateMints();
+  if (candidates.length === 0) return [];
+
+  const ranked = new Map<string, GraduatedCoin>();
+  for (let i = 0; i < candidates.length; i += 30) {
+    const chunk = candidates.slice(i, i + 30);
+    try {
+      const { data } = await axios.get(`${DEXSCREENER_TOKENS}/${chunk.join(',')}`, { timeout: 12000 });
+      for (const p of Array.isArray(data?.pairs) ? data.pairs : []) {
+        if (p?.chainId !== 'solana') continue;
+        const mint: string | undefined = p?.baseToken?.address;
+        if (!mint || EXCLUDED.has(mint)) continue;
+        const txns = Number(p?.txns?.h24?.buys ?? 0) + Number(p?.txns?.h24?.sells ?? 0);
+        const vol = Number(p?.volume?.h24 ?? 0);
+        const prev = ranked.get(mint);
+        // Keep the most-active pair per token.
+        if (!prev || txns > (prev.txns24h ?? 0)) {
+          ranked.set(mint, { mint, symbol: p?.baseToken?.symbol, txns24h: txns, volumeUsd24h: vol });
+        }
+      }
+    } catch (err) {
+      console.error('[GRAD] token activity lookup failed:', (err as Error).message);
+    }
   }
 
-  // pump.fun mints first.
-  out.sort(
-    (a, b) =>
-      Number(b.mint.toLowerCase().endsWith('pump')) - Number(a.mint.toLowerCase().endsWith('pump'))
-  );
-  return out.slice(0, limit);
+  // If the activity lookup failed entirely, fall back to raw candidates.
+  if (ranked.size === 0) return candidates.slice(0, limit).map((mint) => ({ mint }));
+
+  return [...ranked.values()]
+    .filter((c) => (c.txns24h ?? 0) >= minTxns)
+    .sort((a, b) => (b.txns24h ?? 0) - (a.txns24h ?? 0))
+    .slice(0, limit);
 }
 
 async function upsertInChunks(
