@@ -36,11 +36,24 @@ async function readLeaderboardFromDb(
     .from('wallet_stats')
     .select('wallet', { count: 'exact', head: true });
 
-  const { data, error } = await supabase
+  // Try selecting the seed flag; fall back to the base columns if the seed
+  // migration hasn't been applied yet (so the leaderboard never breaks).
+  const baseColumns = 'wallet, score, realized_pnl, win_rate, consistency, tokens_traded, updated_at';
+  const seededRead = await supabase
     .from('wallet_stats')
-    .select('wallet, score, realized_pnl, win_rate, consistency, tokens_traded, updated_at')
+    .select(`${baseColumns}, seeded`)
     .order('score', { ascending: false })
     .range(offset, offset + limit - 1);
+
+  // Fall back to the base columns if the seed migration hasn't been applied yet.
+  const { data, error }: { data: any[] | null; error: { message: string } | null } =
+    seededRead.error
+      ? await supabase
+          .from('wallet_stats')
+          .select(baseColumns)
+          .order('score', { ascending: false })
+          .range(offset, offset + limit - 1)
+      : seededRead;
 
   if (error) {
     console.error('[LEADERBOARD] DB read failed:', error.message);
@@ -60,6 +73,7 @@ async function readLeaderboardFromDb(
       consistency: Number(r.consistency),
       tokensHeld: Number(r.tokens_traded),
       updatedAt: r.updated_at,
+      seeded: Boolean(r.seeded),
     })),
     totalWallets,
     pagination: {
@@ -86,6 +100,7 @@ export interface LeaderboardResponse {
     consistency: number;
     tokensHeld: number;
     updatedAt: string; // ISO 8601
+    seeded?: boolean; // curated alpha wallet (seeded via the wallet-first indexer)
   }>;
   totalWallets: number;
   pagination: {

@@ -24,6 +24,7 @@ interface LeaderboardWallet {
   consistency: number;
   tokensHeld: number;
   updatedAt: string;
+  seeded?: boolean;
 }
 
 interface LeaderboardResponse {
@@ -368,6 +369,14 @@ export default function SmartMoneyLeaderboard() {
                       <code className="text-xs bg-gray-800 px-2 py-1 rounded text-gray-300 font-mono">
                         {wallet.address.slice(0, 8)}...{wallet.address.slice(-4)}
                       </code>
+                      {wallet.seeded && (
+                        <span
+                          className="inline-flex items-center gap-0.5 rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-400 ring-1 ring-amber-500/30"
+                          title="Curated alpha wallet — seeded from known profitable traders"
+                        >
+                          ⭐ Alpha
+                        </span>
+                      )}
                       <CopyButton text={wallet.address} label="wallet address" />
                     </div>
                   </td>

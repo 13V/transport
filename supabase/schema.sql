@@ -40,6 +40,13 @@ create table if not exists wallet_stats (
 
 create index if not exists wallet_stats_score_idx on wallet_stats (score desc);
 
+-- Seed/alpha labelling, populated by the wallet-first seed indexer
+-- (lib/indexer/run-seed-indexer.ts). `add column if not exists` keeps this safe
+-- to re-run on an existing wallet_stats table.
+alter table wallet_stats add column if not exists seeded boolean not null default false;
+alter table wallet_stats add column if not exists seed_source text;
+create index if not exists wallet_stats_seeded_idx on wallet_stats (seeded) where seeded;
+
 -- Bookkeeping for the indexer (cursors, last run, etc.).
 create table if not exists indexer_state (
   key        text primary key,

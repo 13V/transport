@@ -70,22 +70,25 @@ export interface WalletTrade {
   trade: Trade;
 }
 
-/**
- * Parse a single enhanced transaction into one trade for `mint`, attributed to
- * the fee payer. Returns null when the fee payer isn't a clean SOL-quoted taker
- * of `mint`.
- */
-export function parseTradeFromTx(tx: any, mint: string): WalletTrade | null {
-  const wallet: string | undefined = tx?.feePayer;
-  const sig: string = tx?.signature ?? '';
-  const ts: number = tx?.timestamp ?? 0;
-  if (!wallet || !sig) return null;
+/** A wallet's net balance movement within a single transaction. */
+interface WalletDeltas {
+  nativeLamports: number; // net native SOL change (lamports)
+  wsolDelta: number; // net wrapped-SOL change (ui units)
+  mintDeltas: Map<string, number>; // net change per non-WSOL mint (ui units)
+}
 
+/**
+ * Compute a wallet's net balance deltas in a transaction: native SOL, wrapped
+ * SOL, and every other mint it touched. This is the shared core behind both the
+ * token-first parser (which cares about one target mint) and the wallet-first
+ * parser (which discovers whatever mint the wallet swapped).
+ */
+function computeWalletDeltas(tx: any, wallet: string): WalletDeltas {
   const accountData: AccountData[] = Array.isArray(tx?.accountData) ? tx.accountData : [];
 
-  let tokenDelta = 0; // fee payer's net change in target mint (ui units)
-  let wsolDelta = 0; // fee payer's net change in wrapped SOL (ui units)
-  let nativeLamports = 0; // fee payer's net native SOL change (lamports)
+  let nativeLamports = 0;
+  let wsolDelta = 0;
+  const mintDeltas = new Map<string, number>();
 
   for (const ad of accountData) {
     if (ad?.account === wallet && typeof ad?.nativeBalanceChange === 'number') {
@@ -94,14 +97,27 @@ export function parseTradeFromTx(tx: any, mint: string): WalletTrade | null {
     for (const tbc of ad?.tokenBalanceChanges ?? []) {
       if (tbc?.userAccount !== wallet) continue;
       const ui = rawToUi(tbc?.rawTokenAmount);
-      if (tbc?.mint === mint) tokenDelta += ui;
-      else if (tbc?.mint === WSOL_MINT) wsolDelta += ui;
+      if (!ui || !tbc?.mint) continue;
+      if (tbc.mint === WSOL_MINT) wsolDelta += ui;
+      else mintDeltas.set(tbc.mint, (mintDeltas.get(tbc.mint) ?? 0) + ui);
     }
   }
 
-  if (tokenDelta === 0) return null; // fee payer isn't the taker of this mint
+  return { nativeLamports, wsolDelta, mintDeltas };
+}
 
-  const solDelta = nativeLamports / LAMPORTS_PER_SOL + wsolDelta;
+/**
+ * Build a SOL-quoted Trade from a single mint's net delta vs the wallet's net
+ * SOL delta. Returns null when the signs don't oppose (not a clean SOL-quoted
+ * swap) or the value is dust.
+ */
+function buildTrade(
+  mint: string,
+  tokenDelta: number,
+  solDelta: number,
+  tx: any
+): Trade | null {
+  if (tokenDelta === 0) return null;
 
   let tradeType: 'BUY' | 'SELL';
   let amount: number;
@@ -122,17 +138,56 @@ export function parseTradeFromTx(tx: any, mint: string): WalletTrade | null {
   if (solAmount < MIN_SOL_VALUE || amount <= 0) return null;
 
   return {
-    wallet,
-    trade: {
-      tokenMint: mint,
-      tradeType,
-      amount,
-      pricePerToken: solAmount / amount,
-      date: new Date(ts * 1000),
-      txHash: sig,
-      source: tx?.source ?? 'UNKNOWN',
-    },
+    tokenMint: mint,
+    tradeType,
+    amount,
+    pricePerToken: solAmount / amount,
+    date: new Date((tx?.timestamp ?? 0) * 1000),
+    txHash: tx?.signature ?? '',
+    source: tx?.source ?? 'UNKNOWN',
   };
+}
+
+/**
+ * Parse a single enhanced transaction into one trade for `mint`, attributed to
+ * the fee payer. Returns null when the fee payer isn't a clean SOL-quoted taker
+ * of `mint`.
+ */
+export function parseTradeFromTx(tx: any, mint: string): WalletTrade | null {
+  const wallet: string | undefined = tx?.feePayer;
+  const sig: string = tx?.signature ?? '';
+  if (!wallet || !sig) return null;
+
+  const { nativeLamports, wsolDelta, mintDeltas } = computeWalletDeltas(tx, wallet);
+  const tokenDelta = mintDeltas.get(mint) ?? 0;
+  if (tokenDelta === 0) return null; // fee payer isn't the taker of this mint
+
+  const solDelta = nativeLamports / LAMPORTS_PER_SOL + wsolDelta;
+  const trade = buildTrade(mint, tokenDelta, solDelta, tx);
+  return trade ? { wallet, trade } : null;
+}
+
+/**
+ * WALLET-FIRST parser. Given a transaction and a specific wallet, parse the
+ * wallet's own SOL-quoted swap(s) — discovering the traded mint from the
+ * wallet's balance changes rather than being told it up front.
+ *
+ * Only single-mint-vs-SOL swaps are emitted: when a tx moves exactly one
+ * non-WSOL mint for the wallet, the net SOL delta attributes cleanly to it.
+ * Token-to-token (multi-mint) txs can't be priced in SOL and are skipped — the
+ * same SOL-quoted assumption the token-first path makes.
+ */
+export function parseWalletTradesFromTx(tx: any, wallet: string): Trade[] {
+  const sig: string = tx?.signature ?? '';
+  if (!wallet || !sig) return [];
+
+  const { nativeLamports, wsolDelta, mintDeltas } = computeWalletDeltas(tx, wallet);
+  if (mintDeltas.size !== 1) return [];
+
+  const [mint, tokenDelta] = [...mintDeltas][0];
+  const solDelta = nativeLamports / LAMPORTS_PER_SOL + wsolDelta;
+  const trade = buildTrade(mint, tokenDelta, solDelta, tx);
+  return trade ? [trade] : [];
 }
 
 async function fetchSwapTxs(mint: string, limit: number): Promise<any[]> {
