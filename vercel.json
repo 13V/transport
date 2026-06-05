@@ -2,7 +2,7 @@
   "buildCommand": "npm run build",
   "framework": "nextjs",
   "crons": [
-    { "path": "/api/cron/index", "schedule": "0 */6 * * *" },
-    { "path": "/api/cron/seed-wallets", "schedule": "0 3,9,15,21 * * *" }
+    { "path": "/api/cron/index", "schedule": "0 0 * * *" },
+    { "path": "/api/cron/seed-wallets", "schedule": "0 12 * * *" }
   ]
 }
