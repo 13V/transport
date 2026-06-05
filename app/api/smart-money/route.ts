@@ -18,6 +18,7 @@ import { HeliusDataFetcher } from '../../../lib/helius-data-fetcher';
 import { TradeProcessor } from '../../../lib/pnl-engine';
 import { WalletAnalyzer } from '../../../lib/wallet-analyzer';
 import { getSupabase, isSupabaseConfigured } from '../../../lib/supabase-client';
+import { getSmartCriteria, isSmartWallet } from '../../../lib/indexer/curation';
 
 /**
  * Read the precomputed leaderboard straight from wallet_stats (fast, <100ms).
@@ -38,7 +39,8 @@ async function readLeaderboardFromDb(
 
   // Try selecting the seed flag; fall back to the base columns if the seed
   // migration hasn't been applied yet (so the leaderboard never breaks).
-  const baseColumns = 'wallet, score, realized_pnl, win_rate, consistency, tokens_traded, updated_at';
+  const baseColumns =
+    'wallet, score, realized_pnl, win_rate, consistency, total_trades, tokens_traded, last_trade_at, updated_at';
   const seededRead = await supabase
     .from('wallet_stats')
     .select(`${baseColumns}, seeded`)
@@ -62,6 +64,8 @@ async function readLeaderboardFromDb(
 
   const rows = data ?? [];
   const totalWallets = count ?? rows.length;
+  const criteria = getSmartCriteria();
+  const now = Date.now();
 
   return {
     leaderboard: rows.map((r: any, i: number) => ({
@@ -74,6 +78,19 @@ async function readLeaderboardFromDb(
       tokensHeld: Number(r.tokens_traded),
       updatedAt: r.updated_at,
       seeded: Boolean(r.seeded),
+      smart: isSmartWallet(
+        {
+          realizedPnl: Number(r.realized_pnl),
+          winRate: Number(r.win_rate),
+          totalTrades: Number(r.total_trades),
+          tokensTraded: Number(r.tokens_traded),
+          score: Number(r.score),
+          lastTradeAt: r.last_trade_at,
+          seeded: Boolean(r.seeded),
+        },
+        criteria,
+        now
+      ),
     })),
     totalWallets,
     pagination: {
@@ -100,7 +117,8 @@ export interface LeaderboardResponse {
     consistency: number;
     tokensHeld: number;
     updatedAt: string; // ISO 8601
-    seeded?: boolean; // curated alpha wallet (seeded via the wallet-first indexer)
+    seeded?: boolean; // manually-trusted wallet (SEED_WALLETS / committed list)
+    smart?: boolean; // clears the smart-money quality gate (curation.ts)
   }>;
   totalWallets: number;
   pagination: {

@@ -12,6 +12,7 @@ import {
   Check,
   ChevronLeft,
   ChevronRight,
+  Download,
 } from 'lucide-react';
 import CopyButton from './CopyButton';
 
@@ -25,6 +26,7 @@ interface LeaderboardWallet {
   tokensHeld: number;
   updatedAt: string;
   seeded?: boolean;
+  smart?: boolean;
 }
 
 interface LeaderboardResponse {
@@ -58,6 +60,23 @@ export default function SmartMoneyLeaderboard() {
   const [lastSearches, setLastSearches] = useState<string[]>([]);
   const [showSearchHistory, setShowSearchHistory] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [copiedList, setCopiedList] = useState(false);
+
+  // Copy the curated smart-wallet list (plain addresses) for pasting into a
+  // trading terminal watchlist or alert bot.
+  const copyWalletList = useCallback(async () => {
+    try {
+      const res = await fetch('/api/smart-money/list?format=addresses');
+      if (!res.ok) throw new Error('list fetch failed');
+      const text = await res.text();
+      await navigator.clipboard.writeText(text.trim());
+      setCopiedList(true);
+      setTimeout(() => setCopiedList(false), 2000);
+    } catch {
+      // Fall back to opening the downloadable list if clipboard is unavailable.
+      window.open('/api/smart-money/list?format=addresses', '_blank');
+    }
+  }, []);
 
   // Fetch leaderboard data
   const fetchLeaderboard = useCallback(async (offset = 0) => {
@@ -220,6 +239,24 @@ export default function SmartMoneyLeaderboard() {
             </span>
           )}
         </p>
+        <div className="flex flex-wrap items-center gap-2 pt-1">
+          <button
+            onClick={copyWalletList}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500/10 px-3 py-1.5 text-sm font-medium text-emerald-400 ring-1 ring-emerald-500/30 hover:bg-emerald-500/20 transition-colors"
+            title="Copy curated smart-wallet addresses to your clipboard"
+          >
+            {copiedList ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+            {copiedList ? 'Copied!' : 'Copy smart wallet list'}
+          </button>
+          <a
+            href="/api/smart-money/list?format=csv"
+            className="inline-flex items-center gap-1.5 rounded-lg bg-gray-800 px-3 py-1.5 text-sm font-medium text-gray-300 ring-1 ring-gray-700 hover:bg-gray-700 transition-colors"
+            title="Download the curated list as CSV (address + stats)"
+          >
+            <Download className="w-4 h-4" />
+            CSV
+          </a>
+        </div>
       </div>
 
       {/* Search Bar */}
@@ -369,12 +406,16 @@ export default function SmartMoneyLeaderboard() {
                       <code className="text-xs bg-gray-800 px-2 py-1 rounded text-gray-300 font-mono">
                         {wallet.address.slice(0, 8)}...{wallet.address.slice(-4)}
                       </code>
-                      {wallet.seeded && (
+                      {wallet.smart && (
                         <span
-                          className="inline-flex items-center gap-0.5 rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-400 ring-1 ring-amber-500/30"
-                          title="Curated alpha wallet — seeded from known profitable traders"
+                          className="inline-flex items-center gap-0.5 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-400 ring-1 ring-emerald-500/30"
+                          title={
+                            wallet.seeded
+                              ? 'Manually-trusted smart wallet'
+                              : 'Clears the smart-money quality gate'
+                          }
                         >
-                          ⭐ Alpha
+                          {wallet.seeded ? '⭐ Smart' : 'Smart'}
                         </span>
                       )}
                       <CopyButton text={wallet.address} label="wallet address" />

@@ -27,6 +27,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 
 export interface SeedIndexerResult {
   ok: boolean;
+  mode: 'configured' | 'auto-candidates';
   seedWallets: number;
   walletsProcessed: number;
   tradesIngested: number;
@@ -40,6 +41,26 @@ export interface SeedIndexerOptions {
   maxWallets?: number;
   maxTxsPerWallet?: number;
   timeBudgetMs?: number;
+}
+
+/**
+ * Self-source candidates from our OWN discovered wallets: the top-ranked
+ * entries already in wallet_stats that have at least a couple of trades. These
+ * get deep-scanned so their score reflects their full history, not just the
+ * trades that happened to land on a token the token-first scan picked.
+ */
+async function getCandidateWallets(supabase: SupabaseClient, limit: number): Promise<string[]> {
+  const { data, error } = await supabase
+    .from('wallet_stats')
+    .select('wallet, total_trades')
+    .gte('total_trades', 2)
+    .order('score', { ascending: false })
+    .limit(limit);
+  if (error || !data) {
+    console.error('[SEED] candidate fetch failed:', error?.message);
+    return [];
+  }
+  return data.map((r: any) => r.wallet);
 }
 
 /**
@@ -75,6 +96,7 @@ export async function runSeedIndexer(opts: SeedIndexerOptions = {}): Promise<See
   const timeBudgetMs = opts.timeBudgetMs ?? 50_000;
 
   const base = {
+    mode: 'configured' as const,
     seedWallets: 0,
     walletsProcessed: 0,
     tradesIngested: 0,
@@ -98,19 +120,31 @@ export async function runSeedIndexer(opts: SeedIndexerOptions = {}): Promise<See
     };
   }
 
-  const seedWallets = getSeedWallets();
-  if (seedWallets.length === 0) {
+  const supabase = getSupabase();
+
+  // Source wallets to deep-scan. Manually-configured wallets (SEED_WALLETS / the
+  // committed list) take priority and are flagged `seeded`. With none configured
+  // we refine our OWN top-discovered wallets instead.
+  const configured = getSeedWallets();
+  const mode: 'configured' | 'auto-candidates' =
+    configured.length > 0 ? 'configured' : 'auto-candidates';
+  const markSeeded = mode === 'configured';
+
+  const sourced =
+    mode === 'configured' ? configured : await getCandidateWallets(supabase, maxWallets);
+
+  if (sourced.length === 0) {
     return {
       ok: true,
       ...base,
+      mode,
       elapsedMs: Date.now() - start,
       error:
-        'No seed wallets configured — add addresses to lib/indexer/seed-wallet-list.ts or set SEED_WALLETS',
+        'Nothing to scan yet — no SEED_WALLETS configured and no wallets discovered by the token-first indexer',
     };
   }
 
-  const supabase = getSupabase();
-  const wallets = seedWallets.slice(0, maxWallets);
+  const wallets = sourced.slice(0, maxWallets);
 
   let walletsProcessed = 0;
   let tradesIngested = 0;
@@ -178,6 +212,9 @@ export async function runSeedIndexer(opts: SeedIndexerOptions = {}): Promise<See
 
     const stat = aggregateWallet(wallet, trades);
 
+    // Only manually-configured wallets get the `seeded` flag (a human vouched
+    // for them). Auto-sourced candidates are scored but left to the computed
+    // smart-money gate — don't bypass it by marking them seeded.
     const { error: upErr, degraded } = await upsertSeededStat(supabase, {
       wallet: stat.wallet,
       score: stat.score,
@@ -187,8 +224,7 @@ export async function runSeedIndexer(opts: SeedIndexerOptions = {}): Promise<See
       total_trades: stat.totalTrades,
       tokens_traded: stat.tokensTraded,
       last_trade_at: stat.lastTradeAt ? stat.lastTradeAt.toISOString() : null,
-      seeded: true,
-      seed_source: SEED_SOURCE,
+      ...(markSeeded ? { seeded: true, seed_source: SEED_SOURCE } : {}),
       updated_at: new Date().toISOString(),
     });
 
@@ -205,7 +241,8 @@ export async function runSeedIndexer(opts: SeedIndexerOptions = {}): Promise<See
       key: 'last_seed_run',
       value: {
         at: new Date().toISOString(),
-        seedWallets: seedWallets.length,
+        mode,
+        seedWallets: wallets.length,
         walletsProcessed,
         tradesIngested,
         walletsUpserted,
@@ -217,7 +254,8 @@ export async function runSeedIndexer(opts: SeedIndexerOptions = {}): Promise<See
 
   return {
     ok: true,
-    seedWallets: seedWallets.length,
+    mode,
+    seedWallets: wallets.length,
     walletsProcessed,
     tradesIngested,
     walletsUpserted,
