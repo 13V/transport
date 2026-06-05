@@ -63,12 +63,16 @@ function summarize(wallet: string, trades: Trade[], mint: string, markPrice: num
     if (!last || t.date > last) last = t.date;
   }
 
-  // Average-cost PnL: realized on tokens sold, plus unrealized on tokens still
-  // held marked at the coin's latest observed price. Self-consistent so that
-  // total = SOL out of sells + current bag value − SOL into buys.
+  // Average-cost PnL, but ONLY on quantity we actually observed a buy for.
+  // We're looking at a window of the coin's history, so a wallet may show a SELL
+  // whose matching BUY happened before the window. Counting that sell's full
+  // proceeds as profit (cost basis 0) would invent huge phantom winners — so we
+  // only score the matched buy/sold quantity and ignore unbacked sells.
   const avgCost = tokensBought > 0 ? solSpent / tokensBought : 0;
+  const avgSell = tokensSold > 0 ? solReceived / tokensSold : 0;
+  const matchedSold = Math.min(tokensSold, tokensBought); // sold qty we have cost for
   const tokensRemaining = Math.max(0, tokensBought - tokensSold);
-  const realizedPnl = solReceived - tokensSold * avgCost;
+  const realizedPnl = matchedSold * (avgSell - avgCost);
   const unrealizedPnl = tokensRemaining * (markPrice - avgCost);
 
   const r4 = (n: number) => Math.round(n * 10000) / 10000;

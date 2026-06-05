@@ -40,7 +40,7 @@ export interface DiscoverOptions {
 export async function discoverSmartWallets(opts: DiscoverOptions = {}): Promise<DiscoverResult> {
   const start = Date.now();
   const maxCoins = opts.maxCoins ?? 12;
-  const maxTxsPerCoin = opts.maxTxsPerCoin ?? 300;
+  const maxTxsPerCoin = opts.maxTxsPerCoin ?? 500;
   const timeBudgetMs = opts.timeBudgetMs ?? 50_000;
 
   const tokens = await getTokenUniverse(maxCoins);
