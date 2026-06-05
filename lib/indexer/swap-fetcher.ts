@@ -240,3 +240,64 @@ export async function fetchSwapsForToken(mint: string, limit = 100): Promise<Tra
   const wts = await fetchWalletTradesForToken(mint, limit);
   return wts.map((w) => w.trade);
 }
+
+/**
+ * Fetch a coin's FULL recent swap history (paginated), parsed into
+ * wallet-attributed trades. Use this to see *every* wallet that bought or sold
+ * a coin and rank them by realized PnL — the core smart-money discovery method.
+ *
+ * Paginates via the `before` signature cursor up to `maxTxs` transactions.
+ */
+export async function fetchAllWalletTradesForToken(
+  mint: string,
+  maxTxs = 600
+): Promise<WalletTrade[]> {
+  const base = heliusBase();
+  if (!base) {
+    console.warn('[SWAPS] HELIUS_API_KEY not set — cannot fetch real swaps');
+    return [];
+  }
+
+  const url = `${base}/addresses/${mint}/transactions`;
+  const out: WalletTrade[] = [];
+  let before: string | undefined;
+  let fetched = 0;
+
+  while (fetched < maxTxs) {
+    const limit = Math.min(100, maxTxs - fetched);
+
+    let txs: any[];
+    try {
+      const { data } = await axios.get(url, {
+        params: {
+          'api-key': process.env.HELIUS_API_KEY,
+          type: 'SWAP',
+          limit,
+          ...(before ? { before } : {}),
+        },
+        timeout: 20000,
+      });
+      txs = Array.isArray(data) ? data : [];
+    } catch (err) {
+      const status = (err as any)?.response?.status;
+      if (status === 401 || status === 403) {
+        throw new Error(`Helius auth failed (status ${status}) — check HELIUS_API_KEY`);
+      }
+      console.error(`[SWAPS] page failed for ${mint} (status ${status}):`, (err as Error).message);
+      break;
+    }
+
+    if (txs.length === 0) break;
+
+    for (const tx of txs) {
+      const wt = parseTradeFromTx(tx, mint);
+      if (wt) out.push(wt);
+    }
+
+    fetched += txs.length;
+    before = txs[txs.length - 1]?.signature;
+    if (!before || txs.length < limit) break; // last page
+  }
+
+  return out;
+}
