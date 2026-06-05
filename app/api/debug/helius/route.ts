@@ -73,29 +73,37 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'no mint to probe (universe empty)' }, { status: 500 });
   }
 
-  const base = `https://api-mainnet.helius-rpc.com/v0/addresses/${mint}/transactions`;
+  const path = `/v0/addresses/${mint}/transactions`;
+  const hosts = {
+    legacy: `https://api.helius.xyz${path}`,
+    current: `https://api-mainnet.helius-rpc.com${path}`,
+  };
 
-  // Query 1: with the type=SWAP filter (what the indexer uses).
-  const withFilter = await probe(base, { 'api-key': key, type: 'SWAP', limit: 100 });
-  // Query 2: no type filter, to see if ANY transactions reference this mint.
-  const noFilter = await probe(base, { 'api-key': key, limit: 100 });
+  // Probe BOTH hosts so we can tell a host problem from a bad-key problem.
+  const legacy = await probe(hosts.legacy, { 'api-key': key, type: 'SWAP', limit: 100 });
+  const current = await probe(hosts.current, { 'api-key': key, type: 'SWAP', limit: 100 });
 
   return NextResponse.json({
+    buildMarker: 'dual-host-probe-v2',
     mint,
     universeNote,
-    withSwapFilter: {
-      status: withFilter.status,
-      count: withFilter.count,
-      error: (withFilter as any).error,
-      body: (withFilter as any).body,
-      sampleSwaps: withFilter.txs.slice(0, 3).map(summarizeSwap),
+    keyLength: key.length,
+    keyTail: key.slice(-4),
+    legacyHost: {
+      url: hosts.legacy,
+      status: legacy.status,
+      count: legacy.count,
+      error: (legacy as any).error,
+      body: (legacy as any).body,
+      sampleSwaps: legacy.txs.slice(0, 2).map(summarizeSwap),
     },
-    noFilter: {
-      status: noFilter.status,
-      count: noFilter.count,
-      error: (noFilter as any).error,
-      body: (noFilter as any).body,
-      sampleTypes: noFilter.txs.slice(0, 5).map((t: any) => t?.type),
+    currentHost: {
+      url: hosts.current,
+      status: current.status,
+      count: current.count,
+      error: (current as any).error,
+      body: (current as any).body,
+      sampleSwaps: current.txs.slice(0, 2).map(summarizeSwap),
     },
   });
 }
