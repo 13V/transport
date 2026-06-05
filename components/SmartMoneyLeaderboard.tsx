@@ -29,6 +29,7 @@ interface LeaderboardWallet {
   smart?: boolean;
   roiPct?: number | null;
   verified?: boolean;
+  fundedBy?: string | null;
 }
 
 interface LeaderboardResponse {
@@ -419,6 +420,14 @@ export default function SmartMoneyLeaderboard() {
                           }
                         >
                           {wallet.seeded ? '⭐ Smart' : 'Smart'}
+                        </span>
+                      )}
+                      {wallet.fundedBy && (
+                        <span
+                          className="inline-flex items-center gap-0.5 rounded-full bg-purple-500/15 px-2 py-0.5 text-[10px] font-semibold text-purple-300 ring-1 ring-purple-500/30"
+                          title={`Funded with SOL by a smart wallet (${wallet.fundedBy.slice(0, 8)}…) — likely the same trader`}
+                        >
+                          🔗 Funded
                         </span>
                       )}
                       <CopyButton text={wallet.address} label="wallet address" />

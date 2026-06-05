@@ -1,0 +1,37 @@
+/**
+ * LINK TRACKING CRON ENDPOINT
+ *
+ * Follows SOL out of verified winners to discover the wallets they fund (likely
+ * the same trader's new wallets) and enqueues them for tracking forever.
+ *
+ *   GET /api/cron/track-links
+ *
+ * CRON_SECRET-protected when set.
+ */
+
+import { NextRequest, NextResponse } from 'next/server';
+import { runLinkTracking } from '../../../../lib/indexer/run-link-tracking';
+
+export const dynamic = 'force-dynamic';
+export const maxDuration = 60;
+
+export async function GET(request: NextRequest) {
+  const secret = process.env.CRON_SECRET;
+  if (secret) {
+    const auth = request.headers.get('authorization');
+    if (auth !== `Bearer ${secret}`) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+  }
+
+  try {
+    const result = await runLinkTracking();
+    return NextResponse.json(result, {
+      status: result.ok ? 200 : 500,
+      headers: { 'Cache-Control': 'no-store' },
+    });
+  } catch (error) {
+    console.error('[CRON] Link tracking crashed:', error);
+    return NextResponse.json({ ok: false, error: (error as Error).message }, { status: 500 });
+  }
+}

@@ -85,3 +85,23 @@ create table if not exists coins (
   updated_at      timestamptz not null default now()
 );
 create index if not exists coins_scanned_idx on coins (full_scanned_at);
+
+-- Funding graph: smart wallets that sent SOL to other wallets. A fresh wallet
+-- funded by known smart money is almost always the same trader on a new wallet,
+-- so we link them and track the recipient forever.
+create table if not exists wallet_links (
+  source     text not null,            -- the (smart) wallet that sent SOL
+  target     text not null,            -- the funded wallet
+  amount_sol double precision not null default 0,
+  transfers  integer not null default 0,
+  first_seen timestamptz,
+  last_seen  timestamptz,
+  updated_at timestamptz not null default now(),
+  primary key (source, target)
+);
+create index if not exists wallet_links_source_idx on wallet_links (source);
+create index if not exists wallet_links_target_idx on wallet_links (target);
+
+-- Quick pointer on a wallet to the smart wallet that funded it (full graph in
+-- wallet_links).
+alter table wallet_stats add column if not exists funded_by text;

@@ -43,7 +43,7 @@ async function readLeaderboardFromDb(
     'wallet, score, realized_pnl, win_rate, consistency, total_trades, tokens_traded, last_trade_at, updated_at';
   const extRead = await supabase
     .from('wallet_stats')
-    .select(`${baseColumns}, seeded, roi_pct, verified`)
+    .select(`${baseColumns}, seeded, roi_pct, verified, funded_by`)
     .order('score', { ascending: false })
     .range(offset, offset + limit - 1);
 
@@ -80,6 +80,7 @@ async function readLeaderboardFromDb(
       seeded: Boolean(r.seeded),
       roiPct: r.roi_pct == null ? null : Number(r.roi_pct),
       verified: Boolean(r.verified),
+      fundedBy: r.funded_by ?? null,
       smart: isSmartWallet(
         {
           realizedPnl: Number(r.realized_pnl),
@@ -123,6 +124,7 @@ export interface LeaderboardResponse {
     smart?: boolean; // clears the smart-money quality gate (curation.ts)
     roiPct?: number | null; // accurate all-time ROI% (verified wallets only)
     verified?: boolean; // deep-scanned: numbers are accurate all-time
+    fundedBy?: string | null; // smart wallet that funded this one (SOL transfer)
   }>;
   totalWallets: number;
   pagination: {

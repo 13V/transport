@@ -16,6 +16,7 @@ on:
     - cron: '30 */1 * * *' # hourly   -> drain deep-scan backlog (verify wallets)
     - cron: '15 */3 * * *' # every 3h -> capture graduated coins (every wallet)
     - cron: '45 */6 * * *' # every 6h -> chain discovery (follow proven winners)
+    - cron: '30 */6 * * *' # every 6h -> link tracking (follow SOL out of winners)
   workflow_dispatch: {} # manual "Run workflow" button (runs everything)
 
 concurrency:
@@ -68,4 +69,15 @@ jobs:
           curl -fsS --max-time 120 \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
             "$BASE_URL/api/cron/chain-discovery" | head -c 2000
+          echo
+
+  track-links:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '30 */6 * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Link tracking (follow SOL out of winners)
+        run: |
+          curl -fsS --max-time 120 \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "$BASE_URL/api/cron/track-links" | head -c 2000
           echo
