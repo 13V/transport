@@ -2,25 +2,37 @@ import axios from 'axios';
 import { PublicKey } from '@solana/web3.js';
 
 let heliusApiKey: string | null = null;
+let keyResolved = false;
 
-export function initHelius(): string {
-  if (!heliusApiKey) {
+/**
+ * Resolve the Helius API key from the environment.
+ * Returns null if not set — does NOT throw, so the app degrades
+ * gracefully to public RPC instead of crashing.
+ */
+export function initHelius(): string | null {
+  if (!keyResolved) {
     heliusApiKey = process.env.HELIUS_API_KEY || null;
+    keyResolved = true;
     if (!heliusApiKey) {
-      throw new Error('HELIUS_API_KEY environment variable not set');
+      console.warn(
+        '[HELIUS] HELIUS_API_KEY not set — falling back to public Solana RPC (slower, rate-limited).'
+      );
     }
   }
   return heliusApiKey;
 }
 
 function getHeliusUrl(): string {
-  // Use public Solana RPC (free, no auth required, no restrictions)
-  // Works for standard RPC methods needed for wallet analysis
+  const key = initHelius();
+  // Prefer the paid Helius RPC when a key is available (higher rate limits,
+  // more reliable). Fall back to public Solana RPC when no key is configured.
+  if (key) {
+    return `https://mainnet.helius-rpc.com/?api-key=${key}`;
+  }
   return 'https://api.mainnet-beta.solana.com';
 }
 
 function getHeliusEnhancedUrl(): string {
-  const key = initHelius();
   return `https://api-mainnet.helius-rpc.com/v0`;
 }
 
