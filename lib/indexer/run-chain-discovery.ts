@@ -13,6 +13,7 @@
 
 import { getSupabase, isSupabaseConfigured } from '../supabase-client';
 import { fullScanCoin } from './graduations';
+import { envInt } from './env';
 
 export interface ChainDiscoveryResult {
   ok: boolean;
@@ -38,12 +39,12 @@ export async function runChainDiscovery(
   opts: ChainDiscoveryOptions = {}
 ): Promise<ChainDiscoveryResult> {
   const start = Date.now();
-  const maxWinners = opts.maxWinners ?? 30;
-  const maxCoins = opts.maxCoins ?? 4;
+  const maxWinners = opts.maxWinners ?? envInt('CHAIN_MAX_WINNERS', 30);
+  const maxCoins = opts.maxCoins ?? envInt('CHAIN_MAX_COINS', 4);
   const lookbackDays = opts.lookbackDays ?? 14;
-  const maxTxsPerCoin = opts.maxTxsPerCoin ?? 3000;
+  const maxTxsPerCoin = opts.maxTxsPerCoin ?? envInt('CHAIN_MAX_TXS', 3000);
   const rescanAfterHours = opts.rescanAfterHours ?? 24;
-  const timeBudgetMs = opts.timeBudgetMs ?? 50_000;
+  const timeBudgetMs = opts.timeBudgetMs ?? envInt('CHAIN_TIME_BUDGET_MS', 50_000);
 
   const blank = (error?: string): ChainDiscoveryResult => ({
     ok: !error,

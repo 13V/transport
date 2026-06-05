@@ -15,6 +15,7 @@ import { getSupabase, isSupabaseConfigured } from '../supabase-client';
 import { getTokenUniverse } from './token-universe';
 import { fetchWalletTradesForToken } from './swap-fetcher';
 import { aggregateWallet } from './aggregator';
+import { envInt } from './env';
 import type { Trade } from '../pnl-engine';
 
 export interface IndexerResult {
@@ -54,9 +55,9 @@ function envReport(): Record<string, unknown> {
 
 export async function runIndexer(opts: IndexerOptions = {}): Promise<IndexerResult> {
   const start = Date.now();
-  const maxTokens = opts.maxTokens ?? 15;
-  const swapsPerToken = opts.swapsPerToken ?? 100;
-  const timeBudgetMs = opts.timeBudgetMs ?? 50_000;
+  const maxTokens = opts.maxTokens ?? envInt('INDEX_MAX_TOKENS', 15);
+  const swapsPerToken = opts.swapsPerToken ?? envInt('INDEX_SWAPS_PER_TOKEN', 100);
+  const timeBudgetMs = opts.timeBudgetMs ?? envInt('INDEX_TIME_BUDGET_MS', 50_000);
 
   if (!isSupabaseConfigured()) {
     return {

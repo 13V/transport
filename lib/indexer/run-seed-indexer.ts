@@ -22,6 +22,7 @@ import { getSupabase, isSupabaseConfigured } from '../supabase-client';
 import { getSeedWallets, SEED_SOURCE } from './seed-wallets';
 import { fetchWalletSwapHistory } from './wallet-history-fetcher';
 import { computeAccuratePnL } from './accurate-pnl';
+import { envInt } from './env';
 import type { Trade } from '../pnl-engine';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
@@ -143,9 +144,9 @@ function scoreFromAccurate(p: {
 
 export async function runSeedIndexer(opts: SeedIndexerOptions = {}): Promise<SeedIndexerResult> {
   const start = Date.now();
-  const maxWallets = opts.maxWallets ?? 30;
-  const maxTxsPerWallet = opts.maxTxsPerWallet ?? 500;
-  const timeBudgetMs = opts.timeBudgetMs ?? 50_000;
+  const maxWallets = opts.maxWallets ?? envInt('SEED_MAX_WALLETS', 30);
+  const maxTxsPerWallet = opts.maxTxsPerWallet ?? envInt('SEED_MAX_TXS', 500);
+  const timeBudgetMs = opts.timeBudgetMs ?? envInt('SEED_TIME_BUDGET_MS', 50_000);
 
   const base = {
     mode: 'configured' as const,

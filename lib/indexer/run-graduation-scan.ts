@@ -13,6 +13,7 @@
 
 import { getSupabase, isSupabaseConfigured } from '../supabase-client';
 import { getGraduatedCoins, fullScanCoin } from './graduations';
+import { envInt } from './env';
 
 export interface GraduationScanResult {
   ok: boolean;
@@ -36,10 +37,10 @@ export async function runGraduationScan(
   opts: GraduationScanOptions = {}
 ): Promise<GraduationScanResult> {
   const start = Date.now();
-  const maxCoins = opts.maxCoins ?? 3;
-  const maxTxsPerCoin = opts.maxTxsPerCoin ?? 3000;
+  const maxCoins = opts.maxCoins ?? envInt('GRAD_MAX_COINS', 3);
+  const maxTxsPerCoin = opts.maxTxsPerCoin ?? envInt('GRAD_MAX_TXS', 3000);
   const rescanAfterHours = opts.rescanAfterHours ?? 24;
-  const timeBudgetMs = opts.timeBudgetMs ?? 50_000;
+  const timeBudgetMs = opts.timeBudgetMs ?? envInt('GRAD_TIME_BUDGET_MS', 50_000);
 
   if (!isSupabaseConfigured()) {
     return blank(start, 'Supabase not configured');
