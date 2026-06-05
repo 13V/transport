@@ -47,6 +47,15 @@ alter table wallet_stats add column if not exists seeded boolean not null defaul
 alter table wallet_stats add column if not exists seed_source text;
 create index if not exists wallet_stats_seeded_idx on wallet_stats (seeded) where seeded;
 
+-- Accurate all-time figures, written ONLY by the wallet-first deep scan
+-- (full history -> FIFO engine). `verified` marks a wallet whose numbers are
+-- trustworthy "up X% all-time"; roi_pct is realized PnL / cost of sold quantity.
+alter table wallet_stats add column if not exists roi_pct double precision;
+alter table wallet_stats add column if not exists invested_sol double precision;
+alter table wallet_stats add column if not exists verified boolean not null default false;
+alter table wallet_stats add column if not exists scored_at timestamptz;
+create index if not exists wallet_stats_verified_idx on wallet_stats (verified) where verified;
+
 -- Bookkeeping for the indexer (cursors, last run, etc.).
 create table if not exists indexer_state (
   key        text primary key,

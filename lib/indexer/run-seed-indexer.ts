@@ -21,7 +21,7 @@
 import { getSupabase, isSupabaseConfigured } from '../supabase-client';
 import { getSeedWallets, SEED_SOURCE } from './seed-wallets';
 import { fetchWalletSwapHistory } from './wallet-history-fetcher';
-import { aggregateWallet } from './aggregator';
+import { computeAccuratePnL } from './accurate-pnl';
 import type { Trade } from '../pnl-engine';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
@@ -63,30 +63,52 @@ async function getCandidateWallets(supabase: SupabaseClient, limit: number): Pro
   return data.map((r: any) => r.wallet);
 }
 
-/**
- * Upsert a wallet's stats with the seeded flag. Falls back to an upsert without
- * the seed columns if they don't exist yet (i.e. the schema migration hasn't
- * been applied), so a half-migrated DB degrades instead of erroring out.
- */
-async function upsertSeededStat(
+// Columns added by later migrations. If the DB hasn't been migrated yet, an
+// upsert including them errors — so on a column error we retry with just the
+// base columns rather than dropping the wallet.
+const EXTENDED_COLUMNS = [
+  'seeded',
+  'seed_source',
+  'roi_pct',
+  'invested_sol',
+  'verified',
+  'scored_at',
+];
+
+async function upsertStat(
   supabase: SupabaseClient,
   row: Record<string, unknown>
 ): Promise<{ error: { message: string } | null; degraded: boolean }> {
   const { error } = await supabase.from('wallet_stats').upsert(row, { onConflict: 'wallet' });
   if (!error) return { error: null, degraded: false };
 
-  // Missing column → retry without the seed fields rather than dropping the wallet.
   const msg = error.message?.toLowerCase() ?? '';
-  if (msg.includes('seeded') || msg.includes('seed_source') || msg.includes('column')) {
-    const { seeded, seed_source, ...base } = row;
-    void seeded;
-    void seed_source;
+  if (msg.includes('column') || EXTENDED_COLUMNS.some((c) => msg.includes(c))) {
+    const base = { ...row };
+    for (const c of EXTENDED_COLUMNS) delete base[c];
     const { error: baseErr } = await supabase
       .from('wallet_stats')
       .upsert(base, { onConflict: 'wallet' });
     return { error: baseErr, degraded: !baseErr };
   }
   return { error, degraded: false };
+}
+
+/**
+ * Composite ranking score (0..100) from accurate all-time PnL.
+ * 40% realized PnL (10 SOL = full) + 30% win rate + 15% consistency
+ * + 15% activity (50 trades = full).
+ */
+function scoreFromAccurate(p: {
+  realizedPnlSol: number;
+  winRate: number;
+  consistency: number;
+  totalTrades: number;
+}): number {
+  const pnl = p.realizedPnlSol <= 0 ? 0 : Math.min(1, p.realizedPnlSol / 10);
+  const activity = p.totalTrades <= 0 ? 0 : Math.min(1, p.totalTrades / 50);
+  const score = 100 * (0.4 * pnl + 0.3 * p.winRate + 0.15 * p.consistency + 0.15 * activity);
+  return Math.round(score * 100) / 100;
 }
 
 export async function runSeedIndexer(opts: SeedIndexerOptions = {}): Promise<SeedIndexerResult> {
@@ -210,20 +232,27 @@ export async function runSeedIndexer(opts: SeedIndexerOptions = {}): Promise<See
 
     if (trades.length === 0) continue; // no SOL-quoted swaps to score
 
-    const stat = aggregateWallet(wallet, trades);
+    // Accurate all-time PnL/ROI from the wallet's full history (this is the
+    // trustworthy "up X% all-time" number). These wallets are marked verified.
+    const acc = computeAccuratePnL(trades);
+    const score = scoreFromAccurate(acc);
 
     // Only manually-configured wallets get the `seeded` flag (a human vouched
     // for them). Auto-sourced candidates are scored but left to the computed
     // smart-money gate — don't bypass it by marking them seeded.
-    const { error: upErr, degraded } = await upsertSeededStat(supabase, {
-      wallet: stat.wallet,
-      score: stat.score,
-      realized_pnl: stat.realizedPnl,
-      win_rate: stat.winRate,
-      consistency: stat.consistency,
-      total_trades: stat.totalTrades,
-      tokens_traded: stat.tokensTraded,
-      last_trade_at: stat.lastTradeAt ? stat.lastTradeAt.toISOString() : null,
+    const { error: upErr, degraded } = await upsertStat(supabase, {
+      wallet,
+      score,
+      realized_pnl: acc.realizedPnlSol,
+      roi_pct: acc.roiPct,
+      invested_sol: acc.investedSol,
+      win_rate: acc.winRate,
+      consistency: acc.consistency,
+      total_trades: acc.totalTrades,
+      tokens_traded: acc.tokensTraded,
+      last_trade_at: acc.lastTradeAt ? acc.lastTradeAt.toISOString() : null,
+      verified: true,
+      scored_at: new Date().toISOString(),
       ...(markSeeded ? { seeded: true, seed_source: SEED_SOURCE } : {}),
       updated_at: new Date().toISOString(),
     });

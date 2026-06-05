@@ -40,14 +40,14 @@ export async function GET() {
   // Pull the top of the board to compute how many are "smart" and show a sample.
   const cols =
     'wallet, score, realized_pnl, win_rate, consistency, total_trades, tokens_traded, last_trade_at';
-  const seededRead = await supabase
+  const extRead = await supabase
     .from('wallet_stats')
-    .select(`${cols}, seeded`)
+    .select(`${cols}, seeded, roi_pct, verified`)
     .order('score', { ascending: false })
     .limit(1000);
-  const { data: rows }: { data: any[] | null } = seededRead.error
+  const { data: rows }: { data: any[] | null } = extRead.error
     ? await supabase.from('wallet_stats').select(cols).order('score', { ascending: false }).limit(1000)
-    : seededRead;
+    : extRead;
 
   const smart = (rows ?? []).filter((r: any) =>
     isSmartWallet(
@@ -74,15 +74,17 @@ export async function GET() {
       totals: {
         walletsIndexed: totalWallets ?? 0,
         smartWallets: smart.length,
+        verifiedWallets: (rows ?? []).filter((r: any) => r.verified).length,
       },
       criteria,
       topSmart: smart.slice(0, 10).map((r: any, i: number) => ({
         rank: i + 1,
         address: r.wallet,
-        score: Number(r.score),
+        roiPct: r.roi_pct == null ? null : Number(r.roi_pct),
         pnlSol: Number(r.realized_pnl),
         winRate: Number(r.win_rate),
         trades: Number(r.total_trades),
+        verified: Boolean(r.verified),
         seeded: Boolean(r.seeded),
       })),
       links: {

@@ -27,6 +27,8 @@ interface LeaderboardWallet {
   updatedAt: string;
   seeded?: boolean;
   smart?: boolean;
+  roiPct?: number | null;
+  verified?: boolean;
 }
 
 interface LeaderboardResponse {
@@ -364,6 +366,7 @@ export default function SmartMoneyLeaderboard() {
               <th className="px-4 py-3 font-semibold">
                 <SortHeader field="score" label="Score" />
               </th>
+              <th className="px-4 py-3 font-semibold text-right">ROI (all-time)</th>
               <th className="px-4 py-3 font-semibold text-right">
                 <SortHeader field="pnl" label="PnL" />
               </th>
@@ -380,7 +383,7 @@ export default function SmartMoneyLeaderboard() {
           <tbody>
             {paginatedData.length === 0 ? (
               <tr>
-                <td colSpan={8} className="px-4 py-8 text-center text-gray-400">
+                <td colSpan={9} className="px-4 py-8 text-center text-gray-400">
                   {searchQuery
                     ? 'No wallets found matching your search'
                     : 'No data available'}
@@ -431,12 +434,24 @@ export default function SmartMoneyLeaderboard() {
                     </span>
                   </td>
                   <td className="px-4 py-3 text-right">
+                    {wallet.roiPct == null ? (
+                      <span className="text-gray-600" title="Not deep-scanned yet">—</span>
+                    ) : (
+                      <span
+                        className={`font-bold ${wallet.roiPct >= 0 ? 'text-green-400' : 'text-red-400'}`}
+                        title="Accurate all-time realized ROI"
+                      >
+                        {wallet.roiPct >= 0 ? '+' : ''}{wallet.roiPct.toFixed(1)}%
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-right">
                     <span
                       className={
                         wallet.pnl >= 0 ? 'text-green-400 font-semibold' : 'text-red-400'
                       }
                     >
-                      {wallet.pnl >= 0 ? '+' : ''}${(wallet.pnl / 1000).toFixed(1)}k
+                      {wallet.pnl >= 0 ? '+' : ''}{wallet.pnl.toFixed(2)} SOL
                     </span>
                   </td>
                   <td className="px-4 py-3 text-right font-semibold">

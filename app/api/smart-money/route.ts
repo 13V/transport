@@ -41,21 +41,21 @@ async function readLeaderboardFromDb(
   // migration hasn't been applied yet (so the leaderboard never breaks).
   const baseColumns =
     'wallet, score, realized_pnl, win_rate, consistency, total_trades, tokens_traded, last_trade_at, updated_at';
-  const seededRead = await supabase
+  const extRead = await supabase
     .from('wallet_stats')
-    .select(`${baseColumns}, seeded`)
+    .select(`${baseColumns}, seeded, roi_pct, verified`)
     .order('score', { ascending: false })
     .range(offset, offset + limit - 1);
 
-  // Fall back to the base columns if the seed migration hasn't been applied yet.
+  // Fall back to the base columns if the extended migration hasn't been applied.
   const { data, error }: { data: any[] | null; error: { message: string } | null } =
-    seededRead.error
+    extRead.error
       ? await supabase
           .from('wallet_stats')
           .select(baseColumns)
           .order('score', { ascending: false })
           .range(offset, offset + limit - 1)
-      : seededRead;
+      : extRead;
 
   if (error) {
     console.error('[LEADERBOARD] DB read failed:', error.message);
@@ -78,6 +78,8 @@ async function readLeaderboardFromDb(
       tokensHeld: Number(r.tokens_traded),
       updatedAt: r.updated_at,
       seeded: Boolean(r.seeded),
+      roiPct: r.roi_pct == null ? null : Number(r.roi_pct),
+      verified: Boolean(r.verified),
       smart: isSmartWallet(
         {
           realizedPnl: Number(r.realized_pnl),
@@ -119,6 +121,8 @@ export interface LeaderboardResponse {
     updatedAt: string; // ISO 8601
     seeded?: boolean; // manually-trusted wallet (SEED_WALLETS / committed list)
     smart?: boolean; // clears the smart-money quality gate (curation.ts)
+    roiPct?: number | null; // accurate all-time ROI% (verified wallets only)
+    verified?: boolean; // deep-scanned: numbers are accurate all-time
   }>;
   totalWallets: number;
   pagination: {

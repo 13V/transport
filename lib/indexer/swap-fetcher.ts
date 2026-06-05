@@ -103,6 +103,13 @@ function computeWalletDeltas(tx: any, wallet: string): WalletDeltas {
     }
   }
 
+  // The fee payer's native change includes the network + priority fee, which is
+  // gas, not trade economics. Add it back so a tiny swap isn't priced as if the
+  // fee were part of what was paid/received for the token.
+  if (tx?.feePayer === wallet && typeof tx?.fee === 'number') {
+    nativeLamports += tx.fee;
+  }
+
   return { nativeLamports, wsolDelta, mintDeltas };
 }
 

@@ -127,10 +127,22 @@ export async function runIndexer(opts: IndexerOptions = {}): Promise<IndexerResu
     for (const { wallet } of walletTrades) touchedWallets.add(wallet);
   }
 
+  // Wallets that have been accurately deep-scanned (verified) must not be
+  // overwritten with windowed token-first stats. Fetch them once and skip.
+  const verifiedWallets = new Set<string>();
+  {
+    const { data: vrows } = await supabase
+      .from('wallet_stats')
+      .select('wallet')
+      .eq('verified', true);
+    for (const r of vrows ?? []) verifiedWallets.add((r as any).wallet);
+  }
+
   // Recompute stats for each touched wallet from its FULL trade history in DB.
   let walletsUpdated = 0;
   for (const wallet of touchedWallets) {
     if (Date.now() - start > timeBudgetMs) break;
+    if (verifiedWallets.has(wallet)) continue; // accurate stats stand
 
     const { data, error } = await supabase
       .from('trades')
