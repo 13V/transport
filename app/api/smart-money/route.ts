@@ -83,10 +83,10 @@ async function readLeaderboardFromDb(
       smart: isSmartWallet(
         {
           realizedPnl: Number(r.realized_pnl),
+          roiPct: r.roi_pct == null ? null : Number(r.roi_pct),
           winRate: Number(r.win_rate),
           totalTrades: Number(r.total_trades),
           tokensTraded: Number(r.tokens_traded),
-          score: Number(r.score),
           lastTradeAt: r.last_trade_at,
           seeded: Boolean(r.seeded),
         },

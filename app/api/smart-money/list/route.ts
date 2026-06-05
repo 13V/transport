@@ -54,6 +54,9 @@ export async function GET(request: NextRequest) {
   // all-time ROI. Pass ?verified=0 to include token-first discoveries too.
   const verifiedOnly = searchParams.get('verified') !== '0';
   const sortByRoi = searchParams.get('sort') === 'roi';
+  // ?gate=0 returns the verified wallets WITHOUT the smart-money filter, so the
+  // raw ROI/PnL numbers can be inspected and the thresholds calibrated.
+  const applyGate = searchParams.get('gate') !== '0';
 
   const supabase = getSupabase();
 
@@ -90,13 +93,14 @@ export async function GET(request: NextRequest) {
       // When the accurate columns exist and verified-only is on, restrict to
       // deep-scanned wallets so the displayed ROI is trustworthy.
       if (verifiedOnly && hasVerifiedCol && !r.verified) return false;
+      if (!applyGate) return true;
       return isSmartWallet(
         {
           realizedPnl: Number(r.realized_pnl),
+          roiPct: r.roi_pct == null ? null : Number(r.roi_pct),
           winRate: Number(r.win_rate),
           totalTrades: Number(r.total_trades),
           tokensTraded: Number(r.tokens_traded),
-          score: Number(r.score),
           lastTradeAt: r.last_trade_at,
           seeded: Boolean(r.seeded),
         },
