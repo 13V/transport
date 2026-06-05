@@ -1,7 +1,4 @@
 {
   "buildCommand": "npm run build",
-  "outputDirectory": ".next",
-  "env": {
-    "HELIUS_API_KEY": "@helius_api_key"
-  }
+  "framework": "nextjs"
 }
