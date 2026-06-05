@@ -56,6 +56,27 @@ function summarizeSwap(tx: any) {
   };
 }
 
+/** Dump the transfer-level fields the new parser will rely on. */
+function rawTransfers(tx: any) {
+  return {
+    type: tx?.type,
+    source: tx?.source,
+    feePayer: tx?.feePayer,
+    signature: tx?.signature,
+    tokenTransfers: (tx?.tokenTransfers ?? []).map((t: any) => ({
+      fromUserAccount: t?.fromUserAccount,
+      toUserAccount: t?.toUserAccount,
+      mint: t?.mint,
+      tokenAmount: t?.tokenAmount,
+    })),
+    nativeTransfers: (tx?.nativeTransfers ?? []).map((n: any) => ({
+      fromUserAccount: n?.fromUserAccount,
+      toUserAccount: n?.toUserAccount,
+      amount: n?.amount,
+    })),
+  };
+}
+
 export async function GET(request: NextRequest) {
   const key = process.env.HELIUS_API_KEY;
   if (!key) {
@@ -104,6 +125,7 @@ export async function GET(request: NextRequest) {
       error: (current as any).error,
       body: (current as any).body,
       sampleSwaps: current.txs.slice(0, 2).map(summarizeSwap),
+      rawTransferSamples: current.txs.slice(0, 3).map(rawTransfers),
     },
   });
 }
