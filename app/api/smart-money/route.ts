@@ -43,7 +43,7 @@ async function readLeaderboardFromDb(
     'wallet, score, realized_pnl, win_rate, consistency, total_trades, tokens_traded, last_trade_at, updated_at';
   const extRead = await supabase
     .from('wallet_stats')
-    .select(`${baseColumns}, seeded, roi_pct, verified, funded_by`)
+    .select(`${baseColumns}, seeded, roi_pct, invested_sol, verified, funded_by`)
     .order('score', { ascending: false })
     .range(offset, offset + limit - 1);
 
@@ -85,6 +85,7 @@ async function readLeaderboardFromDb(
         {
           realizedPnl: Number(r.realized_pnl),
           roiPct: r.roi_pct == null ? null : Number(r.roi_pct),
+          investedSol: r.invested_sol == null ? null : Number(r.invested_sol),
           winRate: Number(r.win_rate),
           totalTrades: Number(r.total_trades),
           tokensTraded: Number(r.tokens_traded),

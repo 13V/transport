@@ -98,6 +98,7 @@ export async function GET(request: NextRequest) {
         {
           realizedPnl: Number(r.realized_pnl),
           roiPct: r.roi_pct == null ? null : Number(r.roi_pct),
+          investedSol: r.invested_sol == null ? null : Number(r.invested_sol),
           winRate: Number(r.win_rate),
           totalTrades: Number(r.total_trades),
           tokensTraded: Number(r.tokens_traded),

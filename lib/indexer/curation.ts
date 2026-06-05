@@ -18,6 +18,7 @@
 export interface SmartCriteria {
   minRoiPct: number; // all-time realized ROI floor (%); requires an accurate ROI
   minPnlSol: number; // realized PnL floor (SOL) — keeps out tiny-size noise
+  minInvestedSol: number; // min capital deployed, so ROI% is on real size (0 = off)
   minTrades: number;
   minTokens: number;
   maxWinRate: number; // upper cap to reject obvious stat-farmers (1 = disabled)
@@ -33,6 +34,7 @@ export function getSmartCriteria(): SmartCriteria {
   return {
     minRoiPct: num('SMART_MIN_ROI_PCT', 0), // profitable
     minPnlSol: num('SMART_MIN_PNL_SOL', 1),
+    minInvestedSol: num('SMART_MIN_INVESTED_SOL', 0), // off by default
     minTrades: num('SMART_MIN_TRADES', 10),
     minTokens: num('SMART_MIN_TOKENS', 3),
     maxWinRate: num('SMART_MAX_WIN_RATE', 1), // off by default
@@ -44,6 +46,7 @@ export function getSmartCriteria(): SmartCriteria {
 export interface CuratableStat {
   realizedPnl: number;
   roiPct?: number | null; // accurate all-time ROI%; null when not deep-scanned
+  investedSol?: number | null; // capital deployed (cost of sold quantity)
   winRate: number;
   totalTrades: number;
   tokensTraded: number;
@@ -67,6 +70,7 @@ export function isSmartWallet(
   // stats have no trustworthy ROI, so they don't qualify as "smart".
   if (s.roiPct == null || s.roiPct < criteria.minRoiPct) return false;
   if (!(s.realizedPnl >= criteria.minPnlSol)) return false;
+  if (criteria.minInvestedSol > 0 && !((s.investedSol ?? 0) >= criteria.minInvestedSol)) return false;
   if (criteria.maxWinRate < 1 && s.winRate > criteria.maxWinRate) return false;
   if (s.totalTrades < criteria.minTrades) return false;
   if (s.tokensTraded < criteria.minTokens) return false;

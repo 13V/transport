@@ -50,7 +50,7 @@ export async function GET() {
     'wallet, score, realized_pnl, win_rate, consistency, total_trades, tokens_traded, last_trade_at';
   const extRead = await supabase
     .from('wallet_stats')
-    .select(`${cols}, seeded, roi_pct, verified`)
+    .select(`${cols}, seeded, roi_pct, invested_sol, verified`)
     .order('score', { ascending: false })
     .limit(1000);
   const { data: rows }: { data: any[] | null } = extRead.error
@@ -62,6 +62,7 @@ export async function GET() {
       {
         realizedPnl: Number(r.realized_pnl),
         roiPct: r.roi_pct == null ? null : Number(r.roi_pct),
+        investedSol: r.invested_sol == null ? null : Number(r.invested_sol),
         winRate: Number(r.win_rate),
         totalTrades: Number(r.total_trades),
         tokensTraded: Number(r.tokens_traded),
