@@ -35,6 +35,7 @@ const DEXSCREENER_TOKENS = 'https://api.dexscreener.com/latest/dex/tokens';
 export interface GraduatedCoin {
   mint: string;
   symbol?: string;
+  pairAddress?: string; // AMM pool — scan THIS for every swap, not the mint
   txns24h?: number;
   volumeUsd24h?: number;
 }
@@ -92,9 +93,15 @@ export async function getGraduatedCoins(limit = 12): Promise<GraduatedCoin[]> {
         const txns = Number(p?.txns?.h24?.buys ?? 0) + Number(p?.txns?.h24?.sells ?? 0);
         const vol = Number(p?.volume?.h24 ?? 0);
         const prev = ranked.get(mint);
-        // Keep the most-active pair per token.
+        // Keep the most-active pair per token (its pool has the most swaps).
         if (!prev || txns > (prev.txns24h ?? 0)) {
-          ranked.set(mint, { mint, symbol: p?.baseToken?.symbol, txns24h: txns, volumeUsd24h: vol });
+          ranked.set(mint, {
+            mint,
+            symbol: p?.baseToken?.symbol,
+            pairAddress: p?.pairAddress,
+            txns24h: txns,
+            volumeUsd24h: vol,
+          });
         }
       }
     } catch (err) {
@@ -109,6 +116,26 @@ export async function getGraduatedCoins(limit = 12): Promise<GraduatedCoin[]> {
     .filter((c) => (c.txns24h ?? 0) >= minTxns)
     .sort((a, b) => (b.txns24h ?? 0) - (a.txns24h ?? 0))
     .slice(0, limit);
+}
+
+/** Resolve a mint's busiest Solana pool address (where the swaps live). */
+export async function resolvePairAddress(mint: string): Promise<string | undefined> {
+  try {
+    const { data } = await axios.get(`${DEXSCREENER_TOKENS}/${mint}`, { timeout: 10000 });
+    let best: string | undefined;
+    let bestTxns = -1;
+    for (const p of Array.isArray(data?.pairs) ? data.pairs : []) {
+      if (p?.chainId !== 'solana' || !p?.pairAddress) continue;
+      const txns = Number(p?.txns?.h24?.buys ?? 0) + Number(p?.txns?.h24?.sells ?? 0);
+      if (txns > bestTxns) {
+        bestTxns = txns;
+        best = p.pairAddress;
+      }
+    }
+    return best;
+  } catch {
+    return undefined;
+  }
 }
 
 async function upsertInChunks(
@@ -143,9 +170,12 @@ export async function fullScanCoin(
   supabase: SupabaseClient,
   mint: string,
   symbol: string | undefined,
-  maxTxs: number
+  maxTxs: number,
+  scanAddress?: string
 ): Promise<FullScanResult> {
-  const walletTrades = await fetchAllWalletTradesForToken(mint, maxTxs);
+  // Scan the AMM pool — that's where every swap lives. Resolve it if not given.
+  const pool = scanAddress || (await resolvePairAddress(mint));
+  const walletTrades = await fetchAllWalletTradesForToken(mint, maxTxs, pool);
 
   if (walletTrades.length === 0) {
     await supabase.from('coins').upsert(

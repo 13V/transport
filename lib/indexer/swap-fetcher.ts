@@ -253,11 +253,17 @@ export async function fetchSwapsForToken(mint: string, limit = 100): Promise<Tra
  * wallet-attributed trades. Use this to see *every* wallet that bought or sold
  * a coin and rank them by realized PnL — the core smart-money discovery method.
  *
+ * `scanAddress` is the address whose transactions we page through. Pass the AMM
+ * pool/pair address to capture EVERY swap (where the volume actually is) while
+ * still attributing each trade to `mint`. Defaults to the mint itself, which
+ * only surfaces a fraction of swaps.
+ *
  * Paginates via the `before` signature cursor up to `maxTxs` transactions.
  */
 export async function fetchAllWalletTradesForToken(
   mint: string,
-  maxTxs = 600
+  maxTxs = 600,
+  scanAddress?: string
 ): Promise<WalletTrade[]> {
   const base = heliusBase();
   if (!base) {
@@ -265,7 +271,7 @@ export async function fetchAllWalletTradesForToken(
     return [];
   }
 
-  const url = `${base}/addresses/${mint}/transactions`;
+  const url = `${base}/addresses/${scanAddress || mint}/transactions`;
   const out: WalletTrade[] = [];
   let before: string | undefined;
   let fetched = 0;

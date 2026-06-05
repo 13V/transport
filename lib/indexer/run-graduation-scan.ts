@@ -79,11 +79,17 @@ export async function runGraduationScan(
     if (Date.now() - start > timeBudgetMs) break;
 
     try {
-      const res = await fullScanCoin(supabase, coin.mint, coin.symbol, maxTxsPerCoin);
+      const res = await fullScanCoin(supabase, coin.mint, coin.symbol, maxTxsPerCoin, coin.pairAddress);
       coinsScanned += 1;
       tradesIngested += res.trades;
       walletsCaptured += res.wallets;
-      detail.push({ mint: coin.mint, symbol: coin.symbol, trades: res.trades, wallets: res.wallets });
+      detail.push({
+        mint: coin.mint,
+        symbol: coin.symbol,
+        pair: coin.pairAddress ?? null,
+        trades: res.trades,
+        wallets: res.wallets,
+      });
     } catch (err) {
       console.error(`[GRAD] full scan failed for ${coin.mint}:`, (err as Error).message);
     }

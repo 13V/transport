@@ -320,11 +320,12 @@ export async function runSeedIndexer(opts: SeedIndexerOptions = {}): Promise<See
     tradesIngested,
     walletsUpserted,
     elapsedMs: Date.now() - start,
-    debug: {
-      bySource,
-      ...(degradedUpserts > 0
-        ? { warning: `seed columns missing on wallet_stats (${degradedUpserts} wallets upserted without seeded flag) — run the schema migration` }
-        : {}),
-    },
+    ...(degradedUpserts > 0
+      ? {
+          error:
+            'MIGRATION MISSING: wallet_stats has no roi_pct/verified columns — run supabase/schema.sql. Wallets were saved WITHOUT accurate ROI, so they will not appear as verified/smart.',
+        }
+      : {}),
+    debug: { bySource, degradedUpserts },
   };
 }
