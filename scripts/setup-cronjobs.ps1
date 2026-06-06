@@ -56,5 +56,6 @@ foreach ($j in $jobs) {
     Write-Host "x fail   $($j.t): $($_.Exception.Message)" -ForegroundColor Red
     $failed++
   }
+  Start-Sleep -Seconds 5   # cron-job.org rate-limits rapid creates (429); pace them
 }
 Write-Host "`nDone. created=$created skipped=$skipped failed=$failed"
