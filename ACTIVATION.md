@@ -17,8 +17,12 @@ The paid bot SSE stream + tiers are built but inert until you:
 5. Publish the `/docs` "Real-time for bots" section to integrators.
 
 ## Supabase migrations (SQL editor — all idempotent)
-Run these (0004 already done): `0003_watchlist`, `0005_api_keys`, `0006_push_subscriptions`, `0007_alert_prefs`.
-(Combined one-paste block is in chat / each file under `supabase/migrations/`.)
+Run these (0004 already done): `0003_watchlist`, `0005_api_keys`, `0006_push_subscriptions`, `0007_alert_prefs`, `0008_live_bursts`.
+`0008_live_bursts` powers the burst outcome-proof (per-burst returns + the hit-rate header). Without it the proof header just shows "measuring outcomes…".
+(Each file under `supabase/migrations/`.)
+
+## Cron — new outcome jobs (re-run `scripts/setup-cronjobs.ps1`, it skips existing)
+Adds `persist-bursts` (2m), `measure-bursts` (5m), `daily-digest` (daily). Also retune the live `drain-shard-*` jobs to 5m via the snippet in `COST_NOTES.md`.
 
 ## Vercel env vars (then REDEPLOY — NEXT_PUBLIC_* bake in at build time)
 | Feature | Vars |
