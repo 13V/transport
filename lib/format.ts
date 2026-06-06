@@ -71,9 +71,12 @@ export function time(ms?: number | null): string {
   return new Date(ms).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
 }
 
+// Thresholds match the production tier system (lib/indexer/wallet-tags.ts:
+// TIER_S_MIN=70, TIER_A_MIN=50, TIER_B_MIN=30) so grades are consistent with
+// the leaderboard everywhere they're shown.
 export function tierFromScore(s?: number | null): 'S' | 'A' | 'B' | 'C' | null {
-  if (s == null) return null;
-  return s >= 78 ? 'S' : s >= 58 ? 'A' : s >= 38 ? 'B' : 'C';
+  if (s == null || !Number.isFinite(s)) return null;
+  return s >= 70 ? 'S' : s >= 50 ? 'A' : s >= 30 ? 'B' : 'C';
 }
 
 export const fmt = { short, num, compact, sol, solSigned, pct, ago, date, time, tierFromScore };

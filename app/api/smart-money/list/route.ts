@@ -16,6 +16,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabase, isSupabaseConfigured } from '../../../../lib/supabase-client';
 import { getSmartCriteria, isSmartWallet } from '../../../../lib/indexer/curation';
+import { tierFromScore } from '../../../../lib/format';
 
 export const dynamic = 'force-dynamic';
 
@@ -116,6 +117,7 @@ export async function GET(request: NextRequest) {
     .map((r: any) => ({
       address: r.wallet,
       score: Number(r.score),
+      tier: tierFromScore(Number(r.score)),
       pnl: Number(r.realized_pnl),
       roiPct: r.roi_pct == null ? null : Number(r.roi_pct),
       investedSol: r.invested_sol == null ? null : Number(r.invested_sol),

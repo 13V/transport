@@ -64,7 +64,9 @@ export async function POST(request: NextRequest): Promise<NextResponse<AnalysisR
       );
     }
 
-    mint = mint.trim().toUpperCase();
+    // NOTE: base58 is case-sensitive — do NOT uppercase a mint, it corrupts the
+    // address and makes every valid pubkey fail validation.
+    mint = mint.trim();
     if (mint.length > 100) {
       return NextResponse.json(
         { success: false, error: 'Mint address too long' },

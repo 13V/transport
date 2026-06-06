@@ -17,12 +17,15 @@ function iconFor(mint: string): string[] {
 
 interface SmartHolder {
   wallet: string;
+  tier: string | null;
   allTimeRoiPct: number | null;
   verified: boolean;
+  solBought: number;
   pnlOnThisCoin: number;
   tokensRemaining: number;
   buys: number;
   sells: number;
+  lastBuy: string | null;
 }
 
 interface SmartHoldersResponse {
@@ -146,9 +149,8 @@ export default function TokenSmartHolders({ mint }: TokenSmartHoldersProps) {
 
   const holders = data.smartHolders ?? [];
   const smartHolders = data.smartHolderCount ?? holders.length;
-  // No per-coin value field is surfaced by the API; sum realized PnL on this
-  // coin as the closest available "smart value" proxy, else fall back.
-  const totalValueSol = holders.reduce((a, h) => a + (h.pnlOnThisCoin || 0), 0);
+  // Total SOL these smart wallets put into the coin (conviction signal).
+  const totalSolIn = holders.reduce((a, h) => a + (h.solBought || 0), 0);
   // Average all-time ROI across the smart wallets holding this coin (real data).
   const roiVals = holders.map((h) => h.allTimeRoiPct).filter((v): v is number => v != null && Number.isFinite(v));
   const avgRoi = roiVals.length ? roiVals.reduce((a, v) => a + v, 0) / roiVals.length : null;
@@ -164,9 +166,9 @@ export default function TokenSmartHolders({ mint }: TokenSmartHoldersProps) {
           <div className="stat-foot"><span className="faint">verified wallets holding now</span></div>
         </div>
         <div className="stat">
-          <div className="stat-label"><span className="stat-ic pos"><Wallet size={15} /></span> Smart PnL held</div>
-          <div className="stat-val num">{f.sol(totalValueSol)}<span className="unit">SOL</span></div>
-          <div className="stat-foot"><span className="faint">realized on this coin</span></div>
+          <div className="stat-label"><span className="stat-ic pos"><Wallet size={15} /></span> Smart SOL in</div>
+          <div className="stat-val num">{f.sol(totalSolIn)}<span className="unit">SOL</span></div>
+          <div className="stat-foot"><span className="faint">bought by these wallets</span></div>
         </div>
         <div className="stat">
           <div className="stat-label"><span className="stat-ic"><TrendingUp size={15} /></span> Avg wallet ROI</div>
@@ -215,12 +217,12 @@ export default function TokenSmartHolders({ mint }: TokenSmartHoldersProps) {
                       onClick={() => router.push(`/smart-money/${h.wallet}`)}
                     >
                       <td><AddrChip address={h.wallet} /></td>
-                      <td className="c"><TierBadge tier={null} /></td>
+                      <td className="c"><TierBadge tier={h.tier} /></td>
                       <td className="r"><Roi value={h.allTimeRoiPct} /></td>
-                      <td className="r faint">—</td>
+                      <td className="r num">{f.sol(h.solBought)} <span className="faint" style={{ fontSize: 11 }}>SOL</span></td>
                       <td className="r"><Pnl value={h.pnlOnThisCoin} unit={false} /></td>
                       <td className="c"><span className={`badge ${pos.cls}`}>{pos.label}</span></td>
-                      <td className="r faint" style={{ fontSize: 12 }}>—</td>
+                      <td className="r faint" style={{ fontSize: 12 }}>{h.lastBuy ? f.ago(+new Date(h.lastBuy)) : '—'}</td>
                     </tr>
                   );
                 })}
