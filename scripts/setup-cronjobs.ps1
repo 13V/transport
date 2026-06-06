@@ -26,6 +26,7 @@ $jobs = @(
   @{ t="graduations-shard-1"; p="/api/cron/graduations?maxCoins=3&shard=1&shards=3";      m=(Every 3) },
   @{ t="graduations-shard-2"; p="/api/cron/graduations?maxCoins=3&shard=2&shards=3";      m=(Every 3) },
   @{ t="chain-discovery";     p="/api/cron/chain-discovery";                             m=@(0,30) },
+  @{ t="sync-webhook";        p="/api/cron/sync-webhook";                                m=@(0,30) },
   @{ t="track-links";         p="/api/cron/track-links";                                 m=@(0); h=@(0,6,12,18) },
   @{ t="alerts";              p="/api/cron/alerts";                                      m=(Every 5) },
   @{ t="growth-alert";        p="/api/cron/growth-alert";                                m=@(0) },
