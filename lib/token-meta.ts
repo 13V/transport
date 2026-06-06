@@ -14,11 +14,18 @@
 
 import axios from 'axios';
 
+export interface TokenLink {
+  kind: string; // website | twitter | telegram | discord | …
+  url: string;
+}
+
 export interface TokenMeta {
   symbol?: string;
   name?: string;
   icon?: string;       // best single candidate (icons[0]) — back-compat
   icons?: string[];    // ordered fallback chain
+  links?: TokenLink[]; // website / socials
+  description?: string;
 }
 
 interface CacheEntry {
@@ -60,7 +67,15 @@ function imageCandidates(raw?: string): string[] {
   return out;
 }
 
-interface Acc { symbol?: string; name?: string; cands: string[] }
+interface Acc { symbol?: string; name?: string; cands: string[]; links: TokenLink[]; description?: string }
+
+// Normalize a social/website entry to an absolute https URL, else skip.
+function normLink(url?: string): string | undefined {
+  if (!url || typeof url !== 'string') return undefined;
+  if (url.startsWith('http://')) return 'https://' + url.slice(7);
+  if (url.startsWith('https://')) return url;
+  return undefined;
+}
 
 function pairWeight(pair: any): number {
   const liq = Number(pair?.liquidity?.usd);
@@ -86,15 +101,25 @@ async function fetchDexScreener(mints: string[], acc: Map<string, Acc>): Promise
         bestWeight.set(addr, w);
 
         const base = pair.baseToken ?? {};
-        const entry: Acc = acc.get(addr) ?? { cands: [] };
+        const info = pair.info ?? {};
+        const entry: Acc = acc.get(addr) ?? { cands: [], links: [] };
         entry.symbol = base?.symbol || entry.symbol;
         entry.name = base?.name || entry.name;
         const cands: string[] = [];
-        if (typeof pair?.info?.imageUrl === 'string' && pair.info.imageUrl) cands.push(pair.info.imageUrl);
+        if (typeof info?.imageUrl === 'string' && info.imageUrl) cands.push(info.imageUrl);
         if (typeof base?.icon === 'string' && base.icon) cands.push(base.icon);
         // DexScreener's canonical token-image CDN (fast; exists for most tokens).
         cands.push(`https://dd.dexscreener.com/ds-data/tokens/solana/${addr}.png`);
         entry.cands = [...entry.cands, ...cands];
+        // Websites + socials (only present for tokens with a DexScreener profile).
+        for (const w of Array.isArray(info?.websites) ? info.websites : []) {
+          const url = normLink(w?.url);
+          if (url) entry.links.push({ kind: String(w?.label || 'website').toLowerCase(), url });
+        }
+        for (const s of Array.isArray(info?.socials) ? info.socials : []) {
+          const url = normLink(s?.url || s?.handle);
+          if (url) entry.links.push({ kind: String(s?.type || s?.platform || 'link').toLowerCase(), url });
+        }
         acc.set(addr, entry);
       }
     } catch {
@@ -121,9 +146,14 @@ async function fetchHelius(mints: string[], acc: Map<string, Acc>): Promise<void
         const content = a?.content ?? {};
         const md = content?.metadata ?? {};
         const file = Array.isArray(content?.files) ? content.files[0] : undefined;
-        const entry: Acc = acc.get(id) ?? { cands: [] };
+        const entry: Acc = acc.get(id) ?? { cands: [], links: [] };
         entry.symbol = entry.symbol || md?.symbol || undefined;
         entry.name = entry.name || md?.name || undefined;
+        if (!entry.description && typeof md?.description === 'string' && md.description.trim()) {
+          entry.description = md.description.trim();
+        }
+        const ext = normLink(content?.links?.external_url);
+        if (ext && !entry.links.some((l) => l.url === ext)) entry.links.push({ kind: 'website', url: ext });
         // pump.fun token image lives in the on-chain metadata (IPFS via Pinata).
         if (file?.cdn_uri) entry.cands.push(file.cdn_uri); // Helius-hosted CDN (fast)
         entry.cands.push(...imageCandidates(content?.links?.image));
@@ -138,7 +168,23 @@ async function fetchHelius(mints: string[], acc: Map<string, Acc>): Promise<void
 
 function finalize(entry: Acc): TokenMeta {
   const icons = Array.from(new Set(entry.cands.filter((c) => typeof c === 'string' && c))).slice(0, 6);
-  return { symbol: entry.symbol, name: entry.name, icon: icons[0], icons };
+  // De-dupe links by url, cap to a sensible number.
+  const seen = new Set<string>();
+  const links: TokenLink[] = [];
+  for (const l of entry.links) {
+    if (!l?.url || seen.has(l.url)) continue;
+    seen.add(l.url);
+    links.push(l);
+    if (links.length >= 6) break;
+  }
+  return {
+    symbol: entry.symbol,
+    name: entry.name,
+    icon: icons[0],
+    icons,
+    links: links.length ? links : undefined,
+    description: entry.description,
+  };
 }
 
 export async function getTokenMeta(mints: string[]): Promise<Map<string, TokenMeta>> {

@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { Sparkles, Users, Wallet, TrendingUp } from 'lucide-react';
+import { Sparkles, Users, Wallet, TrendingUp, Globe, Twitter, Send, MessageCircle, ExternalLink } from 'lucide-react';
 import * as f from '@/lib/format';
 import {
   TokenMark, TierBadge, Roi, Pnl, AddrChip, CopyIconButton,
@@ -28,11 +28,23 @@ interface SmartHolder {
   lastBuy: string | null;
 }
 
+interface TokenLink { kind: string; url: string }
 interface TokenInfo {
   symbol?: string;
   name?: string;
   icon?: string;
   icons?: string[];
+  links?: TokenLink[];
+  description?: string;
+}
+
+function LinkIcon({ kind }: { kind: string }) {
+  const k = kind.toLowerCase();
+  if (k.includes('twitter') || k === 'x') return <Twitter size={14} />;
+  if (k.includes('telegram')) return <Send size={14} />;
+  if (k.includes('discord')) return <MessageCircle size={14} />;
+  if (k.includes('web') || k.includes('site')) return <Globe size={14} />;
+  return <ExternalLink size={14} />;
 }
 
 interface SmartHoldersResponse {
@@ -59,6 +71,8 @@ function TitleCard({ mint, token, count }: { mint: string; token?: TokenInfo; co
   const ticker = token?.symbol || f.short(mint, 4, 4);
   const name = token?.name;
   const icons = token?.icons?.length ? token.icons : iconFor(mint);
+  const links = token?.links ?? [];
+  const description = token?.description;
   return (
     <div className="card card-pad">
       <div className="row gap-16 wrap">
@@ -68,9 +82,22 @@ function TitleCard({ mint, token, count }: { mint: string; token?: TokenInfo; co
             <h1 style={{ margin: 0, fontSize: 22 }}>{ticker}</h1>
             {name && <span className="muted" style={{ fontSize: 14 }}>{name}</span>}
           </div>
-          <span className="row gap-8">
+          <span className="row gap-8 wrap">
             <code className="mono faint" style={{ fontSize: 12 }}>{f.short(mint, 8, 8)}</code>
             <CopyIconButton text={mint} title="Copy mint" />
+            {links.map((l) => (
+              <a
+                key={l.url}
+                className="iconbtn"
+                href={l.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={l.kind}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <LinkIcon kind={l.kind} />
+              </a>
+            ))}
           </span>
         </div>
         <span className="spacer" />
@@ -80,6 +107,11 @@ function TitleCard({ mint, token, count }: { mint: string; token?: TokenInfo; co
           </span>
         )}
       </div>
+      {description && (
+        <p className="faint" style={{ margin: '12px 0 0', fontSize: 13, lineHeight: 1.55, maxWidth: '80ch' }}>
+          {description}
+        </p>
+      )}
     </div>
   );
 }
