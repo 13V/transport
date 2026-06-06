@@ -13,6 +13,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { measureBursts } from '../../../../lib/indexer/burst-outcomes';
+import { postResults } from '../../../../lib/alerts/calls';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60; // Vercel Hobby caps functions at 60s
@@ -28,8 +29,19 @@ export async function GET(request: NextRequest) {
 
   try {
     const result = await measureBursts();
+
+    // PUBLIC PROOF FLYWHEEL: auto-post any newly-measured NOTABLE outcomes.
+    // Fully env-gated + resilient; wrapped so posting can never fail the cron.
+    let postedResults = 0;
+    try {
+      const r = await postResults();
+      postedResults = r.posted;
+    } catch (postErr) {
+      console.error('[CRON] measure-bursts postResults failed:', postErr);
+    }
+
     return NextResponse.json(
-      { ok: true, ...result },
+      { ok: true, ...result, postedResults },
       { status: 200, headers: { 'Cache-Control': 'no-store' } }
     );
   } catch (error) {

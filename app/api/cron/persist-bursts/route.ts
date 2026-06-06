@@ -12,6 +12,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { persistBursts } from '../../../../lib/indexer/burst-outcomes';
+import { postNewCalls } from '../../../../lib/alerts/calls';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
@@ -27,8 +28,19 @@ export async function GET(request: NextRequest) {
 
   try {
     const result = await persistBursts();
+
+    // PUBLIC PROOF FLYWHEEL: auto-post any newly-fired high-conviction calls.
+    // Fully env-gated + resilient; wrapped so posting can never fail the cron.
+    let postedCalls = 0;
+    try {
+      const r = await postNewCalls();
+      postedCalls = r.posted;
+    } catch (postErr) {
+      console.error('[CRON] persist-bursts postNewCalls failed:', postErr);
+    }
+
     return NextResponse.json(
-      { ok: true, ...result },
+      { ok: true, ...result, postedCalls },
       { status: 200, headers: { 'Cache-Control': 'no-store' } }
     );
   } catch (error) {
