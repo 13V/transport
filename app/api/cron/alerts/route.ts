@@ -1,12 +1,19 @@
 /**
  * ALERTS CRON ENDPOINT
  *
- * Scans recently-indexed data and fires alerts for new smart-wallet BUYs and new
- * funding links to the configured channels (Telegram / webhook).
+ * Scans recently-indexed smart-money flow and fires:
+ *   - BUY / accumulation alerts (smart money rotating in)
+ *   - SELL / distribution alerts (smart money exiting) — distinct cooldown
+ *   - optional legacy funding-link alerts (ALERT_FUNDING=1)
+ * to the configured channels (Telegram private + optional public, webhook).
  *
  *   GET /api/cron/alerts
  *
  * CRON_SECRET-protected when set.
+ *
+ * NOTE: the daily "top movers" digest (sendDailyDigest in lib/alerts/detect.ts)
+ * is intentionally NOT called here — this tick runs too often for a once-a-day
+ * digest. Add a separate daily cron entry to wire it.
  */
 
 import { NextRequest, NextResponse } from 'next/server';

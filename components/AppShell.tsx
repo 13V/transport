@@ -11,6 +11,8 @@ import {
   Activity, LayoutDashboard, Crown, Flame, Star, BookOpen, Search,
 } from 'lucide-react';
 import * as f from '@/lib/format';
+import { isGatingEnabled } from '@/lib/gating/config';
+import GateControls from '@/components/GateControls';
 
 interface NavItem { href: string; label: string; icon: React.ComponentType<{ size?: number }>; owner: string; }
 const NAV: { group: string; items: NavItem[] }[] = [
@@ -211,6 +213,11 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             </span>
           </span>
           <div className="topbar-right">
+            {/* Token-gating affordance. Renders ONLY when the gating flag is on
+                AND a mint is configured (isGatingEnabled). With the flag off —
+                production today — this branch is skipped entirely: GateControls
+                never mounts, no wallet hooks run, zero visual change. */}
+            {isGatingEnabled() && <GateControls />}
             <div className="topbar-search" role="search">
               <span className="search-ic" aria-hidden="true"><Search size={14} /></span>
               <label htmlFor="global-search" className="sr-only">Search wallet or token</label>

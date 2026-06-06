@@ -31,10 +31,11 @@ import {
 } from '@/components/ui';
 
 /**
- * A wallet as returned by GET /api/smart-money/list (JSON `wallets[]`). This is
- * the gate-filtered set (up to 20k) — search / sort / filter run over the FULL
- * set, then we paginate client-side, so the controls are correct across every
- * smart wallet rather than only the first page.
+ * A wallet as returned by GET /api/smart-money/list (JSON `wallets[]`). Search /
+ * sort / filter / pagination all run SERVER-SIDE now: we request only the
+ * current page (with the active sort + filters as query params) and the endpoint
+ * returns just that slice plus `total` for the pager. The browser never pulls
+ * the full set.
  */
 interface ListWallet {
   address: string;
@@ -54,6 +55,9 @@ interface ListWallet {
 
 interface ListResponse {
   count: number;
+  total: number;
+  page: number;
+  pageSize: number;
   generatedAt: string;
   wallets: ListWallet[];
 }
@@ -62,6 +66,14 @@ type SortField = 'rank' | 'roiPct' | 'pnl' | 'winRate';
 type SortDirection = 'asc' | 'desc';
 type PageSize = 10 | 25 | 50;
 type ActiveWithin = 'any' | '1' | '7';
+
+/** Map a UI sort field to the server's `sort` param. */
+const SORT_PARAM: Record<SortField, string> = {
+  rank: 'score',
+  roiPct: 'roi',
+  pnl: 'pnl',
+  winRate: 'winrate',
+};
 
 /** Parse an ISO timestamp to epoch ms (or null) for f.ago(). */
 function toMs(iso: string | null): number | null {
@@ -73,6 +85,7 @@ function toMs(iso: string | null): number | null {
 export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQuery?: string }) {
   const router = useRouter();
   const [data, setData] = useState<ListWallet[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState(initialQuery);
@@ -109,17 +122,33 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
     }
   }, []);
 
-  // Fetch the gate-filtered smart-wallet set. The server-side q / minPnl /
-  // activeDays / gate params narrow the set; everything else (tier, ROI, sort,
-  // pagination) is applied client-side over the FULL returned set so the
-  // controls stay correct across all smart wallets.
+  // Fetch ONLY the current page. Every control — search, tier, min-ROI/PnL,
+  // active-within, gate, sort and pagination — is pushed into the query so the
+  // server returns just this page (plus `total` for the pager). The browser no
+  // longer pulls the full 20k set.
   const fetchLeaderboard = useCallback(async () => {
     try {
       const params = new URLSearchParams();
-      params.set('limit', '20000');
-      params.set('sort', sortField === 'roiPct' ? 'roi' : 'score');
+      // Server-side pagination (1-based). currentPage is 0-based in the UI.
+      params.set('page', String(currentPage + 1));
+      params.set('pageSize', String(pageSize));
+      params.set('sort', SORT_PARAM[sortField]);
+      // For `rank`, the displayed rank runs inverse to the score: "rank
+      // ascending" (rank 1 first) means the HIGHEST score first, i.e. score
+      // descending. So flip the direction we send for the score sort. Metric
+      // sorts (ROI/PnL/Win) map directly.
+      const serverDir =
+        sortField === 'rank'
+          ? sortDirection === 'asc'
+            ? 'desc'
+            : 'asc'
+          : sortDirection;
+      params.set('dir', serverDir);
       params.set('gate', smartOnly ? '1' : '0');
       if (searchQuery.trim()) params.set('q', searchQuery.trim());
+      if (tierFilter !== 'All') params.set('tier', tierFilter);
+      const minRoiNum = parseFloat(minRoi);
+      if (!Number.isNaN(minRoiNum)) params.set('minRoi', String(minRoiNum));
       const minPnlNum = parseFloat(minPnl);
       if (!Number.isNaN(minPnlNum)) params.set('minPnl', String(minPnlNum));
       if (activeWithin !== 'any') params.set('activeDays', activeWithin);
@@ -129,83 +158,45 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
 
       const json = (await response.json()) as ListResponse;
       setData(json.wallets ?? []);
+      setTotal(json.total ?? 0);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load leaderboard');
     } finally {
       setLoading(false);
     }
-  }, [sortField, smartOnly, searchQuery, minPnl, activeWithin]);
+  }, [
+    currentPage,
+    pageSize,
+    sortField,
+    sortDirection,
+    smartOnly,
+    searchQuery,
+    tierFilter,
+    minRoi,
+    minPnl,
+    activeWithin,
+  ]);
 
-  // Fetch on mount and whenever a server-side filter changes.
+  // Fetch on mount and whenever the page or any server-side control changes.
   useEffect(() => {
     fetchLeaderboard();
   }, [fetchLeaderboard]);
 
-  // Auto-refresh every 5 minutes
+  // Auto-refresh every 5 minutes — re-fetches only the CURRENT page.
   useEffect(() => {
     const interval = setInterval(() => fetchLeaderboard(), 5 * 60 * 1000);
     return () => clearInterval(interval);
   }, [fetchLeaderboard]);
 
-  // Filter and sort the full set client-side. Search / min-PnL / active-within
-  // are already applied server-side, but we re-apply search and tier here so the
-  // table is consistent even before a refetch lands.
-  const filteredData = useMemo(() => {
-    let result = [...data];
-
-    if (searchQuery.trim()) {
-      const query = searchQuery.toLowerCase();
-      result = result.filter((w) => w.address.toLowerCase().includes(query));
-    }
-
-    // Tier filter — `tier` is returned by the list endpoint, so this is correct
-    // across the full set.
-    if (tierFilter !== 'All') {
-      result = result.filter((w) => w.tier === tierFilter);
-    }
-
-    // Min ROI% (wallets without a known ROI are excluded).
-    const minRoiNum = parseFloat(minRoi);
-    if (!Number.isNaN(minRoiNum)) {
-      result = result.filter((w) => w.roiPct != null && w.roiPct >= minRoiNum);
-    }
-
-    // Sorting. `rank` maps to the server's default ordering (score desc).
-    const dir = sortDirection === 'asc' ? 1 : -1;
-    if (sortField === 'rank') {
-      result.sort((a, b) => (dir === 1 ? b.score - a.score : a.score - b.score));
-    } else {
-      result.sort((a, b) => {
-        let av: number;
-        let bv: number;
-        if (sortField === 'roiPct') {
-          av = a.roiPct == null ? -1e9 : a.roiPct;
-          bv = b.roiPct == null ? -1e9 : b.roiPct;
-        } else if (sortField === 'pnl') {
-          av = a.pnl;
-          bv = b.pnl;
-        } else {
-          av = a.winRate;
-          bv = b.winRate;
-        }
-        return av < bv ? -dir : av > bv ? dir : 0;
-      });
-    }
-
-    return result;
-  }, [data, searchQuery, tierFilter, minRoi, sortField, sortDirection]);
-
-  // Paginate filtered data
-  const maxPage = Math.ceil(filteredData.length / pageSize) || 1;
+  // The server already returned exactly this page, filtered + sorted. Pagination
+  // metadata is derived from `total`; ranks are global (page offset + index).
+  const maxPage = Math.ceil(total / pageSize) || 1;
   const safePage = Math.min(currentPage, maxPage - 1);
   const paginatedData = useMemo(() => {
     const start = safePage * pageSize;
-    return filteredData.slice(start, start + pageSize).map((w, i) => ({
-      ...w,
-      rank: start + i + 1,
-    }));
-  }, [filteredData, safePage, pageSize]);
+    return data.map((w, i) => ({ ...w, rank: start + i + 1 }));
+  }, [data, safePage, pageSize]);
 
   const handleWalletClick = (address: string) => {
     router.push(`/smart-money/${address}`);
@@ -363,7 +354,7 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
       </label>
       <span className="spacer" />
       <span className="faint" style={{ fontSize: 12 }}>
-        {filteredData.length} wallet{filteredData.length !== 1 ? 's' : ''}
+        {total} wallet{total !== 1 ? 's' : ''}
       </span>
       <div className="seg">
         {([10, 25, 50] as PageSize[]).map((size) => (
@@ -383,7 +374,6 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
   );
 
   const renderPager = () => {
-    const total = filteredData.length;
     if (maxPage <= 1) {
       return (
         <div className="row between faint" style={{ fontSize: 12.5 }}>
