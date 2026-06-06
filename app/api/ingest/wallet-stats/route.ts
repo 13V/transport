@@ -79,7 +79,9 @@ export async function POST(request: NextRequest) {
   // Lenient pre-filter — Helius does the real gate, this just decides who's worth
   // the expensive verify. Profitable + a bit of breadth.
   const minProfit = num('SCREEN_MIN_PROFIT_USD', 0);
-  const minTokens = num('SCREEN_MIN_TOKENS', 5);
+  // Aligned with curation's minTokens (3): the cheap pre-screen must not be
+  // STRICTER than the final gate, or it would discard wallets the gate would pass.
+  const minTokens = num('SCREEN_MIN_TOKENS', 3);
 
   const now = new Date().toISOString();
   const rows = items

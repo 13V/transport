@@ -45,14 +45,33 @@ export async function GET() {
   const migrationApplied = !vCount.error;
   const verifiedWallets = vCount.error ? 0 : vCount.count ?? 0;
 
-  // Pull the top of the board to compute how many are "smart" and show a sample.
+  // Compute how many wallets are "smart" at scale. Rather than fetch top-N by
+  // score and filter in JS (which under-counts once verified wallets exceed N),
+  // push the CHEAP gate conditions into the query so only plausible-smart rows
+  // come back — that set is small even as the table grows, so a generous limit
+  // is safe. The remaining nuance (bot-filter, maxWinRate cap) is applied in JS
+  // below so the final set is byte-identical to the gate.
   const cols =
     'wallet, score, realized_pnl, win_rate, consistency, total_trades, tokens_traded, last_trade_at';
-  const extRead = await supabase
+  let extQuery = supabase
     .from('wallet_stats')
     .select(`${cols}, seeded, roi_pct, invested_sol, verified`)
-    .order('score', { ascending: false })
-    .limit(1000);
+    .not('roi_pct', 'is', null)
+    .gte('roi_pct', criteria.minRoiPct)
+    .gte('realized_pnl', criteria.minPnlSol)
+    .gte('total_trades', criteria.minTrades)
+    .gte('tokens_traded', criteria.minTokens);
+  if (criteria.minInvestedSol > 0) {
+    extQuery = extQuery.gte('invested_sol', criteria.minInvestedSol);
+  }
+  if (criteria.maxIdleDays > 0) {
+    const cutoff = new Date(now - criteria.maxIdleDays * 86_400_000).toISOString();
+    extQuery = extQuery.gte('last_trade_at', cutoff);
+  }
+  const extRead = await extQuery.order('score', { ascending: false }).limit(20000);
+
+  // Degraded / pre-migration fallback: if the roi_pct/verified columns (or the
+  // gate filters above) aren't available, fall back to the original top-N + JS.
   const { data: rows }: { data: any[] | null } = extRead.error
     ? await supabase.from('wallet_stats').select(cols).order('score', { ascending: false }).limit(1000)
     : extRead;

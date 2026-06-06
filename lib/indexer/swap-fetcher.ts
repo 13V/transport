@@ -309,7 +309,11 @@ export async function fetchAllWalletTradesForToken(
 
     fetched += txs.length;
     before = txs[txs.length - 1]?.signature;
-    if (!before || txs.length < limit) break; // last page
+    // Only stop on TRUE exhaustion. A short non-empty page is NOT the end:
+    // SWAP-type filtering can shrink a page below `limit` mid-history, and
+    // treating that as the end drops every older wallet. Keep paginating on
+    // short pages; the `before` cursor advances and `maxTxs` still bounds us.
+    if (!before) break; // no cursor to continue from -> truly exhausted
   }
 
   return out;

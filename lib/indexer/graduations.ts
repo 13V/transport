@@ -135,14 +135,31 @@ export async function getGraduatedCoins(limit = 12): Promise<GraduatedCoin[]> {
  * Sourced from the pump.fun coin list (./pumpfun-coins). Resilient: returns []
  * on any failure so the scan falls back to fresh graduations only.
  */
+// Sort keys we rotate through so successive runs surface DIFFERENT aged winners.
+// pump.fun's API supports these sort fields; combined with the order flip below
+// each hour bucket sees a distinct slice of the historical coin pool.
+const AGED_SORTS = ['market_cap', 'last_trade_timestamp', 'created_timestamp'] as const;
+
 export async function getAgedWinnerCoins(opts?: {
   minMcUsd?: number;
   maxCoins?: number;
 }): Promise<GraduatedCoin[]> {
   try {
+    // ROTATION: the top-N-by-MC pool is static, so after one pass it yields
+    // nothing new for 24h. Derive a rotating seed from the current hour bucket
+    // and vary sort + order each call so we keep surfacing fresh aged winners
+    // rather than re-scanning the same MC-desc head every run.
+    const hourBucket = Math.floor(Date.now() / (60 * 60 * 1000));
+    const sort = AGED_SORTS[hourBucket % AGED_SORTS.length];
+    // Flip order on alternating buckets to reach the opposite end of each sort
+    // (e.g. lowest-qualifying MC, oldest creations) — more distinct coverage.
+    const order: 'ASC' | 'DESC' = hourBucket % 2 === 0 ? 'DESC' : 'ASC';
+
     const coins = await getPumpFunCoins({
       minMcUsd: opts?.minMcUsd ?? Number(process.env.AGED_MIN_MC_USD ?? 100000),
-      maxCoins: opts?.maxCoins ?? Number(process.env.AGED_MAX_COINS ?? 400),
+      maxCoins: opts?.maxCoins ?? Number(process.env.AGED_MAX_COINS ?? 600),
+      sort,
+      order,
     });
     return (coins ?? [])
       .filter((c) => c?.mint && !EXCLUDED.has(c.mint))

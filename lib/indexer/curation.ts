@@ -12,6 +12,14 @@
  * the best snipers win well under half their trades but win big (asymmetric),
  * and a win-rate floor would wrongly exclude them.
  *
+ * The anchor is ROI + invested capital, NOT an absolute PnL floor: a wallet that
+ * turned 0.6 SOL into 3 SOL (a genuinely-smart small-size trader) is just as
+ * "smart" as one that turned 60 into 90. A high absolute-PnL floor was the
+ * dominant false-negative — it rejected high-ROI small wallets — so the PnL floor
+ * is kept low (just enough to filter dust noise) while minInvestedSol guarantees
+ * the ROI% is measured on real, non-trivial size so dust-ROI farmers can't slip
+ * through the now-lower PnL floor.
+ *
  * Every threshold is env-tunable so the bar can be moved without a deploy.
  */
 
@@ -19,7 +27,7 @@ import { detectBot } from './bot-filter';
 
 export interface SmartCriteria {
   minRoiPct: number; // all-time realized ROI floor (%); requires an accurate ROI
-  minPnlSol: number; // realized PnL floor (SOL) — keeps out tiny-size noise
+  minPnlSol: number; // realized PnL floor (SOL) — low, just to drop dust noise
   minInvestedSol: number; // min capital deployed, so ROI% is on real size (0 = off)
   minTrades: number;
   minTokens: number;
@@ -35,12 +43,17 @@ function num(name: string, fallback: number): number {
 export function getSmartCriteria(): SmartCriteria {
   return {
     minRoiPct: num('SMART_MIN_ROI_PCT', 0), // profitable
-    minPnlSol: num('SMART_MIN_PNL_SOL', 1),
-    minInvestedSol: num('SMART_MIN_INVESTED_SOL', 0), // off by default
-    minTrades: num('SMART_MIN_TRADES', 10),
+    // Low PnL floor: the ROI thesis is the anchor, not absolute size. A high floor
+    // was excluding genuinely-smart small-size high-ROI wallets. This is just a
+    // dust filter; minInvestedSol below is the real quality guard on ROI size.
+    minPnlSol: num('SMART_MIN_PNL_SOL', 0.2),
+    // Capital deployed must be non-trivial so ROI% is measured on real size —
+    // pairs with the low PnL floor to keep out dust-ROI farmers.
+    minInvestedSol: num('SMART_MIN_INVESTED_SOL', 0.5),
+    minTrades: num('SMART_MIN_TRADES', 6),
     minTokens: num('SMART_MIN_TOKENS', 3),
     maxWinRate: num('SMART_MAX_WIN_RATE', 1), // off by default
-    maxIdleDays: num('SMART_MAX_IDLE_DAYS', 45),
+    maxIdleDays: num('SMART_MAX_IDLE_DAYS', 90),
   };
 }
 

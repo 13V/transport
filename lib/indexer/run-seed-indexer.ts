@@ -71,7 +71,10 @@ async function getCandidateWallets(
   // When sharded, over-fetch a pool and keep only this shard's wallets so N
   // parallel jobs drain disjoint slices of the backlog without re-scanning.
   const sharded = shards > 1;
-  const pool = sharded ? Math.min(limit * shards * 3, 8000) : limit;
+  // Keep the over-fetch tight: each shard only needs its slice plus a small
+  // cushion for the hash filter. A looser pool just makes every shard do more
+  // wasted DB work. (A dedicated index is added separately.)
+  const pool = sharded ? Math.min(limit * shards + 200, 5000) : limit;
   const pick = (rows: { wallet: string }[]): string[] => {
     let arr = rows.map((r) => r.wallet);
     if (sharded) arr = arr.filter((w) => shardOf(w, shards) === shard);
@@ -107,10 +110,14 @@ async function getCandidateWallets(
     if (picked.length > 0) return picked;
   }
 
-  // Fallback (pre-migration, or backlog empty): top wallets by score.
+  // Fallback (pre-migration, or backlog empty): top unverified wallets by
+  // score. Keep verified=false so a drained backlog returns [] (lets the
+  // workflow's walletsProcessed==0 early-stop fire) rather than re-scanning
+  // already-verified wallets forever.
   const { data, error } = await supabase
     .from('wallet_stats')
     .select('wallet, total_trades')
+    .eq('verified', false)
     .gte('total_trades', 2)
     .order('score', { ascending: false })
     .limit(pool);
@@ -227,6 +234,7 @@ export async function runSeedIndexer(opts: SeedIndexerOptions = {}): Promise<See
   }
 
   const wallets = sourced.slice(0, maxWallets);
+  const concurrency = Math.max(1, envInt('SEED_CONCURRENCY', 6));
 
   let walletsProcessed = 0;
   let tradesIngested = 0;
@@ -234,14 +242,30 @@ export async function runSeedIndexer(opts: SeedIndexerOptions = {}): Promise<See
   let degradedUpserts = 0;
   const bySource: Record<string, number> = {};
 
-  for (const wallet of wallets) {
-    if (Date.now() - start > timeBudgetMs * 0.85) break;
-    walletsProcessed += 1;
+  // Per-task result so concurrent tasks never mutate shared counters directly —
+  // we sum these deterministically after each batch settles (no races).
+  interface ScanResult {
+    processed: boolean;
+    tradesIngested: number;
+    upserted: boolean;
+    degraded: boolean;
+    bySource: Record<string, number>;
+  }
 
-    // 1. Pull the wallet's swap history and persist the trades.
+  const scanWallet = async (wallet: string): Promise<ScanResult> => {
+    const res: ScanResult = {
+      processed: true,
+      tradesIngested: 0,
+      upserted: false,
+      degraded: false,
+      bySource: {},
+    };
+
+    // 1. Pull the wallet's swap history (the I/O-bound Helius call we parallelize).
     const history = await fetchWalletSwapHistory(wallet, maxTxsPerWallet);
+
     if (history.length > 0) {
-      for (const t of history) bySource[t.source] = (bySource[t.source] ?? 0) + 1;
+      for (const t of history) res.bySource[t.source] = (res.bySource[t.source] ?? 0) + 1;
 
       const rows = history.map((trade) => ({
         wallet,
@@ -262,35 +286,36 @@ export async function runSeedIndexer(opts: SeedIndexerOptions = {}): Promise<See
       if (error) {
         console.error(`[SEED] upsert trades failed for ${wallet}:`, error.message);
       } else {
-        tradesIngested += rows.length;
+        res.tradesIngested = rows.length;
       }
     }
 
-    // 2. Recompute stats from the wallet's FULL history in the DB (seed +
-    //    any token-first trades), then upsert flagged as seeded.
-    const { data, error: readErr } = await supabase
-      .from('trades')
-      .select('token_mint, trade_type, amount, price, source, tx_hash, block_time')
-      .eq('wallet', wallet)
-      .order('block_time', { ascending: true })
-      .limit(5000);
+    // 2. Score from the already-in-memory history — no write-then-read round
+    //    trip. fetchWalletSwapHistory already returns Trade[], and
+    //    computeAccuratePnL sorts internally, so fetch order is fine.
+    const trades: Trade[] = history;
 
-    if (readErr || !data) {
-      console.error(`[SEED] read trades failed for ${wallet}:`, readErr?.message);
-      continue;
+    if (trades.length === 0) {
+      // No scorable trades. Mark TERMINAL so the wallet leaves the
+      // verified=false backlog instead of being re-scanned forever. roi_pct
+      // null means it still fails the smart gate. Tolerate missing extended
+      // columns via the degraded fallback.
+      const { error: termErr, degraded } = await upsertStat(supabase, {
+        wallet,
+        verified: true,
+        total_trades: 0,
+        roi_pct: null,
+        scored_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+      if (termErr) {
+        console.error(`[SEED] terminal upsert failed for ${wallet}:`, termErr.message);
+      } else {
+        res.upserted = true;
+        res.degraded = degraded;
+      }
+      return res;
     }
-
-    const trades: Trade[] = data.map((r: any) => ({
-      tokenMint: r.token_mint,
-      tradeType: r.trade_type,
-      amount: Number(r.amount),
-      pricePerToken: Number(r.price),
-      date: new Date(r.block_time),
-      txHash: r.tx_hash,
-      source: r.source,
-    }));
-
-    if (trades.length === 0) continue; // no SOL-quoted swaps to score
 
     // Accurate all-time PnL/ROI from the wallet's full history (this is the
     // trustworthy "up X% all-time" number). These wallets are marked verified.
@@ -319,10 +344,31 @@ export async function runSeedIndexer(opts: SeedIndexerOptions = {}): Promise<See
 
     if (upErr) {
       console.error(`[SEED] upsert wallet_stats failed for ${wallet}:`, upErr.message);
-      continue;
+      return res;
     }
-    if (degraded) degradedUpserts += 1;
-    walletsUpserted += 1;
+    res.upserted = true;
+    res.degraded = degraded;
+    return res;
+  };
+
+  // Bounded-concurrency: process SEED_CONCURRENCY wallets per batch via
+  // Promise.all, re-checking the time budget BETWEEN batches so we never start
+  // a batch past budget (a started Helius call still completes). Counters are
+  // summed from settled per-task results, so concurrency can't race them.
+  for (let i = 0; i < wallets.length; i += concurrency) {
+    if (Date.now() - start > timeBudgetMs * 0.85) break;
+    const batch = wallets.slice(i, i + concurrency);
+    const results = await Promise.all(batch.map(scanWallet));
+
+    for (const r of results) {
+      if (r.processed) walletsProcessed += 1;
+      tradesIngested += r.tradesIngested;
+      if (r.upserted) walletsUpserted += 1;
+      if (r.degraded) degradedUpserts += 1;
+      for (const [src, n] of Object.entries(r.bySource)) {
+        bySource[src] = (bySource[src] ?? 0) + n;
+      }
+    }
   }
 
   await supabase.from('indexer_state').upsert(

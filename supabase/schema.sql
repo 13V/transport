@@ -119,3 +119,22 @@ create index if not exists wallet_links_target_idx on wallet_links (target);
 -- Quick pointer on a wallet to the smart wallet that funded it (full graph in
 -- wallet_links).
 alter table wallet_stats add column if not exists funded_by text;
+
+-- ============================================================================
+-- INDEXER SCALING INDEXES (added for high-volume wallet ingestion/verification)
+--
+-- The deep-scan candidate query filters `verified = false` and orders by
+-- total_trades; the older partial indexes are `WHERE verified` / `WHERE
+-- screen_pass` (the WRONG polarity) so they can't serve it. These composites do,
+-- turning the per-call candidate selection from a full-table sort into an index
+-- range scan. Safe to re-run (`if not exists`).
+-- ============================================================================
+create index if not exists wallet_stats_unverified_active_idx
+  on wallet_stats (verified, total_trades desc);
+create index if not exists wallet_stats_screen_unverified_idx
+  on wallet_stats (verified, screen_pass, total_trades desc);
+-- Smart-count / curated-list prefilter (verified wallets ranked by realized PnL).
+create index if not exists wallet_stats_verified_pnl_idx
+  on wallet_stats (verified, realized_pnl desc);
+-- Per-wallet trade-history reads (FIFO PnL recompute, holdings) without a sort.
+create index if not exists trades_wallet_time_idx on trades (wallet, block_time);

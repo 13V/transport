@@ -60,18 +60,37 @@ export async function GET(request: NextRequest) {
   const applyGate = searchParams.get('gate') !== '0';
 
   const supabase = getSupabase();
+  const criteria = getSmartCriteria();
+  const now = Date.now();
 
-  // Pull the top-ranked wallets with every field curation needs. Over-fetch so
-  // that after filtering we can still return up to `limit` smart wallets.
+  // Pull the top-ranked wallets with every field curation needs. To keep the
+  // curated list correct as the verified set grows past a fixed top-N, push the
+  // CHEAP gate conditions into the query (when the gate is on) so only
+  // plausible-smart rows are fetched; the bot-filter/maxWinRate nuance is still
+  // applied in JS below so the final set matches the gate exactly.
   const baseCols =
     'wallet, score, realized_pnl, win_rate, consistency, total_trades, tokens_traded, last_trade_at';
   const extCols = `${baseCols}, seeded, roi_pct, invested_sol, verified`;
-  const extRead = await supabase
-    .from('wallet_stats')
-    .select(extCols)
-    .order('score', { ascending: false })
-    .limit(2000);
+  let extQuery = supabase.from('wallet_stats').select(extCols);
+  if (applyGate) {
+    extQuery = extQuery
+      .not('roi_pct', 'is', null)
+      .gte('roi_pct', criteria.minRoiPct)
+      .gte('realized_pnl', criteria.minPnlSol)
+      .gte('total_trades', criteria.minTrades)
+      .gte('tokens_traded', criteria.minTokens);
+    if (criteria.minInvestedSol > 0) {
+      extQuery = extQuery.gte('invested_sol', criteria.minInvestedSol);
+    }
+    if (criteria.maxIdleDays > 0) {
+      const cutoff = new Date(now - criteria.maxIdleDays * 86_400_000).toISOString();
+      extQuery = extQuery.gte('last_trade_at', cutoff);
+    }
+  }
+  const extRead = await extQuery.order('score', { ascending: false }).limit(20000);
 
+  // Degraded / pre-migration fallback: if the accurate columns (or gate filters)
+  // aren't available, fall back to the original top-N fetch over base columns.
   const { data, error }: { data: any[] | null; error: { message: string } | null } =
     extRead.error
       ? await supabase
@@ -86,8 +105,6 @@ export async function GET(request: NextRequest) {
   }
 
   const hasVerifiedCol = !extRead.error;
-  const criteria = getSmartCriteria();
-  const now = Date.now();
 
   const wallets: SmartWalletRow[] = (data ?? [])
     .filter((r: any) => {
