@@ -15,6 +15,14 @@ import { runChainDiscovery } from '../../../../lib/indexer/run-chain-discovery';
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
 
+/** Parse + clamp an optional integer query param; undefined if absent/invalid. */
+function clampParam(raw: string | null, min: number, max: number): number | undefined {
+  if (raw == null) return undefined;
+  const v = parseInt(raw, 10);
+  if (!Number.isFinite(v)) return undefined;
+  return Math.min(Math.max(v, min), max);
+}
+
 export async function GET(request: NextRequest) {
   const secret = process.env.CRON_SECRET;
   if (secret) {
@@ -24,8 +32,22 @@ export async function GET(request: NextRequest) {
     }
   }
 
+  // Optional per-call overrides (clamped). The drive is cron-job.org, whose free
+  // tier aborts the connection at 30s — pass ?timeBudgetMs=24000 to return before
+  // then so the job logs a clean success instead of a (harmless) timeout.
+  const sp = request.nextUrl.searchParams;
+  const opts: { maxWinners?: number; maxCoins?: number; maxTxsPerCoin?: number; timeBudgetMs?: number } = {};
+  const maxWinners = clampParam(sp.get('maxWinners'), 1, 100);
+  const maxCoins = clampParam(sp.get('maxCoins'), 1, 40);
+  const maxTxsPerCoin = clampParam(sp.get('maxTxsPerCoin'), 100, 5000);
+  const timeBudgetMs = clampParam(sp.get('timeBudgetMs'), 5_000, 58_000);
+  if (maxWinners !== undefined) opts.maxWinners = maxWinners;
+  if (maxCoins !== undefined) opts.maxCoins = maxCoins;
+  if (maxTxsPerCoin !== undefined) opts.maxTxsPerCoin = maxTxsPerCoin;
+  if (timeBudgetMs !== undefined) opts.timeBudgetMs = timeBudgetMs;
+
   try {
-    const result = await runChainDiscovery();
+    const result = await runChainDiscovery(opts);
     return NextResponse.json(result, {
       status: result.ok ? 200 : 500,
       headers: { 'Cache-Control': 'no-store' },
