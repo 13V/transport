@@ -17,14 +17,14 @@ $EVERY = @(-1)                                              # cron-job.org "ever
 
 # Job list — mirrors CRON_SETUP.md. m = minutes, h = hours (default every hour).
 $jobs = @(
-  @{ t="drain-shard-0";       p="/api/cron/seed-wallets?maxWallets=30&shard=0&shards=4"; m=$EVERY },
-  @{ t="drain-shard-1";       p="/api/cron/seed-wallets?maxWallets=30&shard=1&shards=4"; m=$EVERY },
-  @{ t="drain-shard-2";       p="/api/cron/seed-wallets?maxWallets=30&shard=2&shards=4"; m=$EVERY },
-  @{ t="drain-shard-3";       p="/api/cron/seed-wallets?maxWallets=30&shard=3&shards=4"; m=$EVERY },
-  @{ t="index";               p="/api/cron/index?maxTokens=30";                          m=(Every 2) },
-  @{ t="graduations-shard-0"; p="/api/cron/graduations?maxCoins=8&shard=0&shards=3";      m=(Every 3) },
-  @{ t="graduations-shard-1"; p="/api/cron/graduations?maxCoins=8&shard=1&shards=3";      m=(Every 3) },
-  @{ t="graduations-shard-2"; p="/api/cron/graduations?maxCoins=8&shard=2&shards=3";      m=(Every 3) },
+  @{ t="drain-shard-0";       p="/api/cron/seed-wallets?maxWallets=30&shard=0&shards=4&timeBudgetMs=24000"; m=$EVERY },
+  @{ t="drain-shard-1";       p="/api/cron/seed-wallets?maxWallets=30&shard=1&shards=4&timeBudgetMs=24000"; m=$EVERY },
+  @{ t="drain-shard-2";       p="/api/cron/seed-wallets?maxWallets=30&shard=2&shards=4&timeBudgetMs=24000"; m=$EVERY },
+  @{ t="drain-shard-3";       p="/api/cron/seed-wallets?maxWallets=30&shard=3&shards=4&timeBudgetMs=24000"; m=$EVERY },
+  @{ t="index";               p="/api/cron/index?maxTokens=10";                          m=(Every 2) },
+  @{ t="graduations-shard-0"; p="/api/cron/graduations?maxCoins=3&shard=0&shards=3";      m=(Every 3) },
+  @{ t="graduations-shard-1"; p="/api/cron/graduations?maxCoins=3&shard=1&shards=3";      m=(Every 3) },
+  @{ t="graduations-shard-2"; p="/api/cron/graduations?maxCoins=3&shard=2&shards=3";      m=(Every 3) },
   @{ t="chain-discovery";     p="/api/cron/chain-discovery";                             m=@(0,30) },
   @{ t="track-links";         p="/api/cron/track-links";                                 m=@(0); h=@(0,6,12,18) },
   @{ t="alerts";              p="/api/cron/alerts";                                      m=(Every 5) },
