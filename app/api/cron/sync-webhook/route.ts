@@ -25,14 +25,37 @@ import { fetchAllRows } from '../../../../lib/db-paginate';
 import {
   createWebhook,
   editWebhook,
+  listWebhooks,
+  deleteWebhook,
   isNotFound,
   MAX_ADDRESSES,
+  type HeliusWebhook,
 } from '../../../../lib/helius/webhook-admin';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
 
 const WEBHOOK_ID_KEY = 'helius_webhook_id';
+
+/**
+ * Compare two receiver URLs for "same webhook target". Helius stores the URL it
+ * was registered with verbatim, so normalize via the URL parser (host casing,
+ * default ports) and ignore a single trailing slash on the path before an exact
+ * compare. Falls back to a trimmed string equality if either fails to parse.
+ */
+function sameWebhookUrl(a: string | undefined, b: string): boolean {
+  if (!a) return false;
+  const norm = (u: string): string => {
+    try {
+      const url = new URL(u);
+      const path = url.pathname.replace(/\/+$/, '');
+      return `${url.protocol}//${url.host}${path}${url.search}`;
+    } catch {
+      return u.trim().replace(/\/+$/, '');
+    }
+  };
+  return norm(a) === norm(b);
+}
 
 /** Resolve the FULL set of smart-wallet addresses (raw, NOT cluster-deduped). */
 async function resolveSmartAddresses(): Promise<{ addresses: string[]; error: string | null }> {
@@ -188,14 +211,64 @@ export async function GET(request: NextRequest) {
   try {
     let action: 'created' | 'updated';
     let webhookId: string;
+    let cleanedUp = 0;
 
-    if (storedId) {
+    // RECONCILE BY URL — defend against duplicate webhooks. If the stored-id read
+    // ever failed (or the id went stale and a previous run created a second one),
+    // a blind create would register a SECOND webhook for the same receiver URL →
+    // every swap delivered twice (doubled Helius credit burn + duplicate
+    // processing). So before we create/update, ask Helius what already exists for
+    // OUR derived URL and converge to exactly one. listWebhooks failing must not
+    // block the run, so treat it as "no matches known" and fall back.
+    let urlMatches: HeliusWebhook[] = [];
+    try {
+      const all = await listWebhooks();
+      urlMatches = all.filter((w) => sameWebhookUrl(w.webhookURL, webhookURL));
+    } catch (err) {
+      console.error('[CRON] sync-webhook listWebhooks failed (continuing):', err);
+      urlMatches = [];
+    }
+
+    if (urlMatches.length > 0) {
+      // Keep the first match (prefer the stored id if it's among them so the
+      // persisted pointer stays stable), update it to the current config, and
+      // DELETE every other webhook pointing at our URL.
+      const preferred =
+        (storedId && urlMatches.find((w) => w.webhookID === storedId)) || urlMatches[0];
+      const keepId = preferred.webhookID;
+
+      const wh = await editWebhook(keepId, cfg);
+      action = 'updated';
+      webhookId = (wh.webhookID as string) || keepId;
+
+      for (const dup of urlMatches) {
+        if (dup.webhookID === keepId) continue;
+        try {
+          await deleteWebhook(dup.webhookID);
+          cleanedUp++;
+        } catch (err) {
+          // A duplicate that 404s is already gone — count it as cleaned. Any
+          // other delete error: log and keep going so one bad delete doesn't
+          // abort the whole reconcile.
+          if (isNotFound(err)) {
+            cleanedUp++;
+          } else {
+            console.error(`[CRON] sync-webhook failed to delete duplicate ${dup.webhookID}:`, err);
+          }
+        }
+      }
+
+      // Persist the id we kept — covers the case where the stored id was missing
+      // or pointed at a now-deleted duplicate.
+      if (webhookId !== storedId) await persistId(webhookId);
+    } else if (storedId) {
+      // No URL match found via list (e.g. list failed) but we have a stored id —
+      // try to edit it; recreate only on a definitive 404.
       try {
         const wh = await editWebhook(storedId, cfg);
         action = 'updated';
         webhookId = (wh.webhookID as string) || storedId;
       } catch (err) {
-        // Stale id (deleted webhook) → recreate from scratch.
         if (isNotFound(err)) {
           const wh = await createWebhook(cfg);
           webhookId = wh.webhookID;
@@ -206,6 +279,7 @@ export async function GET(request: NextRequest) {
         }
       }
     } else {
+      // Nothing exists for our URL and no stored id → first-run create.
       const wh = await createWebhook(cfg);
       webhookId = wh.webhookID;
       await persistId(webhookId);
@@ -217,6 +291,7 @@ export async function GET(request: NextRequest) {
         ok: true,
         action,
         webhookId,
+        cleanedUpDuplicates: cleanedUp,
         addressCount: accountAddresses.length,
         webhookURL,
         truncated,

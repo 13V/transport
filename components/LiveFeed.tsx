@@ -24,6 +24,14 @@ interface Burst {
   windowEnd: string;
   sampleBuyers: string[];
   tiers?: (string | null)[] | null;
+  // Live market context (enriched server-side; optional so tsc stays clean
+  // before the enrichment ships). Render only when present — no fake data.
+  marketCapUsd?: number | null;
+  liquidityUsd?: number | null;
+  priceChange24h?: number | null;
+  priceUsd?: number | null;
+  pairAddress?: string | null;
+  finalized?: boolean;
 }
 
 interface LiveResponse {
@@ -31,12 +39,34 @@ interface LiveResponse {
   windowSec: number;
   minBuyers: number;
   count: number;
+  nextCursor?: string | null;
   bursts: Burst[];
 }
 
 const MIN_BUYERS: number[] = [3, 4, 5];
 const WINDOW_SEC: number[] = [15, 30, 60];
+const MIN_SOL: number[] = [0, 1, 5, 10];
 const POLL_MS = 3 * 1000;
+
+// Liquidity below this (USD) is a cheap rug proxy — flag it.
+const LOW_LIQ_USD = 5_000;
+// Realtime is only "fresh" if the last good fetch landed within this window.
+const STALE_MS = 15_000;
+// Hard floor between realtime-triggered refetches so a swap flood can't
+// out-poll the poller.
+const REALTIME_MIN_INTERVAL_MS = 3_000;
+
+// Freshness-dot palette. CHART_COLORS lacks warn/neutral hues and lives in a
+// file we don't own, so the amber/grey states are defined locally here.
+const DOT_WARN = '#F2C879';    // amber — reconnecting / stale
+const DOT_NEUTRAL = '#6A7184'; // grey  — before first successful fetch
+
+// Compact USD: "$1.2M" / "$340k" / "$820". Returns null when absent so callers
+// can render '—' / nothing rather than fake zeros.
+function usdCompact(n: number | null | undefined): string | null {
+  if (n == null || !Number.isFinite(n)) return null;
+  return `$${f.compact(n)}`;
+}
 
 // Parse an ISO timestamp into epoch ms (or null) for the ms-based formatters.
 function ms(iso: string | null | undefined): number | null {
@@ -46,12 +76,14 @@ function ms(iso: string | null | undefined): number | null {
 }
 
 function Header({
-  minBuyers, onMinBuyers, windowSec, onWindowSec,
+  minBuyers, onMinBuyers, windowSec, onWindowSec, minSol, onMinSol,
 }: {
   minBuyers: number;
   onMinBuyers: (n: number) => void;
   windowSec: number;
   onWindowSec: (n: number) => void;
+  minSol: number;
+  onMinSol: (n: number) => void;
 }) {
   return (
     <div className="page-head">
@@ -88,6 +120,20 @@ function Header({
             </button>
           ))}
         </div>
+        <div className="seg">
+          {MIN_SOL.map((s) => (
+            <button
+              key={s}
+              type="button"
+              className={minSol === s ? 'on' : ''}
+              onClick={() => onMinSol(s)}
+              aria-pressed={minSol === s}
+              title={s === 0 ? 'Any size burst' : `Only bursts totalling at least ${s} SOL`}
+            >
+              {s === 0 ? 'Any' : `≥${s}◎`}
+            </button>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -99,8 +145,12 @@ export default function LiveFeed() {
   const [generatedAt, setGeneratedAt] = useState<string | null>(null);
   const [minBuyers, setMinBuyers] = useState<number>(3);
   const [windowSec, setWindowSec] = useState<number>(30);
+  const [minSol, setMinSol] = useState<number>(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Wall-clock of the last SUCCESSFUL fetch — drives honest freshness/dot color.
+  const [lastOkAt, setLastOkAt] = useState<number | null>(null);
 
   // Track seen burst ids so we only highlight genuinely new cards on later polls.
   const seenRef = useRef<Set<string>>(new Set());
@@ -116,14 +166,16 @@ export default function LiveFeed() {
   const [realtimeOk, setRealtimeOk] = useState(false);
   // Current controls mirrored into refs so the realtime handler refetches with
   // the live filter values without re-subscribing on every control change.
-  const ctrlRef = useRef({ min: minBuyers, win: windowSec });
-  ctrlRef.current = { min: minBuyers, win: windowSec };
+  const ctrlRef = useRef({ min: minBuyers, win: windowSec, sol: minSol });
+  ctrlRef.current = { min: minBuyers, win: windowSec, sol: minSol };
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Timestamp of the last realtime-triggered refetch, for the min-interval floor.
+  const lastRealtimeFetchRef = useRef(0);
 
-  const fetchLive = useCallback(async (min: number, win: number) => {
+  const fetchLive = useCallback(async (min: number, win: number, sol: number) => {
     try {
       const res = await fetch(
-        `/api/smart-money/live?windowSec=${win}&minBuyers=${min}&hours=6&limit=50`
+        `/api/smart-money/live?windowSec=${win}&minBuyers=${min}&minSol=${sol}&hours=6&limit=50`
       );
       if (!res.ok) throw new Error('Failed to fetch live feed');
       const json = (await res.json()) as LiveResponse;
@@ -147,6 +199,7 @@ export default function LiveFeed() {
 
       setBursts(next);
       setGeneratedAt(json.generatedAt ?? new Date().toISOString());
+      setLastOkAt(Date.now());
       setError(null);
     } catch (err) {
       if (!mountedRef.current) return;
@@ -163,9 +216,9 @@ export default function LiveFeed() {
     setLoading(true);
     firstLoadRef.current = true;
     seenRef.current = new Set();
-    fetchLive(minBuyers, windowSec);
+    fetchLive(minBuyers, windowSec, minSol);
     return () => { mountedRef.current = false; };
-  }, [fetchLive, minBuyers, windowSec]);
+  }, [fetchLive, minBuyers, windowSec, minSol]);
 
   // Realtime push: subscribe once to trade INSERTs. Each insert (debounced ~700ms
   // to coalesce bursts of swaps) triggers an instant refetch with the CURRENT
@@ -175,12 +228,23 @@ export default function LiveFeed() {
     if (!sb) return;
     const channel = sb
       .channel('live-trades')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'trades' }, () => {
-        if (debounceRef.current) clearTimeout(debounceRef.current);
-        debounceRef.current = setTimeout(() => {
-          fetchLive(ctrlRef.current.min, ctrlRef.current.win);
-        }, 700);
-      })
+      .on(
+        'postgres_changes',
+        // Bursts only consider buys — filter server-side to halve message volume.
+        { event: 'INSERT', schema: 'public', table: 'trades', filter: 'trade_type=eq.BUY' },
+        () => {
+          if (debounceRef.current) clearTimeout(debounceRef.current);
+          debounceRef.current = setTimeout(() => {
+            // Hard min-interval floor: ignore realtime triggers that arrive
+            // within REALTIME_MIN_INTERVAL_MS of the last one so a swap flood
+            // can't out-poll the safety poller.
+            const now = Date.now();
+            if (now - lastRealtimeFetchRef.current < REALTIME_MIN_INTERVAL_MS) return;
+            lastRealtimeFetchRef.current = now;
+            fetchLive(ctrlRef.current.min, ctrlRef.current.win, ctrlRef.current.sol);
+          }, 700);
+        }
+      )
       .subscribe((status) => {
         if (mountedRef.current) setRealtimeOk(status === 'SUBSCRIBED');
       });
@@ -194,10 +258,10 @@ export default function LiveFeed() {
   // safety net (catches missed events / dropped sockets); otherwise it's the
   // primary 3s refresh.
   useEffect(() => {
-    const ms = realtimeOk ? 30_000 : POLL_MS;
-    const interval = setInterval(() => fetchLive(minBuyers, windowSec), ms);
+    const pollMs = realtimeOk ? 30_000 : POLL_MS;
+    const interval = setInterval(() => fetchLive(minBuyers, windowSec, minSol), pollMs);
     return () => clearInterval(interval);
-  }, [fetchLive, minBuyers, windowSec, realtimeOk]);
+  }, [fetchLive, minBuyers, windowSec, minSol, realtimeOk]);
 
   // Keep relative ages ticking between polls (every 5s is plenty).
   useEffect(() => {
@@ -211,6 +275,7 @@ export default function LiveFeed() {
         <Header
           minBuyers={minBuyers} onMinBuyers={setMinBuyers}
           windowSec={windowSec} onWindowSec={setWindowSec}
+          minSol={minSol} onMinSol={setMinSol}
         />
         <div className="stack gap-12">
           <SkCard h={60} />
@@ -226,22 +291,39 @@ export default function LiveFeed() {
         <Header
           minBuyers={minBuyers} onMinBuyers={setMinBuyers}
           windowSec={windowSec} onWindowSec={setWindowSec}
+          minSol={minSol} onMinSol={setMinSol}
         />
         <div className="card">
           <ErrorState
             msg="The live feed didn’t respond."
-            onRetry={() => { setLoading(true); fetchLive(minBuyers, windowSec); }}
+            onRetry={() => { setLoading(true); fetchLive(minBuyers, windowSec, minSol); }}
           />
         </div>
       </div>
     );
   }
 
+  // HONEST FRESHNESS — color the live dot by actual state instead of a
+  // hardcoded green. Green only when realtime is connected AND the last good
+  // fetch is recent; amber when realtime dropped (polling fallback) or the
+  // last fetch went stale; grey before the first successful fetch.
+  const sinceOk = lastOkAt == null ? Infinity : Date.now() - lastOkAt;
+  const stale = sinceOk > STALE_MS;
+  const freshness =
+    lastOkAt == null
+      ? { color: DOT_NEUTRAL, label: 'connecting…' }
+      : realtimeOk && !stale
+      ? { color: CHART_COLORS.POS, label: 'live — updates instantly' }
+      : !realtimeOk
+      ? { color: DOT_WARN, label: 'reconnecting… — polling every 3s' }
+      : { color: DOT_WARN, label: 'stale — retrying…' };
+
   return (
     <div className="view stack gap-16">
       <Header
         minBuyers={minBuyers} onMinBuyers={setMinBuyers}
         windowSec={windowSec} onWindowSec={setWindowSec}
+        minSol={minSol} onMinSol={setMinSol}
       />
 
       <div className="card card-pad">
@@ -250,13 +332,13 @@ export default function LiveFeed() {
             aria-hidden
             style={{
               width: 8, height: 8, borderRadius: '50%',
-              background: CHART_COLORS.POS,
-              boxShadow: `0 0 0 3px ${CHART_COLORS.POS}33`,
+              background: freshness.color,
+              boxShadow: `0 0 0 3px ${freshness.color}33`,
               flexShrink: 0,
             }}
           />
           <span className="faint" style={{ fontSize: 12 }}>
-            Updated {f.ago(ms(generatedAt))} · {realtimeOk ? 'live — updates instantly' : 'auto-refreshes every 3s'}
+            Updated {f.ago(lastOkAt)} · {freshness.label}
           </span>
         </div>
       </div>
@@ -282,6 +364,20 @@ export default function LiveFeed() {
             const isNew = newIds.has(b.id);
             const sample = b.sampleBuyers.slice(0, 4);
             const tiers = b.tiers ?? [];
+
+            // Compact conviction summary from the present tiers, e.g. "S·A·B".
+            const tierSummary = tiers.filter((t): t is string => !!t).join('·');
+
+            // TRAP heuristic: many wallets attributed to few entities → likely
+            // one actor faking a crowd. Promote to a visible warning chip.
+            const isTrap = b.buyerWallets >= 2 * b.buyers && b.buyers > 0;
+
+            // Low-liquidity rug proxy (only when liquidity is actually present).
+            const lowLiq = b.liquidityUsd != null && b.liquidityUsd < LOW_LIQ_USD;
+
+            const mcap = usdCompact(b.marketCapUsd);
+            const liq = usdCompact(b.liquidityUsd);
+            const chg = b.priceChange24h;
             return (
               <div
                 key={b.id}
@@ -328,13 +424,30 @@ export default function LiveFeed() {
                     </div>
                   </div>
 
-                  <div style={{ fontSize: 13.5, fontWeight: 600 }}>
-                    <span className="num pos" style={{ fontWeight: 700 }}>{b.buyers}</span>{' '}
-                    smart wallets bought within {windowSec}s
-                    {b.buyerWallets > b.buyers && (
-                      <span className="faint" style={{ fontWeight: 500, fontSize: 12 }}>
-                        {' '}· {b.buyerWallets} wallets / {b.buyers} entities
+                  <div style={{ fontSize: 13.5, fontWeight: 600 }} className="row gap-8 wrap">
+                    <span>
+                      <span className="num pos" style={{ fontWeight: 700 }}>{b.buyers}</span>{' '}
+                      smart wallets bought within {windowSec}s
+                    </span>
+                    {tierSummary && (
+                      <span
+                        className="mono"
+                        style={{ fontWeight: 700, fontSize: 12, letterSpacing: '.02em', color: 'var(--text-2)' }}
+                        title="Tiers of the sampled buyers (conviction at a glance)"
+                      >
+                        {tierSummary}
                       </span>
+                    )}
+                    {isTrap ? (
+                      <span className="badge neg" title="Many wallets map to few entities — likely one actor faking a crowd">
+                        TRAP · {b.buyerWallets} wallets / {b.buyers} entities
+                      </span>
+                    ) : (
+                      b.buyerWallets > b.buyers && (
+                        <span className="faint" style={{ fontWeight: 500, fontSize: 12 }}>
+                          · {b.buyerWallets} wallets / {b.buyers} entities
+                        </span>
+                      )
                     )}
                   </div>
 
@@ -344,6 +457,36 @@ export default function LiveFeed() {
                     </span>
                     {spanSec != null && <span>over {spanSec}s</span>}
                   </div>
+
+                  {/* Live market context — render only fields that are present
+                      (no fake zeros); '—' is shown for absent metrics inline. */}
+                  {(mcap || liq || chg != null || lowLiq) && (
+                    <div className="row gap-12 wrap" style={{ fontSize: 12 }}>
+                      {mcap && (
+                        <span className="faint">
+                          MC <span className="num" style={{ color: 'var(--text)' }}>{mcap}</span>
+                        </span>
+                      )}
+                      {liq && (
+                        <span className="faint">
+                          Liq <span className="num" style={{ color: 'var(--text)' }}>{liq}</span>
+                        </span>
+                      )}
+                      {chg != null && Number.isFinite(chg) && (
+                        <span className="faint">
+                          24h{' '}
+                          <span className={`num ${chg >= 0 ? 'pos' : 'neg'}`} style={{ fontWeight: 650 }}>
+                            {f.pct(chg)}
+                          </span>
+                        </span>
+                      )}
+                      {lowLiq && (
+                        <span className="badge neg" title={`Liquidity under $${(LOW_LIQ_USD / 1000)}k — high rug risk`}>
+                          low liq
+                        </span>
+                      )}
+                    </div>
+                  )}
 
                   {sample.length > 0 && (
                     <div className="row gap-10 wrap">
@@ -356,7 +499,7 @@ export default function LiveFeed() {
                     </div>
                   )}
 
-                  <TradeLinks mint={b.mint} size="xs" />
+                  <TradeLinks mint={b.mint} size="xs" primary />
                 </div>
               </div>
             );

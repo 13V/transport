@@ -28,6 +28,12 @@ export interface TradeRow {
   sol_amount: number;
   tx_hash: string;
   block_time: string;
+  /**
+   * DEX venue from the enriched tx (e.g. 'PUMP_FUN','RAYDIUM','JUPITER').
+   * Falls back to 'HELIUS' when Helius doesn't tell us. Without this the DB
+   * default ('JUPITER') would mislabel every webhook-ingested trade.
+   */
+  source?: string;
 }
 
 // ---- Loose shapes for the Helius enhanced payload (defensive parsing). ----
@@ -69,6 +75,8 @@ interface EnhancedTx {
   signature?: string;
   timestamp?: number; // unix SECONDS
   type?: string;
+  source?: string; // DEX venue, e.g. 'PUMP_FUN','RAYDIUM','JUPITER'
+  fee?: number; // network + priority fee, lamports
   feePayer?: string;
   tokenTransfers?: TokenTransfer[];
   nativeTransfers?: NativeTransfer[];
@@ -278,11 +286,30 @@ export function parseHeliusSwaps(payload: unknown, subscribed?: Set<string>): Tr
         (swap ? fromSwapEvent(swap, wallet) : null) ?? fromTransfers(tx, wallet);
       if (!parsed) continue;
 
-      const { token_mint, trade_type, amount, sol_amount } = parsed;
+      const { token_mint, trade_type, amount } = parsed;
+      let { sol_amount } = parsed;
       if (isSolMint(token_mint)) continue; // never store the SOL side as the token
+
+      // Converge on the indexer's price math (swap-fetcher computeWalletDeltas):
+      // when the trading wallet is the feePayer, its SOL movement includes the
+      // network + priority fee, which is GAS — not trade economics. Add tx.fee
+      // back so the same trade prices identically via webhook or indexer.
+      if (wallet === tx.feePayer) {
+        const feeLamports = num(tx.fee);
+        if (Number.isFinite(feeLamports) && feeLamports > 0) {
+          sol_amount += feeLamports / LAMPORTS_PER_SOL;
+        }
+      }
 
       const price = sol_amount / amount;
       if (!Number.isFinite(price) || price <= 0) continue; // guard div-by-zero / NaN
+
+      // Helius gives the venue; fall back to 'HELIUS' when unknown so the trade
+      // isn't silently mislabeled by the DB default.
+      const source =
+        typeof tx.source === 'string' && tx.source.trim() !== ''
+          ? tx.source
+          : 'HELIUS';
 
       rows.push({
         wallet,
@@ -293,6 +320,7 @@ export function parseHeliusSwaps(payload: unknown, subscribed?: Set<string>): Tr
         sol_amount,
         tx_hash: signature,
         block_time: new Date(timestamp * 1000).toISOString(),
+        source,
       });
     } catch {
       // Skip ambiguous / malformed tx — never guess.

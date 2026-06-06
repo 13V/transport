@@ -99,25 +99,52 @@ export function AddrChip({ address, copy = true, watch = false, len = 4 }: AddrC
   );
 }
 
-/** Row of quick-trade + explorer chips for a token mint. */
-export function TradeLinks({ mint, size = 'sm' }: { mint: string; size?: 'sm' | 'xs' }) {
+/**
+ * Row of quick-trade + explorer chips for a token mint.
+ * `primary` promotes the FIRST trade-kind link (the preferred terminal) to a
+ * larger filled "one-tap ape" button; the rest stay as chips.
+ */
+export function TradeLinks({
+  mint, size = 'sm', primary = false,
+}: { mint: string; size?: 'sm' | 'xs'; primary?: boolean }) {
   const links = tokenLinks(mint);
   if (!links.length) return null;
+
+  // Index of the first trade link to promote (only when `primary`).
+  const primaryIdx = primary ? links.findIndex((l) => l.kind === 'trade') : -1;
+
   return (
     <span className="row gap-8 wrap" onClick={(e) => e.stopPropagation()}>
-      {links.map((l) => (
-        <a
-          key={l.label}
-          className={`badge ${l.kind === 'trade' ? 'accent' : 'tag'}`}
-          style={{ height: size === 'xs' ? 18 : 21, textDecoration: 'none' }}
-          href={l.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          title={`Open in ${l.label}`}
-        >
-          {l.label}
-        </a>
-      ))}
+      {links.map((l, i) => {
+        if (i === primaryIdx) {
+          return (
+            <a
+              key={l.label}
+              className="btn primary sm trade-primary"
+              style={{ textDecoration: 'none' }}
+              href={l.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              title={`Trade on ${l.label} — one tap`}
+            >
+              Ape · {l.label}
+            </a>
+          );
+        }
+        return (
+          <a
+            key={l.label}
+            className={`badge ${l.kind === 'trade' ? 'accent' : 'tag'}`}
+            style={{ height: size === 'xs' ? 18 : 21, textDecoration: 'none' }}
+            href={l.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={`Open in ${l.label}`}
+          >
+            {l.label}
+          </a>
+        );
+      })}
     </span>
   );
 }

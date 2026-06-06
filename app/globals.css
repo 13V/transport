@@ -294,6 +294,25 @@ button { font-family: inherit; }
   .iconbtn { width: 40px; height: 40px; }
   .btn.sm { height: 40px; }
   .check, .check.sm { height: 40px; }
+
+  /* Trade-link chips are the money action but ship at ~18–21px — far below the
+     40px touch target every other control gets bumped to. On phones give the
+     trade/explorer chips and the one-tap "Ape" primary button a ≥40px tap
+     height. These chips set an inline `height`, so min-height alone loses;
+     override the inline height too. Scoped to the trade/explorer chip variants
+     (`.badge.accent` = trade, `.badge.tag` = explorer) so unrelated status
+     badges keep their density. Desktop is untouched (this only applies ≤768px). */
+  a.badge.accent, a.badge.tag {
+    height: auto !important;
+    min-height: 40px;
+    padding-top: 8px; padding-bottom: 8px;
+    padding-left: 14px; padding-right: 14px;
+  }
+  .btn.trade-primary {
+    height: 44px; min-height: 44px;
+    padding-left: 18px; padding-right: 18px;
+    font-size: 14px;
+  }
 }
 
 /* ≤640px: tighter content padding + clean wrapping of heads/toolbars */

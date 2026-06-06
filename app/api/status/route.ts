@@ -25,13 +25,47 @@ export async function GET() {
   const criteria = getSmartCriteria();
   const now = Date.now();
 
-  // Last cron runs (bookkeeping written by the indexer / refine passes).
+  // Last cron runs (bookkeeping written by the indexer / refine passes), plus the
+  // last_webhook_at ingest heartbeat written by the realtime webhook receiver.
   const { data: stateRows } = await supabase
     .from('indexer_state')
     .select('key, value, updated_at')
-    .in('key', ['last_run', 'last_seed_run']);
+    .in('key', ['last_run', 'last_seed_run', 'last_webhook_at']);
   const state: Record<string, unknown> = {};
   for (const r of stateRows ?? []) state[(r as any).key] = (r as any).value;
+
+  // INGEST HEALTH — surface whether webhooks/realtime are still flowing so the
+  // operator (and UI) can tell at a glance if ingest died. Each is guarded so a
+  // single failure leaves the field null instead of breaking the endpoint.
+
+  // lastWebhookAt: the heartbeat the receiver stamps on every delivery.
+  let lastWebhookAt: string | null = null;
+  try {
+    const raw = state.last_webhook_at;
+    if (typeof raw === 'string') lastWebhookAt = raw;
+    else if (raw && typeof raw === 'object') {
+      const v =
+        (raw as any).at ?? (raw as any).value ?? (raw as any).last_webhook_at ?? null;
+      if (typeof v === 'string') lastWebhookAt = v;
+    }
+  } catch {
+    lastWebhookAt = null;
+  }
+
+  // lastTradeAt: the newest trade we've ingested — a cheap indexed single-row read.
+  let lastTradeAt: string | null = null;
+  try {
+    const { data: latestTrade } = await supabase
+      .from('trades')
+      .select('block_time')
+      .order('block_time', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const bt = (latestTrade as any)?.block_time;
+    if (bt != null) lastTradeAt = typeof bt === 'string' ? bt : new Date(bt).toISOString();
+  } catch {
+    lastTradeAt = null;
+  }
 
   // Total indexed wallets.
   const { count: totalWallets } = await supabase
@@ -107,6 +141,8 @@ export async function GET() {
       generatedAt: new Date().toISOString(),
       lastIndexRun: state.last_run ?? null,
       lastRefineRun: state.last_seed_run ?? null,
+      lastWebhookAt,
+      lastTradeAt,
       migrationApplied,
       ...(migrationApplied
         ? {}

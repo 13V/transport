@@ -114,6 +114,15 @@ export async function editWebhook(id: string, cfg: WebhookConfig): Promise<Heliu
   }
 }
 
+/** Delete a webhook by id. Idempotent from the caller's view: a 404 is fine. */
+export async function deleteWebhook(id: string): Promise<void> {
+  try {
+    await axios.delete(webhookUrl(id), { timeout: 30_000 });
+  } catch (error) {
+    throw wrap('delete', error);
+  }
+}
+
 /** True if the error is a 404 (webhook id no longer exists → recreate). */
 export function isNotFound(error: unknown): boolean {
   return error instanceof HeliusWebhookError && error.status === 404;

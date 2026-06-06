@@ -14,6 +14,7 @@
    NEXT_PUBLIC_REF_AXIOM         Axiom      ?ref=<code>         medium
    NEXT_PUBLIC_REF_BULLX         BullX      &r=<code>           medium
    NEXT_PUBLIC_REF_PHOTON        Photon     ?handle=<code>      medium
+   NEXT_PUBLIC_REF_JUPITER       Jupiter    ?referrer=<code>    medium
 
    Notes:
    - GMGN officially documents the `ref` query param (docs.gmgn.ai).
@@ -21,6 +22,8 @@
      deeplinks; the query-param forms below are best-effort. If a platform
      ever rejects its param, unset the env var to fall back to a clean URL —
      no fake data ships either way.
+   - Jupiter supports a referral account via the `referrer` query param on the
+     swap UI; unset the env var to emit a plain swap link.
    ------------------------------------------------------------------------- */
 
 const REF = {
@@ -28,6 +31,7 @@ const REF = {
   axiom: process.env.NEXT_PUBLIC_REF_AXIOM,
   bullx: process.env.NEXT_PUBLIC_REF_BULLX,
   photon: process.env.NEXT_PUBLIC_REF_PHOTON,
+  jupiter: process.env.NEXT_PUBLIC_REF_JUPITER,
 } as const;
 
 /** Append `key=value` to a URL, choosing `?` or `&` correctly. No-op when
@@ -52,7 +56,7 @@ export function tokenLinks(mint: string): ExtLink[] {
     { label: 'GMGN', url: withParam(`https://gmgn.ai/sol/token/${mint}`, 'ref', REF.gmgn), kind: 'trade' },
     { label: 'BullX', url: withParam(`https://neo.bullx.io/terminal?chainId=1399811149&address=${mint}`, 'r', REF.bullx), kind: 'trade' },
     { label: 'Photon', url: withParam(`https://photon-sol.tinyastro.io/en/lp/${mint}`, 'handle', REF.photon), kind: 'trade' },
-    { label: 'Jupiter', url: `https://jup.ag/swap/SOL-${mint}`, kind: 'trade' },
+    { label: 'Jupiter', url: withParam(`https://jup.ag/swap/SOL-${mint}`, 'referrer', REF.jupiter), kind: 'trade' },
     { label: 'DexScreener', url: `https://dexscreener.com/solana/${mint}`, kind: 'explorer' },
     { label: 'Solscan', url: `https://solscan.io/token/${mint}`, kind: 'explorer' },
   ];
