@@ -4,6 +4,7 @@
    ./interactive.tsx. Use the './ui' barrel to import.
    ========================================================================= */
 import React from 'react';
+import Link from 'next/link';
 import type { LucideIcon } from 'lucide-react';
 import { Inbox } from 'lucide-react';
 import * as f from '@/lib/format';
@@ -20,7 +21,7 @@ export function TierBadge({ tier, lg }: { tier?: string | null; lg?: boolean }) 
 }
 
 export function Roi({ value, d = 1 }: { value?: number | null; d?: number }) {
-  if (value == null) return <span className="faint" title="Not deep-scanned yet">—</span>;
+  if (value == null || !Number.isFinite(value)) return <span className="faint" title="Not deep-scanned yet">—</span>;
   return (
     <span className={`num ${value >= 0 ? 'pos' : 'neg'}`} style={{ fontWeight: 650 }}>
       {f.pct(value, d)}
@@ -29,7 +30,7 @@ export function Roi({ value, d = 1 }: { value?: number | null; d?: number }) {
 }
 
 export function Pnl({ value, unit = true }: { value?: number | null; unit?: boolean }) {
-  if (value == null) return <span className="faint">—</span>;
+  if (value == null || !Number.isFinite(value)) return <span className="faint">—</span>;
   return (
     <span className={`num ${value >= 0 ? 'pos' : 'neg'}`} style={{ fontWeight: 600 }}>
       {f.solSigned(value)}
@@ -39,12 +40,12 @@ export function Pnl({ value, unit = true }: { value?: number | null; unit?: bool
 }
 
 export function WinBar({ value }: { value?: number | null }) {
-  if (value == null) return <span className="faint">—</span>;
+  if (value == null || !Number.isFinite(value)) return <span className="faint">—</span>;
   const w = Math.max(0, Math.min(1, value));
   return (
     <span className="metricw">
       <span className="bar pos"><i style={{ width: `${(w * 100).toFixed(0)}%` }} /></span>
-      <span className="mv faint">{Math.round(value * 100)}%</span>
+      <span className="mv faint">{Math.round(w * 100)}%</span>
     </span>
   );
 }
@@ -69,7 +70,8 @@ export function TokenMark({ symbol, size = 26 }: { symbol?: string; size?: numbe
 }
 
 export function SourceBadge({ source }: { source: string }) {
-  const label = source === 'BONDING_CURVE' ? 'Bonding' : source.charAt(0) + source.slice(1).toLowerCase();
+  const s = source || '';
+  const label = s === 'BONDING_CURVE' ? 'Bonding' : s ? s.charAt(0) + s.slice(1).toLowerCase() : '—';
   return <span className="badge tag">{label}</span>;
 }
 
@@ -84,7 +86,7 @@ export function EmptyState({
       <h4>{title}</h4>
       {msg && <p>{msg}</p>}
       {action && actionHref && (
-        <a className="btn primary sm" href={actionHref}>{action}</a>
+        <Link className="btn primary sm" href={actionHref}>{action}</Link>
       )}
     </div>
   );

@@ -56,17 +56,15 @@ function trendSeries(mint: string): number[] {
 function Header({ hours, onWindow }: { hours: Window; onWindow: (w: Window) => void }) {
   return (
     <div className="page-head">
-      <div>
-        <h1>What smart money is buying</h1>
-        <p className="sub">
-          Tokens bought by multiple verified smart wallets in the selected window.
-        </p>
+      <div className="sub">
+        Tokens bought by multiple verified smart wallets in the selected window.
       </div>
       <div className="page-head-actions">
         <div className="seg">
           {WINDOWS.map((w) => (
             <button
               key={w}
+              type="button"
               className={hours === w ? 'on' : ''}
               onClick={() => onWindow(w)}
               aria-pressed={hours === w}
@@ -118,7 +116,7 @@ export default function SmartMoneyBuying() {
 
   if (loading) {
     return (
-      <div className="view stack gap-16">
+      <div className="view stack gap-24">
         <Header hours={hours} onWindow={setHours} />
         <SkTable cols={6} rows={10} />
       </div>
@@ -127,7 +125,7 @@ export default function SmartMoneyBuying() {
 
   if (error) {
     return (
-      <div className="view stack gap-16">
+      <div className="view stack gap-24">
         <Header hours={hours} onWindow={setHours} />
         <div className="card">
           <ErrorState
@@ -141,7 +139,7 @@ export default function SmartMoneyBuying() {
 
   if (data.length === 0) {
     return (
-      <div className="view stack gap-16">
+      <div className="view stack gap-24">
         <Header hours={hours} onWindow={setHours} />
         <div className="card">
           <EmptyState
@@ -176,7 +174,7 @@ export default function SmartMoneyBuying() {
               {data.map((t, i) => {
                 const symbol = t.symbol || f.short(t.mint, 4, 4);
                 const firstMs = ms(t.firstBuy);
-                const age = firstMs ? f.ago(firstMs).replace(' ago', '') : '—';
+                const age = firstMs ? `${f.ago(firstMs).replace(' ago', '')} old` : '—';
                 return (
                   <tr
                     key={t.mint}
@@ -191,7 +189,7 @@ export default function SmartMoneyBuying() {
                           <div className="row gap-8">
                             <b style={{ fontSize: 13 }}>{symbol}</b>
                             <span className="faint" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
-                              {age} old
+                              {age}
                             </span>
                           </div>
                           <span className="mono faint" style={{ fontSize: 10.5 }}>
@@ -201,14 +199,14 @@ export default function SmartMoneyBuying() {
                       </div>
                     </td>
                     <td className="r">
-                      <span className="num pos" style={{ fontWeight: 650 }}>
+                      <span className="num pos" style={{ fontWeight: 650, fontSize: 13 }}>
                         {t.distinctSmartBuyers}
                       </span>{' '}
-                      <span className="faint">smart</span>
+                      <span className="faint" style={{ fontSize: 11 }}>smart</span>
                     </td>
                     <td className="r num faint">{t.buys}</td>
-                    <td className="r num">
-                      <b>{f.sol(t.solVolume)}</b>{' '}
+                    <td className="r num" style={{ fontWeight: 600 }}>
+                      {f.sol(t.solVolume)}{' '}
                       <span className="faint" style={{ fontWeight: 500, fontSize: 11 }}>SOL</span>
                     </td>
                     <td className="c">

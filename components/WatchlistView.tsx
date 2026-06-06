@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Star, Copy } from 'lucide-react';
 import { useWatchlist } from '@/lib/useWatchlist';
+import * as f from '@/lib/format';
 import {
   TierBadge, Roi, Pnl, WinBar, EmptyState, ErrorState, SkTable,
   AddrChip, WatchStar, CopyIconButton,
@@ -12,7 +13,7 @@ import {
 interface ListWallet {
   address: string;
   score: number;
-  pnl: number;
+  pnl: number | null;
   roiPct: number | null;
   verified?: boolean;
   winRate?: number;
@@ -56,7 +57,7 @@ export default function WatchlistView() {
   const rows = useMemo(() => {
     const byAddress = new Map(wallets.map((w) => [w.address, w]));
     return watchlist.map(
-      (address) => byAddress.get(address) ?? ({ address, score: 0, pnl: 0, roiPct: null } as ListWallet)
+      (address) => byAddress.get(address) ?? ({ address, score: 0, pnl: null, roiPct: null } as ListWallet)
     );
   }, [watchlist, wallets]);
 
@@ -71,7 +72,7 @@ export default function WatchlistView() {
       </div>
       {watchlist.length > 0 && (
         <div className="page-head-actions">
-          <button className="btn pos-soft sm" onClick={copyAddresses}>
+          <button type="button" className="btn pos-soft sm" onClick={copyAddresses}>
             <Copy size={15} /> Copy addresses
           </button>
         </div>
@@ -140,7 +141,9 @@ export default function WatchlistView() {
                   onClick={() => router.push(`/smart-money/${w.address}`)}
                 >
                   <td><AddrChip address={w.address} copy={false} /></td>
-                  <td className="c"><TierBadge tier={w.tier} /></td>
+                  <td className="c">
+                    <TierBadge tier={w.tier ?? (w.score > 0 ? f.tierFromScore(w.score) : null)} />
+                  </td>
                   <td className="r"><Roi value={w.roiPct} /></td>
                   <td className="r"><Pnl value={w.pnl} /></td>
                   <td className="r"><WinBar value={w.winRate} /></td>

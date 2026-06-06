@@ -87,21 +87,30 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
     e.currentTarget.blur();
   }
 
+  const title = titleFor(pathname);
+
   return (
     <div className="app">
       <aside className="sidebar">
-        <Link href="/" className="side-brand">
-          <span className="brand-mark"><Activity size={14} /></span>
+        <Link href="/" className="side-brand" aria-label="Smart Money — home">
+          <span className="brand-mark" aria-hidden="true"><Activity size={14} /></span>
           <span className="brand-name"><b>Smart</b><span>Money</span></span>
         </Link>
-        <nav className="side-nav">
+        <nav className="side-nav" aria-label="Primary">
           {NAV.map((g) => (
             <React.Fragment key={g.group}>
-              <div className="side-group">{g.group}</div>
+              <div className="side-group" aria-hidden="true">{g.group}</div>
               {g.items.map((n) => {
                 const Icon = n.icon;
+                const active = owner === n.owner;
                 return (
-                  <Link key={n.href} href={n.href} className={`side-link ${owner === n.owner ? 'active' : ''}`}>
+                  <Link
+                    key={n.href}
+                    href={n.href}
+                    className={`side-link ${active ? 'active' : ''}`}
+                    aria-current={active ? 'page' : undefined}
+                    title={n.label}
+                  >
                     <Icon size={16} /> <span>{n.label}</span>
                   </Link>
                 );
@@ -111,33 +120,38 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         </nav>
         <div className="side-foot">
           <div className="side-status">
-            <span className="net-dot live" /> <span className="mono">Solana mainnet</span>
+            <span className="net-dot live" aria-hidden="true" /> <span className="mono">Solana mainnet</span>
           </div>
         </div>
       </aside>
 
       <div className="content">
         <header className="topbar">
-          <span className="topbar-title">{titleFor(pathname)}</span>
-          <span className="topbar-sep" />
+          <h1 className="topbar-title">{title}</h1>
+          <span className="topbar-sep" aria-hidden="true" />
           <span className="topbar-meta">
-            <span className="net-dot live" /> Updated {updated || '—'}
+            <span className="net-dot live" aria-hidden="true" />
+            <span>Updated <span suppressHydrationWarning>{updated || '—'}</span></span>
           </span>
           <div className="topbar-right">
-            <div className="topbar-search">
-              <span className="search-ic"><Search size={14} /></span>
+            <div className="topbar-search" role="search">
+              <span className="search-ic" aria-hidden="true"><Search size={14} /></span>
+              <label htmlFor="global-search" className="sr-only">Search wallet or token</label>
               <input
+                id="global-search"
                 ref={searchRef}
+                type="search"
                 placeholder="Search wallet or token…"
+                aria-label="Search wallet or token"
                 spellCheck={false}
                 autoComplete="off"
                 onKeyDown={onSearch}
               />
-              <span className="kbd">/</span>
+              <span className="kbd" aria-hidden="true">/</span>
             </div>
           </div>
         </header>
-        <main className="main">{children}</main>
+        <main className="main" id="main-content">{children}</main>
       </div>
     </div>
   );

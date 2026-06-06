@@ -47,9 +47,11 @@ export function AreaChart({ values, height = 220, color = CHART_COLORS.ACCENT, x
   const pad = { t: 16, r: 16, b: 26, l: 44 };
   const iw = w - pad.l - pad.r;
   const ih = h - pad.t - pad.b;
-  const id = hashId('a', values);
+  const clean = (values ?? []).filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+  const id = hashId('a', clean);
 
-  if (values.length < 2) return <svg className="spark" viewBox={`0 0 ${w} ${h}`} width="100%" height={h} />;
+  if (clean.length < 2) return <svg className="spark" viewBox={`0 0 ${w} ${h}`} width="100%" height={h} aria-hidden="true" />;
+  values = clean;
 
   const min = Math.min(0, ...values);
   const max = Math.max(...values);
@@ -115,8 +117,10 @@ interface SparklineProps {
 export function Sparkline({ values, width = 96, height = 28, color = CHART_COLORS.ACCENT }: SparklineProps) {
   const w = width;
   const h = height;
-  const id = hashId('s', values);
-  if (values.length < 2) return <svg className="spark" viewBox={`0 0 ${w} ${h}`} width={w} height={h} />;
+  const clean = (values ?? []).filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+  const id = hashId('s', clean);
+  if (clean.length < 2) return <svg className="spark" viewBox={`0 0 ${w} ${h}`} width={w} height={h} aria-hidden="true" />;
+  values = clean;
   const min = Math.min(...values);
   const max = Math.max(...values);
   const span = max - min || 1;
@@ -156,6 +160,9 @@ export function Bars({ values, width = 340, height = 150, highlight, labels }: B
   const pad = { t: 10, r: 4, b: labels ? 22 : 6, l: 4 };
   const iw = w - pad.l - pad.r;
   const ih = h - pad.t - pad.b;
+  const clean = (values ?? []).map((v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0));
+  if (!clean.length) return <svg className="spark" viewBox={`0 0 ${w} ${h}`} width="100%" height={h} aria-hidden="true" />;
+  values = clean;
   const max = Math.max(...values) || 1;
   const n = values.length;
   const gap = 4;

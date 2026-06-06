@@ -1,8 +1,8 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { Sparkles, Users, Wallet, BarChart, Loader } from 'lucide-react';
+import { Sparkles, Users, Wallet, BarChart } from 'lucide-react';
 import * as f from '@/lib/format';
 import {
   TokenMark, TierBadge, Roi, Pnl, AddrChip, CopyIconButton,
@@ -66,34 +66,48 @@ function TitleCard({ mint, sym, count }: { mint: string; sym: string; count: num
 export default function TokenSmartHolders({ mint }: TokenSmartHoldersProps) {
   const router = useRouter();
   const [data, setData] = useState<SmartHoldersResponse | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
 
   const sym = f.short(mint, 4, 4);
 
-  const scan = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/token/${mint}/smart-holders`);
-      if (!res.ok) {
-        let message = 'Scan failed';
-        try {
-          const body = await res.json();
-          if (body?.error) message = body.error;
-        } catch {
-          // ignore JSON parse failures, keep default message
+  const retry = useCallback(() => setReloadKey((k) => k + 1), []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function scan() {
+      setLoading(true);
+      setError(null);
+      try {
+        const res = await fetch(`/api/token/${mint}/smart-holders`);
+        if (!res.ok) {
+          let message = 'Scan failed';
+          try {
+            const body = await res.json();
+            if (body?.error) message = body.error;
+          } catch {
+            // ignore JSON parse failures, keep default message
+          }
+          throw new Error(message);
         }
-        throw new Error(message);
+        const json = (await res.json()) as SmartHoldersResponse;
+        if (!cancelled) setData(json);
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : 'Scan failed');
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
       }
-      const json = (await res.json()) as SmartHoldersResponse;
-      setData(json);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Scan failed');
-    } finally {
-      setLoading(false);
     }
-  }, [mint]);
+
+    scan();
+    return () => {
+      cancelled = true;
+    };
+  }, [mint, reloadKey]);
 
   // ---- loading skeleton ----
   if (loading && !data) {
@@ -115,35 +129,14 @@ export default function TokenSmartHolders({ mint }: TokenSmartHoldersProps) {
           <ErrorState
             title="Couldn’t load token"
             msg={error}
-            onRetry={scan}
+            onRetry={retry}
           />
         </div>
       </div>
     );
   }
 
-  // ---- pre-scan prompt (preserve on-demand fetch) ----
-  if (!data) {
-    return (
-      <div className="view stack gap-20">
-        <TitleCard mint={mint} sym={sym} count={null} />
-        <div className="card card-pad">
-          <div className="row between wrap gap-16">
-            <div className="stack" style={{ gap: 4 }}>
-              <div className="row gap-8">
-                <span className="stat-ic accent"><Sparkles size={15} /></span>
-                <b>Smart money in this coin</b>
-              </div>
-              <span className="faint" style={{ fontSize: 12 }}>
-                Verified smart wallets among this coin’s recent traders. Scans on-chain (~30s).
-              </span>
-            </div>
-            <button className="btn sm" onClick={scan}>Scan smart holders</button>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  if (!data) return null;
 
   const holders = data.smartHolders ?? [];
   const smartHolders = data.smartHolderCount ?? holders.length;
