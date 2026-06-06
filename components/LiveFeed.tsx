@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { Radio } from 'lucide-react';
 import * as f from '@/lib/format';
+import { getBrowserSupabase } from '@/lib/supabase-browser';
 import {
   TokenMark, TradeLinks, AddrChip, TierBadge, EmptyState, ErrorState,
   SkTable, SkCard, CHART_COLORS,
@@ -110,6 +111,15 @@ export default function LiveFeed() {
   // Re-rendered "now" tick so relative ages stay fresh between polls.
   const [, setTick] = useState(0);
 
+  // Realtime: when connected, the browser is pushed every new trade INSERT and we
+  // refetch instantly (no poll lag). null until we know; true once subscribed.
+  const [realtimeOk, setRealtimeOk] = useState(false);
+  // Current controls mirrored into refs so the realtime handler refetches with
+  // the live filter values without re-subscribing on every control change.
+  const ctrlRef = useRef({ min: minBuyers, win: windowSec });
+  ctrlRef.current = { min: minBuyers, win: windowSec };
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const fetchLive = useCallback(async (min: number, win: number) => {
     try {
       const res = await fetch(
@@ -157,11 +167,37 @@ export default function LiveFeed() {
     return () => { mountedRef.current = false; };
   }, [fetchLive, minBuyers, windowSec]);
 
-  // Poll every 3s for the current controls (data updates in near real-time).
+  // Realtime push: subscribe once to trade INSERTs. Each insert (debounced ~700ms
+  // to coalesce bursts of swaps) triggers an instant refetch with the CURRENT
+  // controls. Falls back silently to polling if Supabase Realtime isn't configured.
   useEffect(() => {
-    const interval = setInterval(() => fetchLive(minBuyers, windowSec), POLL_MS);
+    const sb = getBrowserSupabase();
+    if (!sb) return;
+    const channel = sb
+      .channel('live-trades')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'trades' }, () => {
+        if (debounceRef.current) clearTimeout(debounceRef.current);
+        debounceRef.current = setTimeout(() => {
+          fetchLive(ctrlRef.current.min, ctrlRef.current.win);
+        }, 700);
+      })
+      .subscribe((status) => {
+        if (mountedRef.current) setRealtimeOk(status === 'SUBSCRIBED');
+      });
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      sb.removeChannel(channel);
+    };
+  }, [fetchLive]);
+
+  // Poll for the current controls. When Realtime is pushing, this drops to a slow
+  // safety net (catches missed events / dropped sockets); otherwise it's the
+  // primary 3s refresh.
+  useEffect(() => {
+    const ms = realtimeOk ? 30_000 : POLL_MS;
+    const interval = setInterval(() => fetchLive(minBuyers, windowSec), ms);
     return () => clearInterval(interval);
-  }, [fetchLive, minBuyers, windowSec]);
+  }, [fetchLive, minBuyers, windowSec, realtimeOk]);
 
   // Keep relative ages ticking between polls (every 5s is plenty).
   useEffect(() => {
@@ -220,7 +256,7 @@ export default function LiveFeed() {
             }}
           />
           <span className="faint" style={{ fontSize: 12 }}>
-            Updated {f.ago(ms(generatedAt))} · auto-refreshes every 3s
+            Updated {f.ago(ms(generatedAt))} · {realtimeOk ? 'live — updates instantly' : 'auto-refreshes every 3s'}
           </span>
         </div>
       </div>
