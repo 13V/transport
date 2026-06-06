@@ -15,7 +15,7 @@ import {
 // ---- API shapes ----------------------------------------------------------
 interface StatusResponse { totals: { walletsIndexed: number; verifiedWallets: number; smartWallets: number } }
 interface ListWallet { address: string; roiPct: number | null; pnl: number; winRate: number; verified: boolean; tier?: string }
-interface BuyingToken { mint: string; symbol?: string; name?: string; icon?: string; distinctSmartBuyers: number; solVolume: number }
+interface BuyingToken { mint: string; symbol?: string; name?: string; icon?: string; distinctSmartBuyers: number; solVolume: number; lastBuy?: string }
 interface Mover { wallet: string; rankDelta: number | null; latestRoi: number | null; latestRank: number | null }
 
 type Load<T> = { state: 'loading' | 'ok' | 'error'; data: T | null };
@@ -179,7 +179,7 @@ export default function Dashboard() {
             ) : (
               <div className="table-wrap">
                 <table className="dt compact">
-                  <thead><tr><th>Token</th><th className="r">Buyers</th><th className="r">SOL vol</th></tr></thead>
+                  <thead><tr><th>Token</th><th className="r">Buyers</th><th className="r">SOL vol</th><th className="r">Last buy</th></tr></thead>
                   <tbody>
                     {buying.data.slice(0, 6).map((t) => (
                       <tr key={t.mint} className="clickable" onClick={() => router.push(`/token/${t.mint}`)}>
@@ -198,6 +198,7 @@ export default function Dashboard() {
                         </td>
                         <td className="r"><span className="badge pos">{t.distinctSmartBuyers}</span></td>
                         <td className="r num faint">{f.sol(t.solVolume)}</td>
+                        <td className="r faint" style={{ fontSize: 11.5, whiteSpace: 'nowrap' }}>{t.lastBuy ? f.ago(+new Date(t.lastBuy)) : '—'}</td>
                       </tr>
                     ))}
                   </tbody>

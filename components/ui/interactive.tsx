@@ -15,6 +15,29 @@ function stop(e: React.MouseEvent) {
   e.stopPropagation();
 }
 
+/**
+ * Token icon image with graceful fallback: renders an <img> overlay on top of
+ * the letter avatar; if the image is missing or fails to load it unmounts and
+ * the colored letter shows through. Client-only (needs onError).
+ */
+export function TokenImg({ src, radius }: { src: string; radius: number }) {
+  const [ok, setOk] = useState(true);
+  if (!ok) return null;
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={src}
+      alt=""
+      loading="lazy"
+      onError={() => setOk(false)}
+      style={{
+        position: 'absolute', inset: 0, width: '100%', height: '100%',
+        objectFit: 'cover', borderRadius: radius, display: 'block',
+      }}
+    />
+  );
+}
+
 export function CopyIconButton({ text, title = 'Copy' }: { text: string; title?: string }) {
   const [copied, setCopied] = useState(false);
   return (
