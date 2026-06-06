@@ -185,7 +185,7 @@ export default function Dashboard() {
                       <tr key={t.mint} className="clickable" onClick={() => router.push(`/token/${t.mint}`)}>
                         <td>
                           <span className="row gap-8">
-                            <TokenMark symbol={t.symbol || t.mint} icon={t.icon} icons={t.icons} size={24} />
+                            <TokenMark symbol={t.symbol || t.mint} icon={t.icon} icons={t.icons} size={32} />
                             <span className="stack">
                               <b style={{ fontSize: 12.5 }}>{t.symbol || f.short(t.mint, 4, 4)}</b>
                               {t.name ? (

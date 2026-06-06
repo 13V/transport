@@ -186,7 +186,7 @@ export default function SmartMoneyBuying() {
                     <td className={`rank ${i < 3 ? 'top' : ''}`}>{i + 1}</td>
                     <td>
                       <div className="row gap-10">
-                        <TokenMark symbol={t.symbol || t.mint} icon={t.icon ?? undefined} icons={t.icons ?? undefined} size={28} />
+                        <TokenMark symbol={t.symbol || t.mint} icon={t.icon ?? undefined} icons={t.icons ?? undefined} size={36} />
                         <div className="stack" style={{ gap: 2 }}>
                           <div className="row gap-8">
                             <b style={{ fontSize: 13 }}>{symbol}</b>

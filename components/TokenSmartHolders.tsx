@@ -2,12 +2,18 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { Sparkles, Users, Wallet, BarChart } from 'lucide-react';
+import { Sparkles, Users, Wallet, TrendingUp } from 'lucide-react';
 import * as f from '@/lib/format';
 import {
   TokenMark, TierBadge, Roi, Pnl, AddrChip, CopyIconButton,
-  EmptyState, ErrorState, SkCard, SkStat, SkTable, Bars,
+  EmptyState, ErrorState, SkCard, SkStat, SkTable,
 } from '@/components/ui';
+
+// Client-side icon candidates for a mint (no extra API call). TokenImg walks
+// these and falls back to the letter avatar if they 404.
+function iconFor(mint: string): string[] {
+  return [`https://dd.dexscreener.com/ds-data/tokens/solana/${mint}.png`];
+}
 
 interface SmartHolder {
   wallet: string;
@@ -42,7 +48,7 @@ function TitleCard({ mint, sym, count }: { mint: string; sym: string; count: num
   return (
     <div className="card card-pad">
       <div className="row gap-16 wrap">
-        <TokenMark symbol={sym} size={46} />
+        <TokenMark symbol={sym} size={52} icons={iconFor(mint)} />
         <div className="stack">
           <div className="row gap-8">
             <h1 style={{ margin: 0, fontSize: 22 }}>{sym}</h1>
@@ -143,8 +149,9 @@ export default function TokenSmartHolders({ mint }: TokenSmartHoldersProps) {
   // No per-coin value field is surfaced by the API; sum realized PnL on this
   // coin as the closest available "smart value" proxy, else fall back.
   const totalValueSol = holders.reduce((a, h) => a + (h.pnlOnThisCoin || 0), 0);
-  // Entry distribution: not surfaced by the API — use a representative shape.
-  const dist = [4, 7, 11, 9, 6, 3, 2];
+  // Average all-time ROI across the smart wallets holding this coin (real data).
+  const roiVals = holders.map((h) => h.allTimeRoiPct).filter((v): v is number => v != null && Number.isFinite(v));
+  const avgRoi = roiVals.length ? roiVals.reduce((a, v) => a + v, 0) / roiVals.length : null;
 
   return (
     <div className="view stack gap-20">
@@ -162,9 +169,9 @@ export default function TokenSmartHolders({ mint }: TokenSmartHoldersProps) {
           <div className="stat-foot"><span className="faint">realized on this coin</span></div>
         </div>
         <div className="stat">
-          <div className="stat-label"><span className="stat-ic"><BarChart size={15} /></span> Entry distribution</div>
-          <div style={{ marginTop: 8 }}><Bars values={dist} height={64} highlight={2} /></div>
-          <div className="stat-foot"><span className="faint">most entered recently</span></div>
+          <div className="stat-label"><span className="stat-ic"><TrendingUp size={15} /></span> Avg wallet ROI</div>
+          <div className="stat-val num">{avgRoi == null ? '—' : <Roi value={avgRoi} />}</div>
+          <div className="stat-foot"><span className="faint">all-time, across these holders</span></div>
         </div>
       </div>
 
