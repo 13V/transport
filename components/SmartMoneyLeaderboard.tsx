@@ -15,6 +15,7 @@ import {
   Download,
 } from 'lucide-react';
 import CopyButton from './CopyButton';
+import WatchlistButton from './WatchlistButton';
 
 interface LeaderboardWallet {
   rank: number;
@@ -522,6 +523,7 @@ export default function SmartMoneyLeaderboard() {
                         </span>
                       )}
                       <CopyButton text={wallet.address} label="wallet address" />
+                      <WatchlistButton address={wallet.address} />
                       {wallet.tags && wallet.tags.length > 0 && (
                         <span className="flex flex-wrap items-center gap-1">
                           {wallet.tags.slice(0, 3).map((tag) => (

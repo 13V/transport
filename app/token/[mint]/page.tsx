@@ -6,6 +6,7 @@ import { TokenInsiderReport } from '@/lib/types';
 import { calculateRiskScore } from '@/lib/risk-score';
 import ReportView from '@/components/ReportView';
 import LoadingState from '@/components/LoadingState';
+import TokenSmartHolders from '@/components/TokenSmartHolders';
 
 export default function TokenPage() {
   const params = useParams();
@@ -92,6 +93,7 @@ export default function TokenPage() {
         ← Back
       </button>
       <ReportView report={report} />
+      <TokenSmartHolders mint={mint} />
     </div>
   );
 }

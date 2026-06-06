@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { Loader, ExternalLink, CheckCircle2 } from 'lucide-react';
 import CopyButton from './CopyButton';
+import WalletHistoryChart from './WalletHistoryChart';
 
 /**
  * WALLET PROFILE (rich header view)
@@ -275,6 +276,9 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
           <Stat label="Last Trade" value={stats?.lastTradeAt ? new Date(stats.lastTradeAt).toLocaleDateString() : '—'} />
         </div>
       </div>
+
+      {/* ROI history */}
+      <WalletHistoryChart walletAddress={walletAddress} />
 
       {/* Current holdings */}
       <div className="rounded-xl border border-gray-800 bg-gray-900/40 p-6">

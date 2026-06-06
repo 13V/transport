@@ -29,6 +29,7 @@ export default function RootLayout({
             <div className="flex items-center gap-5 text-sm">
               <a href="/smart-money" className="text-gray-300 hover:text-white transition-colors">Leaderboard</a>
               <a href="/smart-money/buying" className="text-gray-300 hover:text-white transition-colors">Buying</a>
+              <a href="/watchlist" className="text-gray-300 hover:text-white transition-colors">Watchlist</a>
               <a href="/docs" className="text-gray-300 hover:text-white transition-colors">API</a>
             </div>
           </nav>
