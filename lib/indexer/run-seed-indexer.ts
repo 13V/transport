@@ -39,6 +39,10 @@ export interface SeedIndexerResult {
 }
 
 export interface SeedIndexerOptions {
+  /** Shard index (0-based) for parallel draining. */
+  shard?: number;
+  /** Total number of shards. With shards>1, each call scans a disjoint subset. */
+  shards?: number;
   maxWallets?: number;
   maxTxsPerWallet?: number;
   timeBudgetMs?: number;
@@ -50,8 +54,29 @@ export interface SeedIndexerOptions {
  * ROI is accurate, marked verified, and removed from the backlog. Most-active
  * wallets first. Falls back to top-by-score if the verified column is absent.
  */
-async function getCandidateWallets(supabase: SupabaseClient, limit: number): Promise<string[]> {
+/** Stable shard for a wallet so parallel drains scan disjoint subsets. */
+function shardOf(wallet: string, shards: number): number {
+  let h = 0;
+  for (let i = 0; i < wallet.length; i++) h = (Math.imul(31, h) + wallet.charCodeAt(i)) | 0;
+  return (h >>> 0) % shards;
+}
+
+async function getCandidateWallets(
+  supabase: SupabaseClient,
+  limit: number,
+  shard = 0,
+  shards = 1
+): Promise<string[]> {
   const floor = Number(process.env.SCAN_MIN_TRADES ?? 0);
+  // When sharded, over-fetch a pool and keep only this shard's wallets so N
+  // parallel jobs drain disjoint slices of the backlog without re-scanning.
+  const sharded = shards > 1;
+  const pool = sharded ? Math.min(limit * shards * 3, 8000) : limit;
+  const pick = (rows: { wallet: string }[]): string[] => {
+    let arr = rows.map((r) => r.wallet);
+    if (sharded) arr = arr.filter((w) => shardOf(w, shards) === shard);
+    return arr.slice(0, limit);
+  };
 
   // Tier 1: wallets the cheap GMGN screen flagged as promising but not yet
   // Helius-verified. Spending the expensive deep-scan here first is the whole
@@ -62,9 +87,10 @@ async function getCandidateWallets(supabase: SupabaseClient, limit: number): Pro
     .eq('verified', false)
     .eq('screen_pass', true)
     .order('total_trades', { ascending: false })
-    .limit(limit);
+    .limit(pool);
   if (!promising.error && promising.data && promising.data.length > 0) {
-    return promising.data.map((r: any) => r.wallet);
+    const picked = pick(promising.data as any[]);
+    if (picked.length > 0) return picked;
   }
 
   // Tier 2: general unverified backlog (most-active first).
@@ -74,10 +100,11 @@ async function getCandidateWallets(supabase: SupabaseClient, limit: number): Pro
     .eq('verified', false)
     .gte('total_trades', floor)
     .order('total_trades', { ascending: false })
-    .limit(limit);
+    .limit(pool);
 
   if (!backlog.error && backlog.data && backlog.data.length > 0) {
-    return backlog.data.map((r: any) => r.wallet);
+    const picked = pick(backlog.data as any[]);
+    if (picked.length > 0) return picked;
   }
 
   // Fallback (pre-migration, or backlog empty): top wallets by score.
@@ -86,12 +113,12 @@ async function getCandidateWallets(supabase: SupabaseClient, limit: number): Pro
     .select('wallet, total_trades')
     .gte('total_trades', 2)
     .order('score', { ascending: false })
-    .limit(limit);
+    .limit(pool);
   if (error || !data) {
     console.error('[SEED] candidate fetch failed:', error?.message);
     return [];
   }
-  return data.map((r: any) => r.wallet);
+  return pick(data as any[]);
 }
 
 // Columns added by later migrations. If the DB hasn't been migrated yet, an
@@ -184,7 +211,9 @@ export async function runSeedIndexer(opts: SeedIndexerOptions = {}): Promise<See
   const markSeeded = mode === 'configured';
 
   const sourced =
-    mode === 'configured' ? configured : await getCandidateWallets(supabase, maxWallets);
+    mode === 'configured'
+      ? configured
+      : await getCandidateWallets(supabase, maxWallets, opts.shard ?? 0, opts.shards ?? 1);
 
   if (sourced.length === 0) {
     return {

@@ -106,16 +106,27 @@ jobs:
     # Hard ceiling so the job can never overrun the hour and collide with the next
     # scheduled run (concurrency cancel-in-progress is false).
     timeout-minutes: 55
+    # PARALLEL SHARDED DRAIN: N jobs each scan a disjoint shard of the backlog
+    # (hash(wallet) % shards), so throughput ~= shards x iterations x wallets/call.
+    #   6 shards x 40 iters x 30 wallets = ~7,200 wallet scans/hr nominal.
+    # Helius spend/limits scale with this — if you see 429s, lower REFINE_SHARDS
+    # (must match the matrix length below) or REFINE_ITERATIONS, or raise SLEEP.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
     steps:
-      - name: Drain deep-scan backlog (verify wallets, ~1000/hr)
+      - name: Drain deep-scan backlog (shard ${{ matrix.shard }})
         env:
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          SHARD: ${{ matrix.shard }}
         run: |
           set -u
+          SHARDS="${REFINE_SHARDS:-6}"
           ITER="${REFINE_ITERATIONS:-40}"
           MAXW="${REFINE_MAX_WALLETS:-30}"
           SLEEP="${REFINE_SLEEP_SECONDS:-3}"
-          echo "Drain loop: up to $ITER iterations x $MAXW wallets (~$((ITER * MAXW))/hr nominal)"
+          echo "Shard ${SHARD}/${SHARDS}: up to $ITER iterations x $MAXW wallets (~$((SHARDS * ITER * MAXW))/hr nominal across all shards)"
           total=0
           for i in $(seq 1 "$ITER"); do
             echo "--- refine iteration $i/$ITER ---"
@@ -123,7 +134,7 @@ jobs:
             # slight headroom. Capture the body so we can read walletsProcessed.
             body="$(curl -sS --max-time 70 \
               -H "Authorization: Bearer ${CRON_SECRET}" \
-              "$BASE_URL/api/cron/seed-wallets?maxWallets=${MAXW}")" || body=''
+              "$BASE_URL/api/cron/seed-wallets?maxWallets=${MAXW}&shard=${SHARD}&shards=${SHARDS}")" || body=''
             echo "$body" | head -c 2000
             echo
 

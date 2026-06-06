@@ -13,6 +13,8 @@
  *   ?maxWallets=30      wallets to deep-scan this call (1..60)
  *   ?maxTxs=500         max swap txs fetched per wallet (50..1000)
  *   ?timeBudgetMs=50000 wall-clock budget for the run (5000..58000)
+ *   ?shards=6&shard=0   parallel draining: each shard scans a disjoint subset
+ *                       of the backlog (run N jobs with shard=0..N-1)
  * These let the cron DRIVER dial throughput without touching Vercel env vars.
  * Omitting a param keeps the existing code/env default in runSeedIndexer.
  *
@@ -60,6 +62,10 @@ export async function GET(request: NextRequest) {
   if (maxWallets !== undefined) opts.maxWallets = maxWallets;
   if (maxTxs !== undefined) opts.maxTxsPerWallet = maxTxs;
   if (timeBudgetMs !== undefined) opts.timeBudgetMs = timeBudgetMs;
+  const shards = clampParam(sp.get('shards'), 1, 24);
+  const shard = clampParam(sp.get('shard'), 0, (shards ?? 1) - 1);
+  if (shards !== undefined) opts.shards = shards;
+  if (shard !== undefined) opts.shard = shard;
 
   try {
     const result = await runSeedIndexer(opts);
