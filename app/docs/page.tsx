@@ -157,6 +157,48 @@ const ENDPOINTS: EndpointDoc[] = [
     },
   },
   {
+    id: 'live',
+    method: 'GET',
+    path: '/api/smart-money/live',
+    name: 'Live buy bursts',
+    desc: 'Buy bursts — moments where ≥N distinct smart-money entities bought the SAME token inside a short window. The live, time-sensitive feed: "smart money just piled into X." Each burst has a stable content-hash id (constant as the window absorbs more buys, so clients can dedupe), a finalized flag, and the response carries a nextCursor for ?since= polling. Free and key-less.',
+    params: [
+      ['windowSec', 'number', 'Burst window in seconds — clamped 5–300 (default 30).'],
+      ['minBuyers', 'number', 'Distinct entities required to fire — clamped 2–20 (default 3).'],
+      ['hours', 'number', 'Look-back window in hours — clamped 1–48 (default 6).'],
+      ['limit', 'number', 'Max bursts to return — clamped 1–200 (default 50).'],
+      ['minSol', 'number', 'Only bursts with solTotal ≥ minSol (default 0).'],
+      ['since', 'iso | ms', 'Only bursts with windowEnd > since — pass back the prior nextCursor to fetch only newer bursts (bot polling).'],
+      ['sort', 'quality | recent', 'Ranking — quality (default, tier-weighted conviction + size) or recent (newest first).'],
+    ],
+    cache: 'public, 2s + SWR',
+    res: {
+      generatedAt: '2026-06-06T12:00:00Z',
+      windowSec: 30,
+      minBuyers: 3,
+      count: 1,
+      nextCursor: '2026-06-06T11:59:48Z',
+      bursts: [
+        {
+          id: 'a1b2c3d4e5f60718',
+          mint: 'A1b2…stub',
+          buyers: 4,
+          buyerWallets: 5,
+          solTotal: 128.42,
+          windowStart: '2026-06-06T11:59:21Z',
+          windowEnd: '2026-06-06T11:59:48Z',
+          sampleBuyers: ['7Np4…', '9xQe…'],
+          tiers: ['S', 'A', null, 'B'],
+          finalized: true,
+          symbol: 'WIF',
+          marketCapUsd: 184000000,
+          liquidityUsd: 920000,
+          priceChange24h: 12.4,
+        },
+      ],
+    },
+  },
+  {
     id: 'discover',
     method: 'GET',
     path: '/api/smart-money/discover',
@@ -384,7 +426,7 @@ export default function DocsPage() {
   return (
     <div className="view stack gap-24">
       <div className="page-head">
-        <div className="sub">Read-only, public, cache-friendly JSON. No key required.</div>
+        <div className="sub">Read-only, public, cache-friendly JSON — no key required. Real-time push (SSE) is a pro-key surface.</div>
         <div className="page-head-actions">
           <span className="net-pill"><span className="net-dot live" /> All systems operational</span>
         </div>
@@ -401,6 +443,9 @@ export default function DocsPage() {
                 <span className="method" style={{ height: 18, fontSize: 10 }}>{e.method}</span> {e.name}
               </a>
             ))}
+            <a className="doc-nav-link" href="#doc-realtime">
+              <span className="method" style={{ height: 18, fontSize: 10 }}>SSE</span> Real-time for bots
+            </a>
           </div>
         </aside>
 
@@ -420,8 +465,105 @@ export default function DocsPage() {
           {ENDPOINTS.map((e) => (
             <EndpointCard key={e.id} e={e} />
           ))}
+
+          <RealtimeSection />
         </div>
       </div>
     </div>
+  );
+}
+
+function RealtimeSection() {
+  return (
+    <section className="doc-section" id="doc-realtime">
+      <div className="card card-pad stack gap-12">
+        <div className="row gap-12 wrap">
+          <span className="stat-ic accent"><ShieldCheck size={15} /></span>
+          <div className="stack">
+            <b>Real-time for bots</b>
+            <span className="faint" style={{ fontSize: 12.5 }}>
+              Three ways to consume bursts live — pick one by how hands-off you need to be.
+            </span>
+          </div>
+        </div>
+
+        <p className="muted" style={{ margin: 0, fontSize: 13.5 }}>
+          <b>Auth model.</b> The polling endpoints above are free and need no key.
+          The push-based SSE stream is the paid surface and requires an API key.
+          A <code className="mono">pro</code> key unlocks the SSE stream and higher
+          rate limits; a <code className="mono">free</code> tier key (or no key)
+          stays on polling. Send your key as{' '}
+          <code className="mono">Authorization: Bearer &lt;key&gt;</code> or{' '}
+          <code className="mono">?key=&lt;key&gt;</code>.
+        </p>
+
+        {/* (a) SSE stream */}
+        <div className="stack gap-8" style={{ marginTop: 6 }}>
+          <div className="row gap-12 wrap">
+            <span className="method">GET</span>
+            <code className="endpoint">/api/smart-money/live/stream</code>
+            <span className="spacer" />
+            <span className="badge accent"><Key size={11} /> API key required</span>
+          </div>
+          <p className="muted" style={{ margin: 0, fontSize: 13.5 }}>
+            Server-Sent Events. Holds the connection open and pushes each NEW
+            burst the instant it appears — no polling. Accepts the same{' '}
+            <code className="mono">windowSec</code> and{' '}
+            <code className="mono">minBuyers</code> params, and an optional{' '}
+            <code className="mono">?since=</code> to seed the starting point.
+            Each event is one burst:
+          </p>
+          <pre className="code" dangerouslySetInnerHTML={{ __html: highlightJson({
+            id: '2026-06-06T11:59:48Z',
+            event: 'burst',
+            data: '<JSON of one burst, same shape as /live bursts[]>',
+          }) }} />
+          <p className="faint" style={{ margin: 0, fontSize: 12.5 }}>
+            On the wire each frame is{' '}
+            <code className="mono">id: &lt;windowEnd ISO&gt;</code>,{' '}
+            <code className="mono">event: burst</code>,{' '}
+            <code className="mono">data: &lt;burst JSON&gt;</code>, then a blank
+            line. The connection closes by design after ~60s (platform cap) — your
+            client reconnects automatically, and the browser EventSource (or a
+            bot replaying the last <code className="mono">id</code> via the{' '}
+            <code className="mono">Last-Event-ID</code> header) resumes exactly
+            where it left off, so no bursts are missed or duplicated. A heartbeat
+            comment is sent every ~15s to keep proxies from dropping idle
+            connections.
+          </p>
+        </div>
+
+        {/* (b) free polling with cursor */}
+        <div className="stack gap-8" style={{ marginTop: 6 }}>
+          <span className="faint" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '.05em', fontWeight: 600 }}>
+            Free option — poll with a cursor
+          </span>
+          <p className="muted" style={{ margin: 0, fontSize: 13.5 }}>
+            No key needed. Poll <code className="mono">GET /api/smart-money/live</code>,
+            then on each subsequent request pass the prior response&apos;s{' '}
+            <code className="mono">nextCursor</code> back as{' '}
+            <code className="mono">?since=</code>. You&apos;ll only receive bursts
+            newer than your cursor. Bursts carry a stable{' '}
+            <code className="mono">id</code> so you can dedupe across overlapping
+            polls, and a <code className="mono">finalized</code> flag once a
+            window can no longer absorb new buys.
+          </p>
+        </div>
+
+        {/* (c) Supabase Realtime */}
+        <div className="stack gap-8" style={{ marginTop: 6 }}>
+          <span className="faint" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '.05em', fontWeight: 600 }}>
+            Raw firehose — Supabase Realtime
+          </span>
+          <p className="muted" style={{ margin: 0, fontSize: 13.5 }}>
+            If you want the raw trade stream rather than detected bursts, the{' '}
+            <code className="mono">trades</code> table is subscribable via Supabase
+            Realtime using the public anon key. You subscribe to inserts and run
+            your own burst logic client-side. The SSE stream above does this
+            detection for you against the curated smart-money set.
+          </p>
+        </div>
+      </div>
+    </section>
   );
 }

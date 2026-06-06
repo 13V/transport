@@ -43,6 +43,151 @@ interface LiveResponse {
   bursts: Burst[];
 }
 
+// Stable per-device owner id — the SAME identity the watchlist uses
+// (localStorage key `sm_owner_id`, see lib/useWatchlist.ts). Reused as the
+// push-subscription owner so a device's alerts and watchlist share one id.
+const OWNER_KEY = 'sm_owner_id';
+
+function getOwnerId(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    let id = window.localStorage.getItem(OWNER_KEY);
+    if (!id) {
+      id =
+        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : `sm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+      window.localStorage.setItem(OWNER_KEY, id);
+    }
+    return id;
+  } catch {
+    return null;
+  }
+}
+
+// Public VAPID key for the browser PushManager (applicationServerKey). Set in
+// Vercel as NEXT_PUBLIC_VAPID_PUBLIC_KEY (see WEBPUSH.md). Absent → the Alerts
+// button hides itself.
+const VAPID_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
+
+// Convert a base64url VAPID key to the Uint8Array PushManager expects.
+function urlBase64ToUint8Array(base64String: string): Uint8Array<ArrayBuffer> {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  const buffer = new ArrayBuffer(raw.length);
+  const arr = new Uint8Array(buffer);
+  for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+  return arr;
+}
+
+/**
+ * Opt-in browser/desktop push alerts. Self-contained: registers /sw.js, requests
+ * Notification permission, subscribes via PushManager using the public VAPID key,
+ * and POSTs the subscription + owner id to /api/push/subscribe. Hides itself when
+ * the browser lacks Push/Notification support or the VAPID key env is absent.
+ */
+function AlertsToggle() {
+  const [supported, setSupported] = useState(false);
+  const [subscribed, setSubscribed] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (
+      typeof window === 'undefined' ||
+      !VAPID_PUBLIC_KEY ||
+      !('serviceWorker' in navigator) ||
+      !('PushManager' in window) ||
+      !('Notification' in window)
+    ) {
+      return;
+    }
+    setSupported(true);
+    // Reflect any existing subscription on mount.
+    (async () => {
+      try {
+        const reg = await navigator.serviceWorker.getRegistration();
+        const existing = reg ? await reg.pushManager.getSubscription() : null;
+        setSubscribed(!!existing);
+      } catch {
+        /* ignore */
+      }
+    })();
+  }, []);
+
+  const subscribe = useCallback(async () => {
+    if (!VAPID_PUBLIC_KEY) return;
+    setBusy(true);
+    try {
+      const reg = await navigator.serviceWorker.register('/sw.js');
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') {
+        setBusy(false);
+        return;
+      }
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) {
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
+        });
+      }
+      await fetch('/api/push/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subscription: sub.toJSON(), owner: getOwnerId() }),
+      });
+      setSubscribed(true);
+    } catch {
+      // Permission denied / unsupported / network — leave state as-is.
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  const unsubscribe = useCallback(async () => {
+    setBusy(true);
+    try {
+      const reg = await navigator.serviceWorker.getRegistration();
+      const sub = reg ? await reg.pushManager.getSubscription() : null;
+      if (sub) {
+        const endpoint = sub.endpoint;
+        await sub.unsubscribe().catch(() => {});
+        await fetch('/api/push/subscribe', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ endpoint }),
+        });
+      }
+      setSubscribed(false);
+    } catch {
+      /* ignore */
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  if (!supported) return null;
+
+  return (
+    <button
+      type="button"
+      className={`seg-btn${subscribed ? ' on' : ''}`}
+      onClick={subscribed ? unsubscribe : subscribe}
+      disabled={busy}
+      aria-pressed={subscribed}
+      title={
+        subscribed
+          ? 'Burst alerts on — click to turn off browser notifications'
+          : 'Get a browser/desktop notification when smart money bursts into a token'
+      }
+      style={{ whiteSpace: 'nowrap' }}
+    >
+      🔔 {subscribed ? 'Alerts on' : 'Alerts'}
+    </button>
+  );
+}
+
 const MIN_BUYERS: number[] = [3, 4, 5];
 const WINDOW_SEC: number[] = [15, 30, 60];
 const MIN_SOL: number[] = [0, 1, 5, 10];
@@ -92,6 +237,7 @@ function Header({
         token within a short window, surfaced as the indexer ingests new trades.
       </div>
       <div className="page-head-actions row gap-10 wrap">
+        <AlertsToggle />
         <div className="seg">
           {MIN_BUYERS.map((n) => (
             <button

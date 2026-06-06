@@ -27,6 +27,7 @@ import {
 } from '../../../../lib/indexer/live-bursts';
 import { readCooldowns, writeCooldowns } from '../../../../lib/alerts/cooldowns';
 import { sendAlert, escapeHtml } from '../../../../lib/alerts/notifier';
+import { sendWebPushToAll } from '../../../../lib/push';
 import { tokenLinks } from '../../../../lib/trade-links';
 
 export const dynamic = 'force-dynamic';
@@ -143,6 +144,21 @@ async function runBurstAlerts(touchedMints: string[]): Promise<void> {
         // On !delivered, leave the cooldown unset so a later tick can retry.
       } catch (error) {
         console.error('[HELIUS WEBHOOK] burst alert send failed for', mint, (error as Error).message);
+      }
+
+      // WEB PUSH: fan out the SAME gated burst to opted-in browser/desktop
+      // subscribers (no Telegram needed). Reuses the per-mint cooldown above
+      // (we're already inside it), so this can't double-send. Wrapped + the
+      // helper is itself no-throw, so a push failure never affects ingestion
+      // or the Telegram path.
+      try {
+        await sendWebPushToAll({
+          title: `🚨 ${symbol}`,
+          body: `${b.buyers} smart wallets bought ${fmtSol(b.solTotal)} SOL in 30s`,
+          url: `/token/${mint}`,
+        });
+      } catch (error) {
+        console.error('[HELIUS WEBHOOK] web push send failed for', mint, (error as Error).message);
       }
     }
 
