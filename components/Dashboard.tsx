@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Crown, Flame, Activity, ArrowRight, ArrowUp, ArrowDown,
-  Layers, ShieldCheck, Sparkles,
+  Layers, ShieldCheck, Sparkles, Radio, BarChart3,
 } from 'lucide-react';
 import * as f from '@/lib/format';
 import {
@@ -17,6 +17,32 @@ interface StatusResponse { totals: { walletsIndexed: number; verifiedWallets: nu
 interface ListWallet { address: string; roiPct: number | null; pnl: number; winRate: number; verified: boolean; tier?: string }
 interface BuyingToken { mint: string; symbol?: string; name?: string; icon?: string; icons?: string[]; distinctSmartBuyers: number; solVolume: number; lastBuy?: string }
 interface Mover { wallet: string; rankDelta: number | null; latestRoi: number | null; latestRank: number | null }
+
+// Measured-outcomes proof payload (GET /api/smart-money/live/stats).
+interface LiveStats {
+  n: number;
+  burstsToday?: number | null;
+  medianRet1h?: number | null;
+  hitRate1h?: number | null;
+  medianRet24h?: number | null;
+  hitRate24h?: number | null;
+  bestCall?: { symbol?: string | null; mint?: string | null; ret?: number | null } | null;
+  windowHours?: number | null;
+}
+
+// Compact live-burst teaser (GET /api/smart-money/live?limit=5&sort=quality).
+interface LiveBurst {
+  id: string;
+  mint: string;
+  symbol?: string | null;
+  name?: string | null;
+  icon?: string | null;
+  icons?: string[] | null;
+  buyers: number;
+  solTotal: number;
+  windowEnd?: string | null;
+  finalized?: boolean;
+}
 
 type Load<T> = { state: 'loading' | 'ok' | 'error'; data: T | null };
 
@@ -58,12 +84,124 @@ function CardHead({ icon: Icon, title, link, linkLabel, note }: {
   );
 }
 
+/**
+ * PROOF STRIP — the headline credibility number. Renders ONLY legs that have
+ * data from the measured-outcomes stats payload; never fabricates. Neutral
+ * "measuring outcomes…" state when n === 0. Labelled "measured outcomes".
+ */
+function ProofStrip({ load }: { load: Load<LiveStats> }) {
+  const router = useRouter();
+
+  if (load.state === 'loading') {
+    return (
+      <div className="card">
+        <div className="card-pad row gap-12" style={{ alignItems: 'center' }}>
+          <span className="bf-proof-tag">measured outcomes</span>
+          <SkLine w="60%" h={18} />
+        </div>
+      </div>
+    );
+  }
+  // On error, hide entirely — never show a fake/empty proof.
+  if (load.state === 'error' || !load.data) return null;
+
+  const s = load.data;
+  const wh = s.windowHours ?? null;
+  const whLabel = wh != null && Number.isFinite(wh) ? `${wh}h` : 'recent window';
+
+  const Shell = ({ children }: { children: React.ReactNode }) => (
+    <div className="card" style={{ background: 'linear-gradient(0deg, var(--surface), var(--surface)), var(--surface-2)' }}>
+      <div className="bf-proof" style={{ border: 0, borderRadius: 'var(--r)', background: 'transparent', padding: '14px 16px', rowGap: 8 }}>
+        {children}
+      </div>
+    </div>
+  );
+
+  if (!s.n) {
+    return (
+      <Shell>
+        <span className="bf-proof-tag">measured outcomes</span>
+        <span className="bf-proof-leg dim">measuring outcomes…</span>
+        <span className="bf-proof-leg dim" style={{ fontSize: 11.5 }}>
+          forward returns of smart-money bursts appear here once enough have matured
+        </span>
+      </Shell>
+    );
+  }
+
+  const legs: React.ReactNode[] = [];
+  if (s.medianRet1h != null && Number.isFinite(s.medianRet1h)) {
+    legs.push(
+      <span key="m1" className="bf-proof-leg">
+        median <b className={s.medianRet1h >= 0 ? 'pos' : 'neg'}>{f.pct(s.medianRet1h)}</b> @1h
+      </span>
+    );
+  }
+  if (s.hitRate1h != null && Number.isFinite(s.hitRate1h)) {
+    legs.push(<span key="h1" className="bf-proof-leg"><b className="pos">{Math.round(s.hitRate1h)}%</b> green</span>);
+  }
+  if (s.medianRet24h != null && Number.isFinite(s.medianRet24h)) {
+    legs.push(
+      <span key="m24" className="bf-proof-leg">
+        median <b className={s.medianRet24h >= 0 ? 'pos' : 'neg'}>{f.pct(s.medianRet24h)}</b> @24h
+      </span>
+    );
+  }
+  if (s.hitRate24h != null && Number.isFinite(s.hitRate24h)) {
+    legs.push(<span key="h24" className="bf-proof-leg"><b className="pos">{Math.round(s.hitRate24h)}%</b> green @24h</span>);
+  }
+  legs.push(<span key="n" className="bf-proof-leg dim">n={s.n}</span>);
+
+  const best = s.bestCall;
+  if (best && best.symbol && best.ret != null && Number.isFinite(best.ret)) {
+    const inner = (
+      <>best <b>{best.symbol}</b> <span className="pos">{f.pct(best.ret)}</span></>
+    );
+    legs.push(
+      best.mint ? (
+        <a
+          key="best"
+          className="bf-proof-leg bf-proof-best"
+          href={`/token/${best.mint}`}
+          onClick={(e) => { e.preventDefault(); router.push(`/token/${best.mint}`); }}
+        >
+          {inner}
+        </a>
+      ) : (
+        <span key="best" className="bf-proof-leg bf-proof-best">{inner}</span>
+      )
+    );
+  }
+
+  const today = s.burstsToday;
+
+  return (
+    <Shell>
+      <span className="bf-proof-tag" title="Measured forward returns of recent smart-money bursts">
+        <BarChart3 size={11} style={{ marginRight: 4, verticalAlign: '-1px' }} />
+        measured outcomes · last {whLabel}
+      </span>
+      {legs.map((leg, i) => (
+        <span key={i} className="bf-proof-row">
+          {i > 0 && <span className="bf-proof-sep">·</span>}
+          {leg}
+        </span>
+      ))}
+      {today != null && Number.isFinite(today) && (
+        <span className="bf-proof-today">{today} bursts today</span>
+      )}
+    </Shell>
+  );
+}
+
 export default function Dashboard() {
   const router = useRouter();
   const status = useFetch<StatusResponse['totals']>('/api/status', (j) => (j as StatusResponse).totals);
   const top = useFetch<ListWallet[]>('/api/smart-money/list?sort=roi&limit=8', (j) => (j as { wallets: ListWallet[] }).wallets ?? []);
   const buying = useFetch<BuyingToken[]>('/api/smart-money/buying?hours=24&limit=50', (j) => (j as { tokens: BuyingToken[] }).tokens ?? []);
   const movers = useFetch<Mover[]>('/api/smart-money/movers?days=7&limit=6', (j) => (j as { movers: Mover[] }).movers ?? []);
+  const proof = useFetch<LiveStats>('/api/smart-money/live/stats', (j) => j as LiveStats);
+  const live = useFetch<LiveBurst[]>('/api/smart-money/live?limit=5&sort=quality', (j) => (j as { bursts: LiveBurst[] }).bursts ?? []);
 
   const buys24 = buying.data?.reduce((a, t) => a + (t.distinctSmartBuyers || 0), 0) ?? 0;
 
@@ -101,6 +239,39 @@ export default function Dashboard() {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* MEASURED-OUTCOMES PROOF — the headline credibility number */}
+      <ProofStrip load={proof} />
+
+      {/* LIVE NOW teaser — hottest current bursts, funnels to /live */}
+      {live.state === 'ok' && live.data && live.data.length > 0 && (
+        <div className="card">
+          <CardHead icon={Radio} title="Live now" link="/live" linkLabel="Open live feed" note="hottest smart-money bursts" />
+          <div className="card-pad">
+            <div className="bf-hotstrip" style={{ border: 0, borderRadius: 0, background: 'transparent', padding: 0 }}>
+              <div className="bf-hotstrip-scroll">
+                {live.data.slice(0, 5).map((b) => {
+                  const sym = b.symbol || f.short(b.mint, 3, 3);
+                  const isLive = b.finalized === false;
+                  return (
+                    <button
+                      key={b.id}
+                      type="button"
+                      className={`bf-hotpill ${isLive ? 'hot' : 'cool'}`}
+                      title={`${sym} — ${b.buyers} smart ${b.buyers === 1 ? 'buyer' : 'buyers'} · ${f.sol(b.solTotal)} SOL`}
+                      onClick={() => router.push(`/token/${b.mint}`)}
+                    >
+                      <TokenMark symbol={b.symbol || b.mint} icon={b.icon ?? undefined} icons={b.icons ?? undefined} size={18} />
+                      <span className="t">{sym}</span>
+                      <span className="m">{b.buyers} · {f.sol(b.solTotal)}◎</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
         </div>
       )}
 

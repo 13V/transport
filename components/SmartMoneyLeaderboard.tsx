@@ -21,6 +21,7 @@ import {
   TierBadge,
   Roi,
   Pnl,
+  WinBar,
   EmptyState,
   ErrorState,
   SkTable,
@@ -80,6 +81,23 @@ function toMs(iso: string | null): number | null {
   if (!iso) return null;
   const t = Date.parse(iso);
   return Number.isNaN(t) ? null : t;
+}
+
+/** Per-tier CSS var for subtle row/rank accents (matches the .tier-* palette). */
+const TIER_VAR: Record<string, string> = {
+  S: 'var(--tier-s)',
+  A: 'var(--tier-a)',
+  B: 'var(--tier-b)',
+  C: 'var(--tier-c)',
+};
+
+/**
+ * ROI → 0..1 heat fraction for the per-row bar. Log-scaled so a 50% gain reads
+ * as meaningful while a 5000% moonshot still pins near full — purely visual.
+ */
+function roiHeat(roi: number | null): number {
+  if (roi == null || !Number.isFinite(roi) || roi <= 0) return 0;
+  return Math.max(0.04, Math.min(1, Math.log10(1 + roi) / Math.log10(1 + 2000)));
 }
 
 export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQuery?: string }) {
@@ -289,20 +307,22 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
           }}
         />
       </div>
-      <select
-        className="select sm"
-        value={tierFilter}
-        onChange={(e) => {
-          setTierFilter(e.target.value as 'All' | 'S' | 'A' | 'B' | 'C');
-          setCurrentPage(0);
-        }}
-      >
-        <option value="All">All tiers</option>
-        <option value="S">Tier S</option>
-        <option value="A">Tier A</option>
-        <option value="B">Tier B</option>
-        <option value="C">Tier C</option>
-      </select>
+      <div className="seg" title="Filter by quality tier">
+        {(['All', 'S', 'A', 'B', 'C'] as const).map((t) => (
+          <button
+            key={t}
+            type="button"
+            className={tierFilter === t ? 'on' : ''}
+            aria-pressed={tierFilter === t}
+            onClick={() => {
+              setTierFilter(t);
+              setCurrentPage(0);
+            }}
+          >
+            {t}
+          </button>
+        ))}
+      </div>
       <input
         className="input sm"
         type="number"
@@ -425,7 +445,7 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
     return (
       <div className="view stack gap-16">
         {pageHead}
-        <SkTable cols={9} rows={12} />
+        <SkTable cols={10} rows={12} />
       </div>
     );
   }
@@ -475,7 +495,7 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
       {toolbar}
       <div className="card" style={{ overflow: 'hidden' }}>
         <div className="table-wrap">
-          <table className="dt ruled">
+          <table className="dt ruled compact">
             <thead>
               <tr>
                 <SortTh field="rank" label="#" />
@@ -483,39 +503,53 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
                 <th className="c">Tier</th>
                 <SortTh
                   field="roiPct"
-                  label="ROI"
+                  label="ROI (all-time)"
                   align="r"
                   tip="Realized ROI = realized PnL ÷ cost of sold tokens, all-time (FIFO)"
                 />
                 <SortTh field="pnl" label="PnL" align="r" />
                 <SortTh field="winRate" label="Win" align="r" />
+                <th className="r" title="Profit consistency across this wallet's traded tokens">Consist</th>
+                <th className="r" title="Total trades · distinct tokens traded">Trades · Tokens</th>
                 <th>Last active</th>
-                <th>Traits</th>
-                <th className="r" style={{ width: 220 }}>Actions</th>
+                <th className="r" style={{ width: 200 }}>Actions</th>
               </tr>
             </thead>
             <tbody>
               {paginatedData.map((w) => {
-                const traits: string[] = [];
-                if (w.verified) traits.push('Verified');
-                if (w.seeded) traits.push('Trusted');
                 const lastMs = toMs(w.lastTradeAt);
+                const tierColor = w.tier ? TIER_VAR[w.tier] : undefined;
+                const heat = roiHeat(w.roiPct);
+                const consistPct =
+                  Number.isFinite(w.consistency) ? Math.round(w.consistency * 100) : null;
                 return (
                   <tr
                     key={w.address}
                     className="clickable"
+                    title="Open wallet profile"
                     onClick={() => handleWalletClick(w.address)}
+                    // Tier-tinted left rail so the table scans by quality at a glance.
+                    style={
+                      tierColor
+                        ? { boxShadow: `inset 2px 0 0 ${tierColor}` }
+                        : undefined
+                    }
                   >
-                    <td className={`rank ${w.rank <= 3 ? 'top' : ''}`}>{w.rank}</td>
+                    <td
+                      className={`rank ${w.rank <= 3 ? 'top' : ''}`}
+                      style={w.rank <= 3 && tierColor ? { color: tierColor } : undefined}
+                    >
+                      {w.rank}
+                    </td>
                     <td>
                       <div className="row gap-8" style={{ flexWrap: 'nowrap', whiteSpace: 'nowrap' }}>
                         <AddrChip address={w.address} copy={false} />
                         {w.verified && (
                           <span
                             className="wmark"
-                            title="Deep-scanned — accurate all-time ROI"
+                            title="Verified · deep-scanned — accurate all-time ROI"
                           >
-                            <BadgeCheck size={12} />
+                            <BadgeCheck size={13} />
                           </span>
                         )}
                         {w.seeded && (
@@ -526,20 +560,34 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
                       </div>
                     </td>
                     <td className="c"><TierBadge tier={w.tier} /></td>
-                    <td className="r"><Roi value={w.roiPct} /></td>
+                    <td className="r">
+                      <div
+                        className="row gap-8"
+                        style={{ justifyContent: 'flex-end', flexWrap: 'nowrap' }}
+                      >
+                        <Roi value={w.roiPct} />
+                        {/* Subtle ROI heat bar — pure visual, log-scaled. */}
+                        <span
+                          className={`bar ${w.roiPct != null && w.roiPct < 0 ? '' : 'pos'}`}
+                          style={{ width: 40, flexShrink: 0, opacity: heat > 0 ? 1 : 0.35 }}
+                          aria-hidden="true"
+                        >
+                          <i style={{ width: `${Math.round(heat * 100)}%` }} />
+                        </span>
+                      </div>
+                    </td>
                     <td className="r"><Pnl value={w.pnl} /></td>
-                    <td className="r num faint">{Math.round(w.winRate * 100)}%</td>
+                    <td className="r"><WinBar value={w.winRate} /></td>
+                    <td className="r num faint">
+                      {consistPct != null ? `${consistPct}%` : '—'}
+                    </td>
+                    <td className="r num faint" style={{ whiteSpace: 'nowrap' }}>
+                      <span style={{ color: 'var(--text-2)' }}>{w.totalTrades}</span>
+                      <span style={{ margin: '0 4px', opacity: 0.5 }}>·</span>
+                      {w.tokensTraded}
+                    </td>
                     <td className="faint num" style={{ whiteSpace: 'nowrap' }}>
                       {f.ago(lastMs)}
-                    </td>
-                    <td>
-                      <div className="row gap-8" style={{ flexWrap: 'nowrap', whiteSpace: 'nowrap' }}>
-                        {traits.length > 0 ? (
-                          traits.map((t) => <span key={t} className="badge tag">{t}</span>)
-                        ) : (
-                          <span className="faint">—</span>
-                        )}
-                      </div>
                     </td>
                     <td className="r">
                       <div

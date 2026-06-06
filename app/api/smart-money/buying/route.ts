@@ -49,7 +49,28 @@ export async function GET(request: NextRequest) {
     const meta = await getTokenMeta(filtered.map((t) => t.mint));
     tokens = filtered.map((t) => {
       const m = meta.get(t.mint);
-      return m ? { ...t, symbol: m.symbol, name: m.name, icon: m.icon, icons: m.icons } : t;
+      if (!m) return t;
+      // Surface symbol/name/icon plus the rug/market context now on TokenMeta.
+      // Optional-chain so a partially-resolved meta never throws; the client
+      // renders only the fields that are present (no fake data).
+      return {
+        ...t,
+        symbol: m.symbol,
+        name: m.name,
+        icon: m.icon,
+        icons: m.icons,
+        mintRenounced: m?.mintRenounced,
+        freezeRenounced: m?.freezeRenounced,
+        pairCreatedAt: m?.pairCreatedAt,
+        buys24h: m?.buys24h,
+        sells24h: m?.sells24h,
+        volume24hUsd: m?.volume24hUsd,
+        topHolderPct: m?.topHolderPct,
+        marketCapUsd: m?.marketCapUsd,
+        liquidityUsd: m?.liquidityUsd,
+        priceChange24h: m?.priceChange24h,
+        pairAddress: m?.pairAddress,
+      };
     });
   } catch {
     // ignore — return the un-enriched feed
