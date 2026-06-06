@@ -48,9 +48,30 @@ export async function GET(
 
   if (!mint || !BASE58.test(mint)) return empty({ error: 'invalid mint' });
 
-  // Resolve the pool (pair) address: trust an explicit ?pair= if it looks valid,
-  // otherwise look it up from token metadata (highest-liquidity pair).
-  let pair = (sp.get('pair') || '').trim();
+  // Resolve the pool address from GeckoTerminal's OWN token→pools index — this is
+  // the key fix: DexScreener's pair address often isn't the same id GeckoTerminal
+  // uses for pump pools, so OHLCV-by-DexScreener-pair returns empty. Asking GT for
+  // the token's top pool guarantees a pool id GT actually has candles for. We fall
+  // back to an explicit ?pair= / token-meta pair only if GT has no pools.
+  let pair = '';
+  try {
+    const pr = await axios.get(
+      `${GT}/networks/solana/tokens/${mint}/pools?page=1`,
+      { timeout: 12_000, headers: { Accept: 'application/json;version=20230302' } }
+    );
+    const pools: unknown = pr.data?.data;
+    if (Array.isArray(pools) && pools.length) {
+      // GT returns pools ranked (top by reserve/liquidity first).
+      const addr = (pools[0] as any)?.attributes?.address;
+      if (typeof addr === 'string' && BASE58.test(addr)) pair = addr;
+    }
+  } catch {
+    /* fall through to the hints below */
+  }
+  if (!BASE58.test(pair)) {
+    const hint = (sp.get('pair') || '').trim();
+    if (BASE58.test(hint)) pair = hint;
+  }
   if (!BASE58.test(pair)) {
     try {
       pair = (await getTokenMeta([mint])).get(mint)?.pairAddress || '';
