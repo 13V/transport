@@ -28,8 +28,16 @@ interface SmartHolder {
   lastBuy: string | null;
 }
 
+interface TokenInfo {
+  symbol?: string;
+  name?: string;
+  icon?: string;
+  icons?: string[];
+}
+
 interface SmartHoldersResponse {
   mint: string;
+  token?: TokenInfo;
   traderCount: number;
   smartHolderCount: number;
   smartHolders: SmartHolder[];
@@ -47,14 +55,18 @@ function positionFor(h: SmartHolder): { label: string; cls: string } {
   return { label: 'Holding', cls: '' };
 }
 
-function TitleCard({ mint, sym, count }: { mint: string; sym: string; count: number | null }) {
+function TitleCard({ mint, token, count }: { mint: string; token?: TokenInfo; count: number | null }) {
+  const ticker = token?.symbol || f.short(mint, 4, 4);
+  const name = token?.name;
+  const icons = token?.icons?.length ? token.icons : iconFor(mint);
   return (
     <div className="card card-pad">
       <div className="row gap-16 wrap">
-        <TokenMark symbol={sym} size={52} icons={iconFor(mint)} />
-        <div className="stack">
-          <div className="row gap-8">
-            <h1 style={{ margin: 0, fontSize: 22 }}>{sym}</h1>
+        <TokenMark symbol={ticker} size={52} icons={icons} />
+        <div className="stack" style={{ gap: 3 }}>
+          <div className="row gap-8 wrap">
+            <h1 style={{ margin: 0, fontSize: 22 }}>{ticker}</h1>
+            {name && <span className="muted" style={{ fontSize: 14 }}>{name}</span>}
           </div>
           <span className="row gap-8">
             <code className="mono faint" style={{ fontSize: 12 }}>{f.short(mint, 8, 8)}</code>
@@ -78,8 +90,6 @@ export default function TokenSmartHolders({ mint }: TokenSmartHoldersProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
-
-  const sym = f.short(mint, 4, 4);
 
   const retry = useCallback(() => setReloadKey((k) => k + 1), []);
 
@@ -133,7 +143,7 @@ export default function TokenSmartHolders({ mint }: TokenSmartHoldersProps) {
   if (error) {
     return (
       <div className="view stack gap-20">
-        <TitleCard mint={mint} sym={sym} count={null} />
+        <TitleCard mint={mint} token={data?.token} count={null} />
         <div className="card">
           <ErrorState
             title="Couldn’t load token"
@@ -157,7 +167,7 @@ export default function TokenSmartHolders({ mint }: TokenSmartHoldersProps) {
 
   return (
     <div className="view stack gap-20">
-      <TitleCard mint={mint} sym={sym} count={smartHolders} />
+      <TitleCard mint={mint} token={data?.token} count={smartHolders} />
 
       <div className="stat-grid cols-3">
         <div className="stat">

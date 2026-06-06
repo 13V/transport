@@ -21,6 +21,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSupabase, isSupabaseConfigured } from '../../../../../lib/supabase-client';
 import { getSmartCriteria, isSmartWallet } from '../../../../../lib/indexer/curation';
 import { tierFromScore } from '../../../../../lib/format';
+import { getTokenMeta } from '../../../../../lib/token-meta';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 30;
@@ -56,8 +57,14 @@ export async function GET(
     return NextResponse.json({ error: 'Invalid mint address' }, { status: 400 });
   }
 
-  const empty = { mint, traderCount: 0, smartHolderCount: 0, smartHolders: [] as SmartHolder[] };
   const headers = { 'Cache-Control': 'public, max-age=60' };
+
+  // Token identity (logo / ticker / name) for the page header — resolved once,
+  // included in every response so the title shows even with zero smart holders.
+  let token: { symbol?: string; name?: string; icon?: string; icons?: string[] } | undefined;
+  try { token = (await getTokenMeta([mint])).get(mint); } catch { /* ignore */ }
+
+  const empty = { mint, token, traderCount: 0, smartHolderCount: 0, smartHolders: [] as SmartHolder[] };
   if (!isSupabaseConfigured()) return NextResponse.json(empty, { headers });
 
   try {
@@ -156,7 +163,7 @@ export async function GET(
     }).sort((x, y) => y.solBought - x.solBought);
 
     return NextResponse.json(
-      { mint, traderCount: holders.length, smartHolderCount: holders.length, smartHolders: holders },
+      { mint, token, traderCount: holders.length, smartHolderCount: holders.length, smartHolders: holders },
       { headers }
     );
   } catch {
