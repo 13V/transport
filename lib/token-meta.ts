@@ -1,16 +1,15 @@
 /**
  * TOKEN METADATA (DexScreener + Helius DAS)
  *
- * Resolves on-chain token mints to a human-friendly { symbol, name, icon }.
- *   1. DexScreener batch endpoint (≤30 mints/call) — great for name/symbol and
- *      icons of established/traded tokens.
- *   2. Helius DAS getAssetBatch (≤1000 ids/call) — fallback that reliably has
- *      images for fresh pump.fun coins where DexScreener has no `info.imageUrl`.
+ * Resolves on-chain token mints to { symbol, name, icon, icons } where `icons`
+ * is an ORDERED list of candidate image URLs the client tries in turn (first
+ * that loads wins, else the letter avatar). This makes logos resilient:
+ *   1. DexScreener profile image (when present)
+ *   2. DexScreener token image CDN (exists for most DexScreener-known tokens)
+ *   3. pump.fun / IPFS image from Helius DAS metadata, via a fast Pinata gateway
+ *      and ipfs.io — covers fresh pump coins DexScreener has no image for.
  *
- * Design goals:
- *   - Resilient: never throws. On any failure we omit the affected mints.
- *   - Cheap: in-memory cache (10 min TTL); only uncached/stale mints are fetched.
- *   - Dependency-light: uses the already-installed axios.
+ * Resilient (never throws), cheap (10-min in-memory cache), dependency-light.
  */
 
 import axios from 'axios';
@@ -18,7 +17,8 @@ import axios from 'axios';
 export interface TokenMeta {
   symbol?: string;
   name?: string;
-  icon?: string;
+  icon?: string;       // best single candidate (icons[0]) — back-compat
+  icons?: string[];    // ordered fallback chain
 }
 
 interface CacheEntry {
@@ -27,9 +27,9 @@ interface CacheEntry {
 }
 
 const CACHE = new Map<string, CacheEntry>();
-const TTL_MS = 10 * 60 * 1000; // 10 minutes
-const DS_BATCH = 30; // DexScreener: ~30 comma-separated mints per call
-const HELIUS_BATCH = 100; // DAS getAssetBatch supports up to 1000; keep payloads modest
+const TTL_MS = 10 * 60 * 1000;
+const DS_BATCH = 30;
+const HELIUS_BATCH = 100;
 const REQUEST_TIMEOUT_MS = 6000;
 
 function chunk<T>(arr: T[], size: number): T[][] {
@@ -38,15 +38,30 @@ function chunk<T>(arr: T[], size: number): T[][] {
   return out;
 }
 
-/** Normalize ipfs:// and bare CIDs to an https gateway so <img> can render them. */
-function normalizeUri(uri?: string): string | undefined {
-  if (!uri || typeof uri !== 'string') return undefined;
-  if (uri.startsWith('ipfs://')) return `https://ipfs.io/ipfs/${uri.slice('ipfs://'.length)}`;
-  if (uri.startsWith('http://')) return 'https://' + uri.slice('http://'.length);
-  return uri;
+/** Build candidate URLs for an IPFS/arweave/http image, preferring fast gateways. */
+function imageCandidates(raw?: string): string[] {
+  if (!raw || typeof raw !== 'string') return [];
+  const out: string[] = [];
+  // Extract an ipfs path from ipfs:// or any /ipfs/<cid...> gateway URL.
+  let ipfsPath: string | undefined;
+  if (raw.startsWith('ipfs://')) ipfsPath = raw.slice('ipfs://'.length).replace(/^ipfs\//, '');
+  else {
+    const m = raw.match(/\/ipfs\/([^?#]+)/);
+    if (m) ipfsPath = m[1];
+  }
+  if (ipfsPath) {
+    out.push(`https://pump.mypinata.cloud/ipfs/${ipfsPath}`); // what pump.fun itself serves
+    out.push(`https://ipfs.io/ipfs/${ipfsPath}`);
+  } else if (raw.startsWith('http://')) {
+    out.push('https://' + raw.slice('http://'.length));
+  } else if (raw.startsWith('https://')) {
+    out.push(raw);
+  }
+  return out;
 }
 
-// Numeric "weight" to pick the best pair for a mint when several exist.
+interface Acc { symbol?: string; name?: string; cands: string[] }
+
 function pairWeight(pair: any): number {
   const liq = Number(pair?.liquidity?.usd);
   if (Number.isFinite(liq) && liq > 0) return liq;
@@ -55,30 +70,7 @@ function pairWeight(pair: any): number {
   return 0;
 }
 
-function metaFromPair(pair: any): TokenMeta {
-  const base = pair?.baseToken ?? {};
-  const addr = typeof base?.address === 'string' ? base.address : undefined;
-  // Prefer the explicit profile image; otherwise fall back to DexScreener's
-  // canonical token image CDN, which exists for most tokens DexScreener knows
-  // (these tokens do — their name/symbol resolved). This is a fast, reliable
-  // https URL, unlike the IPFS/arweave links Helius returns for fresh coins.
-  const icon =
-    pair?.info?.imageUrl ||
-    base?.icon ||
-    (addr ? `https://dd.dexscreener.com/ds-data/tokens/solana/${addr}.png` : undefined);
-  return {
-    symbol: base?.symbol || undefined,
-    name: base?.name || undefined,
-    icon: normalizeUri(typeof icon === 'string' && icon ? icon : undefined),
-  };
-}
-
-/** DexScreener pass — fills the result/cache maps in place. */
-async function fetchDexScreener(
-  mints: string[],
-  result: Map<string, TokenMeta>,
-  now: number
-): Promise<void> {
+async function fetchDexScreener(mints: string[], acc: Map<string, Acc>): Promise<void> {
   const bestWeight = new Map<string, number>();
   for (const group of chunk(mints, DS_BATCH)) {
     try {
@@ -92,29 +84,29 @@ async function fetchDexScreener(
         const prev = bestWeight.get(addr);
         if (prev != null && w <= prev) continue;
         bestWeight.set(addr, w);
-        const meta = metaFromPair(pair);
-        result.set(addr, meta);
-        CACHE.set(addr, { meta, ts: now });
+
+        const base = pair.baseToken ?? {};
+        const entry: Acc = acc.get(addr) ?? { cands: [] };
+        entry.symbol = base?.symbol || entry.symbol;
+        entry.name = base?.name || entry.name;
+        const cands: string[] = [];
+        if (typeof pair?.info?.imageUrl === 'string' && pair.info.imageUrl) cands.push(pair.info.imageUrl);
+        if (typeof base?.icon === 'string' && base.icon) cands.push(base.icon);
+        // DexScreener's canonical token-image CDN (fast; exists for most tokens).
+        cands.push(`https://dd.dexscreener.com/ds-data/tokens/solana/${addr}.png`);
+        entry.cands = [...entry.cands, ...cands];
+        acc.set(addr, entry);
       }
     } catch {
-      // leave this group unresolved
+      /* leave unresolved */
     }
   }
 }
 
-/**
- * Helius DAS fallback — fills icon (and name/symbol when missing) for mints that
- * DexScreener couldn't fully resolve. Reliable for pump.fun token images.
- */
-async function fetchHeliusImages(
-  mints: string[],
-  result: Map<string, TokenMeta>,
-  now: number
-): Promise<void> {
+async function fetchHelius(mints: string[], acc: Map<string, Acc>): Promise<void> {
   const key = process.env.HELIUS_API_KEY;
   if (!key || mints.length === 0) return;
   const endpoint = `https://mainnet.helius-rpc.com/?api-key=${key}`;
-
   for (const group of chunk(mints, HELIUS_BATCH)) {
     try {
       const res = await axios.post(
@@ -127,37 +119,33 @@ async function fetchHeliusImages(
         const id = a?.id;
         if (typeof id !== 'string' || !id) continue;
         const content = a?.content ?? {};
-        const file = Array.isArray(content?.files) ? content.files[0] : undefined;
-        const image =
-          normalizeUri(content?.links?.image) ||
-          normalizeUri(file?.cdn_uri) ||
-          normalizeUri(file?.uri);
         const md = content?.metadata ?? {};
-        const prev = result.get(id) ?? {};
-        const meta: TokenMeta = {
-          symbol: prev.symbol || md?.symbol || undefined,
-          name: prev.name || md?.name || undefined,
-          icon: prev.icon || image || undefined,
-        };
-        result.set(id, meta);
-        CACHE.set(id, { meta, ts: now });
+        const file = Array.isArray(content?.files) ? content.files[0] : undefined;
+        const entry: Acc = acc.get(id) ?? { cands: [] };
+        entry.symbol = entry.symbol || md?.symbol || undefined;
+        entry.name = entry.name || md?.name || undefined;
+        // pump.fun token image lives in the on-chain metadata (IPFS via Pinata).
+        if (file?.cdn_uri) entry.cands.push(file.cdn_uri); // Helius-hosted CDN (fast)
+        entry.cands.push(...imageCandidates(content?.links?.image));
+        entry.cands.push(...imageCandidates(file?.uri));
+        acc.set(id, entry);
       }
     } catch {
-      // leave this group unresolved
+      /* leave unresolved */
     }
   }
 }
 
-/**
- * Resolve metadata for the given mints. Returns a Map keyed by mint; unresolved
- * mints are simply absent.
- */
+function finalize(entry: Acc): TokenMeta {
+  const icons = Array.from(new Set(entry.cands.filter((c) => typeof c === 'string' && c))).slice(0, 6);
+  return { symbol: entry.symbol, name: entry.name, icon: icons[0], icons };
+}
+
 export async function getTokenMeta(mints: string[]): Promise<Map<string, TokenMeta>> {
   const result = new Map<string, TokenMeta>();
   const now = Date.now();
 
   const unique = Array.from(new Set(mints.filter((m) => typeof m === 'string' && m)));
-
   const toFetch: string[] = [];
   for (const mint of unique) {
     const entry = CACHE.get(mint);
@@ -166,11 +154,17 @@ export async function getTokenMeta(mints: string[]): Promise<Map<string, TokenMe
   }
   if (toFetch.length === 0) return result;
 
-  await fetchDexScreener(toFetch, result, now);
+  const acc = new Map<string, Acc>();
+  // DexScreener (names/symbols + fast CDN) and Helius (pump.fun image) in
+  // parallel so we always have the IPFS image as a fallback candidate.
+  await Promise.all([fetchDexScreener(toFetch, acc), fetchHelius(toFetch, acc)]);
 
-  // Anything still missing an icon → try Helius for the image (and name/symbol).
-  const needIcon = toFetch.filter((m) => !result.get(m)?.icon);
-  if (needIcon.length > 0) await fetchHeliusImages(needIcon, result, now);
-
+  for (const mint of toFetch) {
+    const entry = acc.get(mint);
+    if (!entry) continue;
+    const meta = finalize(entry);
+    result.set(mint, meta);
+    CACHE.set(mint, { meta, ts: now });
+  }
   return result;
 }

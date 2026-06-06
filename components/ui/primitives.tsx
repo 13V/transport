@@ -52,11 +52,14 @@ export function WinBar({ value }: { value?: number | null }) {
 }
 
 const TOKEN_HUES = [248, 161, 14, 286, 200, 36, 330, 96, 268, 178];
-export function TokenMark({ symbol, size = 26, icon }: { symbol?: string; size?: number; icon?: string }) {
+export function TokenMark({ symbol, size = 26, icon, icons }: { symbol?: string; size?: number; icon?: string; icons?: string[] }) {
   const s = symbol || '?';
   const h = TOKEN_HUES[(s.charCodeAt(0) || 0) % TOKEN_HUES.length];
   const r = Math.round(size * 0.3);
-  const hasIcon = typeof icon === 'string' && icon.length > 0;
+  const srcs = (icons && icons.length ? icons : icon ? [icon] : []).filter(
+    (u): u is string => typeof u === 'string' && u.length > 0
+  );
+  const hasIcon = srcs.length > 0;
   // Letter avatar is always rendered; when an icon URL is present we overlay a
   // real <img> on top (TokenImg, client). If the image is missing or fails to
   // load, the colored letter shows through — robust either way.
@@ -71,7 +74,7 @@ export function TokenMark({ symbol, size = 26, icon }: { symbol?: string; size?:
       }}
     >
       {s.slice(0, 1).toUpperCase()}
-      {hasIcon && <TokenImg src={icon as string} radius={r} />}
+      {hasIcon && <TokenImg srcs={srcs} radius={r} />}
     </span>
   );
 }

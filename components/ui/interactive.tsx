@@ -16,21 +16,23 @@ function stop(e: React.MouseEvent) {
 }
 
 /**
- * Token icon image with graceful fallback: renders an <img> overlay on top of
- * the letter avatar; if the image is missing or fails to load it unmounts and
- * the colored letter shows through. Client-only (needs onError).
+ * Token icon image with a fallback CHAIN: tries each candidate URL in order,
+ * advancing on error; when all fail it unmounts and the colored letter avatar
+ * shows through. Client-only (needs onError). `key` on the src forces a fresh
+ * <img> mount per candidate so onError fires reliably.
  */
-export function TokenImg({ src, radius }: { src: string; radius: number }) {
-  const [ok, setOk] = useState(true);
-  if (!ok) return null;
+export function TokenImg({ srcs, radius }: { srcs: string[]; radius: number }) {
+  const [i, setI] = useState(0);
+  if (i >= srcs.length) return null;
   return (
     // eslint-disable-next-line @next/next/no-img-element
     <img
-      src={src}
+      key={srcs[i]}
+      src={srcs[i]}
       alt=""
       loading="lazy"
       referrerPolicy="no-referrer"
-      onError={() => setOk(false)}
+      onError={() => setI((n) => n + 1)}
       style={{
         position: 'absolute', inset: 0, width: '100%', height: '100%',
         objectFit: 'cover', borderRadius: radius, display: 'block',

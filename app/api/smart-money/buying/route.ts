@@ -39,7 +39,7 @@ export async function GET(request: NextRequest) {
     const meta = await getTokenMeta(result.tokens.map((t) => t.mint));
     tokens = result.tokens.map((t) => {
       const m = meta.get(t.mint);
-      return m ? { ...t, symbol: m.symbol, name: m.name, icon: m.icon } : t;
+      return m ? { ...t, symbol: m.symbol, name: m.name, icon: m.icon, icons: m.icons } : t;
     });
   } catch {
     // ignore — return the un-enriched feed
