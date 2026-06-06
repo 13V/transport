@@ -19,6 +19,7 @@ import { TradeProcessor } from '../../../lib/pnl-engine';
 import { WalletAnalyzer } from '../../../lib/wallet-analyzer';
 import { getSupabase, isSupabaseConfigured } from '../../../lib/supabase-client';
 import { getSmartCriteria, isSmartWallet } from '../../../lib/indexer/curation';
+import { classifyWallet } from '../../../lib/indexer/wallet-tags';
 
 /**
  * Read the precomputed leaderboard straight from wallet_stats (fast, <100ms).
@@ -81,6 +82,16 @@ async function readLeaderboardFromDb(
       roiPct: r.roi_pct == null ? null : Number(r.roi_pct),
       verified: Boolean(r.verified),
       fundedBy: r.funded_by ?? null,
+      ...classifyWallet({
+        score: Number(r.score),
+        roiPct: r.roi_pct == null ? null : Number(r.roi_pct),
+        realizedPnl: Number(r.realized_pnl),
+        investedSol: r.invested_sol == null ? null : Number(r.invested_sol),
+        winRate: Number(r.win_rate),
+        consistency: Number(r.consistency),
+        totalTrades: Number(r.total_trades),
+        tokensTraded: Number(r.tokens_traded),
+      }),
       smart: isSmartWallet(
         {
           realizedPnl: Number(r.realized_pnl),
@@ -126,6 +137,8 @@ export interface LeaderboardResponse {
     roiPct?: number | null; // accurate all-time ROI% (verified wallets only)
     verified?: boolean; // deep-scanned: numbers are accurate all-time
     fundedBy?: string | null; // smart wallet that funded this one (SOL transfer)
+    tier?: string; // coarse quality tier from classifyWallet (S/A/B/C)
+    tags?: string[]; // descriptive trait tags from classifyWallet
   }>;
   totalWallets: number;
   pagination: {

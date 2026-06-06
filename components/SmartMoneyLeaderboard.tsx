@@ -30,6 +30,8 @@ interface LeaderboardWallet {
   roiPct?: number | null;
   verified?: boolean;
   fundedBy?: string | null;
+  tier?: string;
+  tags?: string[];
 }
 
 interface LeaderboardResponse {
@@ -54,6 +56,9 @@ export default function SmartMoneyLeaderboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [tierFilter, setTierFilter] = useState<'All' | 'S' | 'A' | 'B' | 'C'>('All');
+  const [minRoi, setMinRoi] = useState<string>('');
+  const [smartOnly, setSmartOnly] = useState(false);
   const [sortField, setSortField] = useState<SortField>('rank');
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
   const [currentPage, setCurrentPage] = useState(0);
@@ -130,6 +135,22 @@ export default function SmartMoneyLeaderboard() {
       result = result.filter((w) => w.address.toLowerCase().includes(query));
     }
 
+    // Apply tier filter
+    if (tierFilter !== 'All') {
+      result = result.filter((w) => w.tier === tierFilter);
+    }
+
+    // Apply min ROI% filter (wallets without a known ROI are excluded)
+    const minRoiNum = parseFloat(minRoi);
+    if (!Number.isNaN(minRoiNum)) {
+      result = result.filter((w) => w.roiPct != null && w.roiPct >= minRoiNum);
+    }
+
+    // Apply "Smart only" filter
+    if (smartOnly) {
+      result = result.filter((w) => w.smart);
+    }
+
     // Apply sorting
     result.sort((a, b) => {
       let aVal = a[sortField];
@@ -148,7 +169,7 @@ export default function SmartMoneyLeaderboard() {
     });
 
     return result;
-  }, [data, searchQuery, sortField, sortDirection]);
+  }, [data, searchQuery, tierFilter, minRoi, smartOnly, sortField, sortDirection]);
 
   // Paginate filtered data
   const paginatedData = useMemo(() => {
@@ -199,6 +220,20 @@ export default function SmartMoneyLeaderboard() {
     if (score >= 70) return 'badge-success';
     if (score >= 30) return 'badge-warning';
     return 'badge-danger';
+  };
+
+  // Tier badge color (S=gold, A=emerald, B=blue, C=gray)
+  const getTierColor = (tier?: string) => {
+    switch (tier) {
+      case 'S':
+        return 'bg-amber-500/15 text-amber-400 ring-amber-500/30';
+      case 'A':
+        return 'bg-emerald-500/15 text-emerald-400 ring-emerald-500/30';
+      case 'B':
+        return 'bg-blue-500/15 text-blue-400 ring-blue-500/30';
+      default:
+        return 'bg-gray-500/15 text-gray-400 ring-gray-500/30';
+    }
   };
 
   const SortHeader = ({ field, label }: { field: SortField; label: string }) => (
@@ -355,6 +390,61 @@ export default function SmartMoneyLeaderboard() {
         </button>
       </div>
 
+      {/* Filters */}
+      <div className="flex flex-wrap items-end gap-4">
+        <div className="flex flex-col gap-1">
+          <label htmlFor="tier-filter" className="text-xs font-semibold text-gray-400">
+            Tier
+          </label>
+          <select
+            id="tier-filter"
+            value={tierFilter}
+            onChange={(e) => {
+              setTierFilter(e.target.value as 'All' | 'S' | 'A' | 'B' | 'C');
+              setCurrentPage(0);
+            }}
+            className="rounded-lg bg-gray-800 border border-gray-700 px-3 py-1.5 text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-blue-500"
+          >
+            <option value="All">All</option>
+            <option value="S">S</option>
+            <option value="A">A</option>
+            <option value="B">B</option>
+            <option value="C">C</option>
+          </select>
+        </div>
+
+        <div className="flex flex-col gap-1">
+          <label htmlFor="min-roi" className="text-xs font-semibold text-gray-400">
+            Min ROI %
+          </label>
+          <input
+            id="min-roi"
+            type="number"
+            inputMode="numeric"
+            placeholder="e.g. 25"
+            value={minRoi}
+            onChange={(e) => {
+              setMinRoi(e.target.value);
+              setCurrentPage(0);
+            }}
+            className="w-28 rounded-lg bg-gray-800 border border-gray-700 px-3 py-1.5 text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-blue-500"
+          />
+        </div>
+
+        <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer pb-1.5">
+          <input
+            type="checkbox"
+            checked={smartOnly}
+            onChange={(e) => {
+              setSmartOnly(e.target.checked);
+              setCurrentPage(0);
+            }}
+            className="h-4 w-4 rounded border-gray-700 bg-gray-800 text-blue-600 focus:ring-blue-500"
+          />
+          Smart only
+        </label>
+      </div>
+
       {/* Table */}
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
@@ -367,6 +457,7 @@ export default function SmartMoneyLeaderboard() {
               <th className="px-4 py-3 font-semibold">
                 <SortHeader field="score" label="Score" />
               </th>
+              <th className="px-4 py-3 font-semibold">Tier</th>
               <th className="px-4 py-3 font-semibold text-right">ROI (all-time)</th>
               <th className="px-4 py-3 font-semibold text-right">
                 <SortHeader field="pnl" label="PnL" />
@@ -384,7 +475,7 @@ export default function SmartMoneyLeaderboard() {
           <tbody>
             {paginatedData.length === 0 ? (
               <tr>
-                <td colSpan={9} className="px-4 py-8 text-center text-gray-400">
+                <td colSpan={10} className="px-4 py-8 text-center text-gray-400">
                   {searchQuery
                     ? 'No wallets found matching your search'
                     : 'No data available'}
@@ -431,6 +522,19 @@ export default function SmartMoneyLeaderboard() {
                         </span>
                       )}
                       <CopyButton text={wallet.address} label="wallet address" />
+                      {wallet.tags && wallet.tags.length > 0 && (
+                        <span className="flex flex-wrap items-center gap-1">
+                          {wallet.tags.slice(0, 3).map((tag) => (
+                            <span
+                              key={tag}
+                              className="inline-flex items-center rounded-full bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium text-sky-300 ring-1 ring-sky-500/30"
+                              title={`Tag: ${tag}`}
+                            >
+                              {tag}
+                            </span>
+                          ))}
+                        </span>
+                      )}
                     </div>
                   </td>
                   <td className="px-4 py-3">
@@ -441,6 +545,20 @@ export default function SmartMoneyLeaderboard() {
                     >
                       {wallet.score.toFixed(1)}
                     </span>
+                  </td>
+                  <td className="px-4 py-3">
+                    {wallet.tier ? (
+                      <span
+                        className={`inline-flex items-center justify-center rounded-full px-2 py-0.5 text-[11px] font-bold ring-1 ${getTierColor(
+                          wallet.tier
+                        )}`}
+                        title={`Tier ${wallet.tier}`}
+                      >
+                        {wallet.tier}
+                      </span>
+                    ) : (
+                      <span className="text-gray-600">—</span>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-right">
                     {wallet.roiPct == null ? (
