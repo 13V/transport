@@ -118,6 +118,102 @@ interface TokenSmartHoldersProps {
   mint: string;
 }
 
+type TF = '5m' | '1h' | '1d';
+const TFS: TF[] = ['5m', '1h', '1d'];
+
+interface OhlcvResponse {
+  closes: number[];
+  times: number[];
+  last: number | null;
+}
+
+/**
+ * Native price chart. Pulls OHLCV from our /ohlcv endpoint (GeckoTerminal under
+ * the hood) and renders it with our own AreaChart — no DexScreener iframe, so
+ * ad-blockers / frame-blockers can't leave it blank. Falls back to a DexScreener
+ * link if the pool has no candles yet.
+ */
+function PriceChart({ mint, pair }: { mint: string; pair?: string }) {
+  const [tf, setTf] = useState<TF>('1h');
+  const [data, setData] = useState<OhlcvResponse | null>(null);
+  const [state, setState] = useState<'loading' | 'error' | 'done'>('loading');
+
+  useEffect(() => {
+    let alive = true;
+    setState('loading');
+    const qs = `tf=${tf}${pair ? `&pair=${pair}` : ''}`;
+    fetch(`/api/token/${mint}/ohlcv?${qs}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error('chart'))))
+      .then((j: OhlcvResponse) => { if (alive) { setData(j); setState('done'); } })
+      .catch(() => { if (alive) setState('error'); });
+    return () => { alive = false; };
+  }, [mint, pair, tf]);
+
+  const closes = data?.closes ?? [];
+  // A few evenly-spaced time labels across the series for the x-axis.
+  const xLabels = (() => {
+    const t = data?.times ?? [];
+    if (t.length < 2) return undefined;
+    const fmt = (ms: number) =>
+      tf === '1d'
+        ? new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+        : new Date(ms).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+    const n = 5;
+    return Array.from({ length: n }, (_, i) => fmt(t[Math.round((i / (n - 1)) * (t.length - 1))]));
+  })();
+
+  const up = closes.length >= 2 && closes[closes.length - 1] >= closes[0];
+  const color = up ? CHART_COLORS.POS : CHART_COLORS.NEG;
+
+  return (
+    <div className="card" style={{ overflow: 'hidden' }}>
+      <div className="card-head">
+        <h3><span className="ic"><LineChart size={16} /></span> Price</h3>
+        <div className="row gap-10">
+          <div className="seg">
+            {TFS.map((t) => (
+              <button key={t} type="button" className={tf === t ? 'on' : ''} onClick={() => setTf(t)}>
+                {t.toUpperCase()}
+              </button>
+            ))}
+          </div>
+          {pair && (
+            <a
+              className="faint"
+              style={{ fontSize: 12, textDecoration: 'none' }}
+              href={`https://dexscreener.com/solana/${pair}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Open full chart on DexScreener"
+            >
+              DexScreener ↗
+            </a>
+          )}
+        </div>
+      </div>
+      <div style={{ padding: '4px 8px 8px', minHeight: 240 }}>
+        {state === 'loading' ? (
+          <div className="faint" style={{ padding: '90px 0', textAlign: 'center', fontSize: 13 }}>Loading price…</div>
+        ) : closes.length >= 2 ? (
+          <AreaChart values={closes} height={240} color={color} xLabels={xLabels} fmtY={(v) => usd(Number(v))} />
+        ) : (
+          <div className="faint" style={{ padding: '80px 0', textAlign: 'center', fontSize: 13 }}>
+            No price history yet for this pool.
+            {pair && (
+              <>
+                {' '}
+                <a href={`https://dexscreener.com/solana/${pair}`} target="_blank" rel="noopener noreferrer">
+                  View on DexScreener ↗
+                </a>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // Derive a position label from buy/sell activity on this coin.
 function positionFor(h: SmartHolder): { label: string; cls: string } {
   if (h.tokensRemaining <= 0) return { label: 'Exited', cls: 'neg' };
@@ -387,35 +483,9 @@ export default function TokenSmartHolders({ mint }: TokenSmartHoldersProps) {
         </div>
       )}
 
-      {/* Live DexScreener chart */}
-      {tk?.pairAddress && (
-        <div className="card" style={{ overflow: 'hidden' }}>
-          <div className="card-head">
-            <h3><span className="ic"><LineChart size={16} /></span> Live chart</h3>
-            <a
-              className="faint"
-              style={{ fontSize: 12, textDecoration: 'none' }}
-              href={`https://dexscreener.com/solana/${tk.pairAddress}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              title="Open full chart on DexScreener"
-            >
-              DexScreener ↗
-            </a>
-          </div>
-          {/* Eager-load (not lazy): this is the card's primary content, and a
-              lazy iframe inside an `overflow:hidden` card can stay blank when the
-              intersection math is thrown off. The header link above is always a
-              working fallback if the embed itself fails to render. */}
-          <iframe
-            src={`https://dexscreener.com/solana/${tk.pairAddress}?embed=1&theme=dark&info=0&trades=0`}
-            title="DexScreener chart"
-            // Responsive height: shorter on small/mobile viewports, capped at
-            // 460px on desktop. Avoids a 460px chart dominating a phone screen.
-            style={{ width: '100%', height: 'clamp(320px, 52vh, 460px)', border: 0, display: 'block' }}
-          />
-        </div>
-      )}
+      {/* Native price chart — candles pulled from GeckoTerminal and rendered
+          with our own SVG (no third-party iframe, so ad-blockers can't break it). */}
+      {mint && <PriceChart mint={mint} pair={tk?.pairAddress} />}
 
       {/* Net smart-money flow — cumulative signed SOL (buys − sells) over time */}
       {flow.length >= 2 && (
