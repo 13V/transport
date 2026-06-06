@@ -15,6 +15,7 @@ import {
   Sparkles,
   Info,
   BadgeCheck,
+  BarChart3,
 } from 'lucide-react';
 import * as f from '@/lib/format';
 import {
@@ -595,6 +596,15 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
                         style={{ justifyContent: 'flex-end', flexWrap: 'nowrap' }}
                         onClick={(e) => e.stopPropagation()}
                       >
+                        <a
+                          className="iconbtn"
+                          href={`/smart-money/${w.address}#measured-calls`}
+                          title="View this wallet's measured track record (forward returns of bursts it bought in)"
+                          aria-label="Measured calls"
+                          style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 11.5 }}
+                        >
+                          <BarChart3 size={13} /> calls
+                        </a>
                         <WatchStar address={w.address} />
                         <CopyIconButton text={w.address} title="Copy address" />
                         <WalletLinks address={w.address} />

@@ -1072,3 +1072,124 @@ pre.code .c { color: var(--text-4); }
   opacity: 0; pointer-events: none; transition: opacity .2s ease, transform .2s ease;
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* =========================================================================
+   SIGNAL BACKTESTER (.bt-*) — a quant tool styled in the terminal aesthetic.
+   Self-contained; reuses tokens (--surface, --border, --accent, --pos/--neg)
+   and the shared .seg / .card / .placeholder primitives. Does not touch .bf-*.
+   ========================================================================= */
+.bt-muted { color: var(--text-3); }
+
+/* Filter controls — a wrapping grid of labelled segment groups. */
+.bt-controls {
+  display: flex; flex-wrap: wrap; gap: 18px 24px; align-items: flex-end;
+}
+.bt-ctrl { display: flex; flex-direction: column; gap: 6px; }
+.bt-ctrl-label {
+  font-size: 10.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--text-3);
+}
+
+/* Results card header. */
+.bt-results-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap; margin-bottom: 16px;
+}
+.bt-tag {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase;
+  color: var(--accent-hover, var(--accent));
+}
+.bt-tag svg { width: 14px; height: 14px; }
+.bt-meta { font-size: 12px; }
+
+/* Headline median/hit-rate blocks (big, color-coded). */
+.bt-headlines {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
+}
+.bt-headline {
+  background: var(--surface-3); border: 1px solid var(--border);
+  border-radius: var(--r); padding: 16px 18px; min-width: 0;
+}
+.bt-headline-h {
+  font-size: 10.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--text-3); margin-bottom: 8px;
+}
+.bt-headline-v {
+  font-size: 30px; font-weight: 800; letter-spacing: -0.02em; line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.bt-headline-v.pos { color: var(--pos); }
+.bt-headline-v.neg { color: var(--neg); }
+.bt-headline-v.bt-muted { color: var(--text-3); }
+.bt-headline-sub { margin-top: 8px; font-size: 12.5px; color: var(--text-2); }
+.bt-headline-sub b.pos { color: var(--pos); }
+.bt-headline-sub b.neg { color: var(--neg); }
+
+/* Average-return secondary row. */
+.bt-avgrow {
+  display: flex; flex-wrap: wrap; gap: 18px; margin-top: 14px;
+  font-size: 12.5px; color: var(--text-2); font-variant-numeric: tabular-nums;
+}
+.bt-avgrow b.pos { color: var(--pos); }
+.bt-avgrow b.neg { color: var(--neg); }
+.bt-avgrow b.bt-muted { color: var(--text-3); }
+
+/* Best / worst call chips. */
+.bt-calls { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+.bt-call {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--r-sm);
+  background: var(--surface-3); text-decoration: none; color: var(--text);
+  font-size: 12.5px; transition: border-color .15s ease, background .15s ease;
+}
+.bt-call:hover { border-color: var(--border-strong, var(--border)); background: var(--surface-2); }
+.bt-call-label { color: var(--text-3); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
+.bt-call-sym { font-weight: 700; }
+.bt-call-ret { font-weight: 700; font-variant-numeric: tabular-nums; }
+.bt-call-ret.pos { color: var(--pos); }
+.bt-call-ret.neg { color: var(--neg); }
+.bt-call-h { font-size: 11px; }
+
+/* Return distribution histogram. */
+.bt-dist {
+  display: flex; align-items: flex-end; gap: 6px; padding-top: 6px;
+  min-height: 150px;
+}
+.bt-dist-col { flex: 1 1 0; display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 0; }
+.bt-dist-bar-wrap { width: 100%; height: 110px; display: flex; align-items: flex-end; justify-content: center; }
+.bt-dist-bar { width: 70%; max-width: 38px; border-radius: 4px 4px 0 0; transition: height .25s ease; }
+.bt-dist-bar.pos { background: var(--pos); }
+.bt-dist-bar.neg { background: var(--neg); }
+.bt-dist-count { font-size: 11px; font-weight: 700; color: var(--text-2); font-variant-numeric: tabular-nums; min-height: 14px; }
+.bt-dist-label { font-size: 9.5px; color: var(--text-3); text-align: center; white-space: nowrap; }
+
+/* By-buyer-count table. */
+.bt-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.bt-table th {
+  text-align: left; padding: 8px 10px; font-size: 10.5px; font-weight: 600;
+  letter-spacing: .04em; text-transform: uppercase; color: var(--text-3);
+  border-bottom: 1px solid var(--border);
+}
+.bt-table td { padding: 9px 10px; border-bottom: 1px solid var(--border); }
+.bt-table tbody tr:last-child td { border-bottom: none; }
+.bt-table td.pos { color: var(--pos); }
+.bt-table td.neg { color: var(--neg); }
+.bt-table td.bt-muted { color: var(--text-3); }
+
+/* Inline empty/degraded message inside a card. */
+.bt-empty-inline {
+  padding: 14px 4px; color: var(--text-3); font-size: 13px; line-height: 1.5;
+}
+
+/* Loading skeleton spacing. */
+.bt-loading .bt-headlines { margin-top: 16px; }
+
+@media (max-width: 720px) {
+  .bt-controls { gap: 14px 18px; }
+  .bt-headlines { grid-template-columns: 1fr; }
+  .bt-headline-v { font-size: 26px; }
+  .bt-dist { gap: 3px; }
+  .bt-dist-label { font-size: 8px; }
+  .bt-dist-bar-wrap { height: 90px; }
+}

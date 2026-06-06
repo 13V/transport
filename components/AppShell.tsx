@@ -8,7 +8,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import {
-  Activity, LayoutDashboard, Crown, Flame, Radio, Star, BookOpen, Search,
+  Activity, LayoutDashboard, Crown, Flame, Radio, Star, BookOpen, Search, FlaskConical,
 } from 'lucide-react';
 import * as f from '@/lib/format';
 import { isGatingEnabled } from '@/lib/gating/config';
@@ -21,6 +21,7 @@ const NAV: { group: string; items: NavItem[] }[] = [
     { href: '/smart-money', label: 'Leaderboard', icon: Crown, owner: 'leaderboard' },
     { href: '/smart-money/buying', label: 'Buying', icon: Flame, owner: 'buying' },
     { href: '/live', label: 'Live', icon: Radio, owner: 'live' },
+    { href: '/backtest', label: 'Backtest', icon: FlaskConical, owner: 'backtest' },
   ] },
   { group: 'You', items: [
     { href: '/watchlist', label: 'Watchlist', icon: Star, owner: 'watchlist' },
@@ -61,6 +62,7 @@ function ownerFor(path: string): string {
   if (path.startsWith('/watchlist')) return 'watchlist';
   if (path.startsWith('/docs')) return 'docs';
   if (path.startsWith('/live')) return 'live';
+  if (path.startsWith('/backtest')) return 'backtest';
   return 'dashboard';
 }
 
@@ -79,6 +81,7 @@ function titleFor(path: string): string {
   if (path.startsWith('/watchlist')) return 'Watchlist';
   if (path.startsWith('/docs')) return 'API Reference';
   if (path.startsWith('/live')) return 'Live';
+  if (path.startsWith('/backtest')) return 'Backtest';
   return 'Smart Money';
 }
 

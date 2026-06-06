@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import {
   ChevronLeft, Clock, ExternalLink, CheckCircle, Star, Wallet,
   TrendingUp, TrendingDown, List, GitBranch, Link as LinkIcon, Sparkles,
+  BarChart3,
 } from 'lucide-react';
 import * as f from '@/lib/format';
 import {
@@ -97,6 +98,33 @@ interface ClusterResponse {
   members: ClusterMember[];
 }
 
+interface RecordCall {
+  symbol: string | null;
+  mint: string;
+  ret: number;
+}
+
+interface RecentCall {
+  symbol: string | null;
+  mint: string;
+  windowEnd: string | null;
+  ret1h: number | null;
+  ret24h: number | null;
+}
+
+interface WalletRecordResponse {
+  address: string;
+  n: number;
+  medianRet1h: number | null;
+  hitRate1h: number | null;
+  medianRet24h: number | null;
+  hitRate24h: number | null;
+  bestCall: RecordCall | null;
+  worstCall: RecordCall | null;
+  recentCalls: RecentCall[];
+  windowDays: number;
+}
+
 interface WalletProfileProps {
   walletAddress: string;
 }
@@ -112,6 +140,7 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
   const [profile, setProfile] = useState<ProfileResponse | null>(null);
   const [holdings, setHoldings] = useState<HoldingsResponse | null>(null);
   const [clusterMembers, setClusterMembers] = useState<ClusterMember[] | null>(null);
+  const [record, setRecord] = useState<WalletRecordResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
@@ -138,10 +167,25 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
       }
     }
 
+    // Measured track record is enrichment too: fetch it in parallel so it never
+    // gates the core profile render, and never let a failure here break it.
+    async function loadRecord() {
+      try {
+        const recRes = await fetch(`/api/wallet/${walletAddress}/record`);
+        if (recRes.ok) {
+          const recJson = (await recRes.json()) as WalletRecordResponse;
+          if (!cancelled) setRecord(recJson);
+        }
+      } catch {
+        /* enrichment only — ignore */
+      }
+    }
+
     async function load() {
       setLoading(true);
       setError(null);
       setClusterMembers(null);
+      setRecord(null);
       try {
         const [profileRes, holdingsRes] = await Promise.all([
           fetch(`/api/wallet/${walletAddress}/profile`),
@@ -169,6 +213,7 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
 
     load();
     loadCluster();
+    loadRecord();
     return () => {
       cancelled = true;
     };
@@ -326,6 +371,9 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
         </div>
       </div>
 
+      {/* Measured track record — verifiable per-wallet calls */}
+      <TrackRecordCard record={record} />
+
       {/* Performance history */}
       <WalletHistoryChart walletAddress={walletAddress} />
 
@@ -467,6 +515,166 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
 }
 
 // --- subcomponents ---------------------------------------------------------
+
+/**
+ * MEASURED TRACK RECORD — the trust feature. Renders this wallet's REAL,
+ * measured participation in smart-money bursts whose forward outcomes we
+ * tracked. When `n === 0` (or the record hasn't loaded), shows a neutral state
+ * — never fabricated numbers. Reuses the existing card / headline / .bf-proof
+ * look so it reads like the live-feed proof strip.
+ */
+function TrackRecordCard({ record }: { record: WalletRecordResponse | null }) {
+  const n = record?.n ?? 0;
+
+  const head = (
+    <div className="card-head">
+      <h3>
+        <span className="ic" style={{ color: 'var(--accent-hover)' }}><BarChart3 size={16} /></span>{' '}
+        Measured calls
+      </h3>
+      <span className="faint" style={{ fontSize: 12 }}>
+        Forward returns of bursts this wallet bought in · measured from real price history
+      </span>
+    </div>
+  );
+
+  if (n === 0) {
+    return (
+      <div className="card" id="measured-calls" style={{ scrollMarginTop: 80 }}>
+        {head}
+        <EmptyState
+          icon={BarChart3}
+          title="No measured calls yet"
+          msg="Accrues as the outcome tracker measures bursts this wallet participates in. Nothing is shown until a real forward return exists."
+        />
+      </div>
+    );
+  }
+
+  const rec = record!;
+  const best = rec.bestCall;
+  const worst = rec.worstCall;
+
+  return (
+    <div className="card" id="measured-calls" style={{ scrollMarginTop: 80 }}>
+      {head}
+      <div className="card-pad stack gap-16">
+        {/* One-line proof strip (mirrors the live-feed .bf-proof look). */}
+        <div className="bf-proof" title="Measured forward returns of bursts this wallet bought in">
+          <span className="bf-proof-tag">measured · last {Math.round(rec.windowDays)}d</span>
+          {rec.medianRet1h != null && Number.isFinite(rec.medianRet1h) && (
+            <span className="bf-proof-row">
+              <span className="bf-proof-leg">
+                median <b className={rec.medianRet1h >= 0 ? 'pos' : 'neg'}>{f.pct(rec.medianRet1h)}</b> @1h
+              </span>
+            </span>
+          )}
+          {rec.hitRate1h != null && Number.isFinite(rec.hitRate1h) && (
+            <span className="bf-proof-row">
+              <span className="bf-proof-sep">·</span>
+              <span className="bf-proof-leg"><b className="pos">{Math.round(rec.hitRate1h)}%</b> green</span>
+            </span>
+          )}
+          {rec.medianRet24h != null && Number.isFinite(rec.medianRet24h) && (
+            <span className="bf-proof-row">
+              <span className="bf-proof-sep">·</span>
+              <span className="bf-proof-leg">
+                median <b className={rec.medianRet24h >= 0 ? 'pos' : 'neg'}>{f.pct(rec.medianRet24h)}</b> @24h
+              </span>
+            </span>
+          )}
+          {rec.hitRate24h != null && Number.isFinite(rec.hitRate24h) && (
+            <span className="bf-proof-row">
+              <span className="bf-proof-sep">·</span>
+              <span className="bf-proof-leg"><b className="pos">{Math.round(rec.hitRate24h)}%</b> green @24h</span>
+            </span>
+          )}
+          <span className="bf-proof-row">
+            <span className="bf-proof-sep">·</span>
+            <span className="bf-proof-leg dim">n={rec.n}</span>
+          </span>
+        </div>
+
+        {/* Headline stat grid for the same numbers, at-a-glance. */}
+        <div className="headline-grid">
+          <div className="headline">
+            <div className="hl-label">Median @1h</div>
+            <div className={`hl-val num ${(rec.medianRet1h ?? 0) >= 0 ? 'pos' : 'neg'}`}>{f.pct(rec.medianRet1h)}</div>
+          </div>
+          <div className="headline">
+            <div className="hl-label">Hit rate @1h</div>
+            <div className="hl-val num">{rec.hitRate1h != null ? `${Math.round(rec.hitRate1h)}%` : '—'}</div>
+          </div>
+          <div className="headline">
+            <div className="hl-label">Median @24h</div>
+            <div className={`hl-val num ${(rec.medianRet24h ?? 0) >= 0 ? 'pos' : 'neg'}`}>{f.pct(rec.medianRet24h)}</div>
+          </div>
+          <div className="headline">
+            <div className="hl-label">Measured calls</div>
+            <div className="hl-val num">{f.num(rec.n)}</div>
+          </div>
+        </div>
+
+        {/* Best / worst call. */}
+        {(best || worst) && (
+          <div className="kv">
+            {best && (
+              <div className="kv-item">
+                <div className="k">Best call</div>
+                <div className="v" style={{ fontSize: 13 }}>
+                  <Link href={`/token/${best.mint}`} style={{ textDecoration: 'none' }}>
+                    <b>{best.symbol || f.short(best.mint, 4, 4)}</b>
+                  </Link>{' '}
+                  <span className={best.ret >= 0 ? 'pos' : 'neg'}>{f.pct(best.ret)}</span>
+                </div>
+              </div>
+            )}
+            {worst && (
+              <div className="kv-item">
+                <div className="k">Worst call</div>
+                <div className="v" style={{ fontSize: 13 }}>
+                  <Link href={`/token/${worst.mint}`} style={{ textDecoration: 'none' }}>
+                    <b>{worst.symbol || f.short(worst.mint, 4, 4)}</b>
+                  </Link>{' '}
+                  <span className={worst.ret >= 0 ? 'pos' : 'neg'}>{f.pct(worst.ret)}</span>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Recent measured calls list. */}
+        {rec.recentCalls.length > 0 && (
+          <div className="stack gap-8">
+            <span className="faint" style={{ fontSize: 12, fontWeight: 600 }}>Recent measured calls</span>
+            {rec.recentCalls.map((c, i) => (
+              <div className="trade" key={`${c.mint}-${i}`}>
+                <TokenMark symbol={c.symbol || f.short(c.mint, 4, 4)} size={22} />
+                <Link href={`/token/${c.mint}`} style={{ textDecoration: 'none' }}>
+                  <b style={{ fontSize: 12.5 }}>{c.symbol || f.short(c.mint, 4, 4)}</b>
+                </Link>
+                <span className="spacer" />
+                {c.ret1h != null && (
+                  <span style={{ fontSize: 12.5 }}>
+                    <span className="faint">1h</span>{' '}
+                    <b className={c.ret1h >= 0 ? 'pos' : 'neg'}>{f.pct(c.ret1h)}</b>
+                  </span>
+                )}
+                {c.ret24h != null && (
+                  <span style={{ fontSize: 12.5 }}>
+                    <span className="faint">24h</span>{' '}
+                    <b className={c.ret24h >= 0 ? 'pos' : 'neg'}>{f.pct(c.ret24h)}</b>
+                  </span>
+                )}
+                <span className="faint" style={{ fontSize: 12 }}>{f.ago(toMs(c.windowEnd))}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function TokenTable({
   title, icon: Icon, tone, rows,
