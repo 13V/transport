@@ -134,6 +134,9 @@ export default function WalletHistoryChart({ walletAddress }: WalletHistoryChart
   }
 
   // Map snapshots to the active metric, coercing nulls to 0 so the curve is continuous.
+  // TODO(chart): coercing missing days to 0 fabricates dips toward zero ROI. Once
+  // AreaChart can skip/interpolate null points without breaking, drop the `?? 0`
+  // and plot gaps as missing instead of as real 0 values.
   const vals = windowed.map((p) =>
     metric === 'roiPct' ? (p.roiPct ?? 0) : (p.realizedPnl ?? 0)
   );

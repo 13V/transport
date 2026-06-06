@@ -2,11 +2,12 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { Sparkles, Users, Wallet, TrendingUp, Globe, Twitter, Send, MessageCircle, ExternalLink, LineChart } from 'lucide-react';
+import { Sparkles, Users, Wallet, TrendingUp, Globe, Twitter, Send, MessageCircle, ExternalLink, LineChart, Activity } from 'lucide-react';
 import * as f from '@/lib/format';
 import {
   TokenMark, TierBadge, Roi, Pnl, AddrChip, CopyIconButton,
   EmptyState, ErrorState, SkCard, SkStat, SkTable,
+  AreaChart, CHART_COLORS,
 } from '@/components/ui';
 
 // Client-side icon candidates for a mint (no extra API call). TokenImg walks
@@ -21,6 +22,7 @@ interface SmartHolder {
   allTimeRoiPct: number | null;
   verified: boolean;
   solBought: number;
+  avgCostSol: number;
   pnlOnThisCoin: number;
   unrealizedSol: number;
   currentValueSol: number;
@@ -28,6 +30,20 @@ interface SmartHolder {
   buys: number;
   sells: number;
   lastBuy: string | null;
+}
+
+// Per-coin trader (unverified) returned by /api/token/{mint}/traders.
+interface TokenTrader {
+  wallet: string;
+  realizedPnl: number;
+  unrealizedPnl: number;
+  totalPnl: number;
+  roi: number;
+  solSpent: number;
+  buys: number;
+  sells: number;
+  tokensRemaining: number;
+  lastTradeAt: string | null;
 }
 
 interface TokenLink { kind: string; url: string }
@@ -62,6 +78,7 @@ interface SmartHoldersResponse {
   traderCount: number;
   smartHolderCount: number;
   smartHolders: SmartHolder[];
+  netFlowSeries?: number[];
 }
 
 // Compact USD formatter for live market stats.
@@ -85,6 +102,105 @@ function positionFor(h: SmartHolder): { label: string; cls: string } {
   if (h.buys > h.sells) return { label: 'Adding', cls: 'pos' };
   if (h.sells > h.buys) return { label: 'Trimming', cls: 'neg' };
   return { label: 'Holding', cls: '' };
+}
+
+// Fallback when no VERIFIED smart wallets hold the coin: show the per-coin
+// winners from the live Helius scan, clearly labelled as unverified.
+function TopTradersFallback({ mint }: { mint: string }) {
+  const router = useRouter();
+  const [traders, setTraders] = useState<TokenTrader[] | null>(null);
+  const [state, setState] = useState<'loading' | 'error' | 'done'>('loading');
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setState('loading');
+      try {
+        const res = await fetch(`/api/token/${mint}/traders?winners=1&limit=25&sort=total`);
+        if (!res.ok) throw new Error('failed');
+        const json = await res.json();
+        if (!cancelled) {
+          setTraders((json.traders as TokenTrader[]) ?? []);
+          setState('done');
+        }
+      } catch {
+        if (!cancelled) setState('error');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [mint]);
+
+  if (state === 'loading') return <SkTable cols={6} rows={6} />;
+  if (state === 'error' || !traders) {
+    return (
+      <div className="card">
+        <div className="card-head">
+          <h3><span className="ic"><Users size={16} /></span> Smart money in this coin</h3>
+        </div>
+        <EmptyState
+          icon={Users}
+          title="No smart money here yet"
+          msg="No verified smart wallets currently hold this token, and per-coin trader data is unavailable."
+        />
+      </div>
+    );
+  }
+  if (traders.length === 0) {
+    return (
+      <div className="card">
+        <div className="card-head">
+          <h3><span className="ic"><Users size={16} /></span> Smart money in this coin</h3>
+        </div>
+        <EmptyState
+          icon={Users}
+          title="No smart money here yet"
+          msg="No verified smart wallets currently hold this token."
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="card" style={{ overflow: 'hidden' }}>
+      <div className="card-head">
+        <h3><span className="ic"><Users size={16} /></span> Top traders on this coin</h3>
+        <span className="badge tag" style={{ fontSize: 11 }}>unverified</span>
+      </div>
+      <p className="faint" style={{ margin: '0 16px 8px', fontSize: 12 }}>
+        No verified smart money here yet — these are the coin&apos;s best per-coin PnL wallets from a live scan. They are not part of the proven smart-money set.
+      </p>
+      <div className="table-wrap">
+        <table className="dt">
+          <thead>
+            <tr>
+              <th>Wallet</th>
+              <th className="r">Realized</th>
+              <th className="r">Unrealized</th>
+              <th className="r">Total PnL</th>
+              <th className="r">SOL in</th>
+              <th className="r">Last trade</th>
+            </tr>
+          </thead>
+          <tbody>
+            {traders.map((t) => (
+              <tr
+                key={t.wallet}
+                className="clickable"
+                onClick={() => router.push(`/smart-money/${t.wallet}`)}
+              >
+                <td><AddrChip address={t.wallet} /></td>
+                <td className="r"><Pnl value={t.realizedPnl} unit={false} /></td>
+                <td className="r">{t.tokensRemaining > 0 ? <Pnl value={t.unrealizedPnl} unit={false} /> : <span className="faint">—</span>}</td>
+                <td className="r"><Pnl value={t.totalPnl} unit={false} /></td>
+                <td className="r num">{f.sol(t.solSpent)} <span className="faint" style={{ fontSize: 11 }}>SOL</span></td>
+                <td className="r faint" style={{ fontSize: 12 }}>{t.lastTradeAt ? f.ago(+new Date(t.lastTradeAt)) : '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
 }
 
 function TitleCard({ mint, token, count }: { mint: string; token?: TokenInfo; count: number | null }) {
@@ -220,6 +336,19 @@ export default function TokenSmartHolders({ mint }: TokenSmartHoldersProps) {
   const avgRoi = roiVals.length ? roiVals.reduce((a, v) => a + v, 0) / roiVals.length : null;
   const tk = data.token;
   const chg = tk?.priceChange24h;
+  const priceSol = data.priceSol ?? 0;
+
+  // Net smart-money flow series (cumulative signed SOL: buys − sells over time).
+  const flow = data.netFlowSeries ?? [];
+  const flowEnd = flow.length ? flow[flow.length - 1] : 0;
+  const flowColor = flowEnd >= 0 ? CHART_COLORS.POS : CHART_COLORS.NEG;
+
+  // Conviction band — aggregate the per-holder position state.
+  const stillHolding = holders.filter((h) => h.tokensRemaining > 0).length;
+  const exited = holders.length - stillHolding;
+  // Net SOL committed by smart money on this coin = end of the cumulative
+  // buys-minus-sells series (falls back to gross SOL bought if no series).
+  const netSol = flow.length ? flowEnd : holders.reduce((a, h) => a + (h.solBought || 0), 0);
 
   return (
     <div className="view stack gap-20">
@@ -252,6 +381,24 @@ export default function TokenSmartHolders({ mint }: TokenSmartHoldersProps) {
         </div>
       )}
 
+      {/* Net smart-money flow — cumulative signed SOL (buys − sells) over time */}
+      {flow.length >= 2 && (
+        <div className="card" style={{ overflow: 'hidden' }}>
+          <div className="card-head">
+            <h3><span className="ic"><Activity size={16} /></span> Net smart-money flow</h3>
+            <span className={`num ${flowEnd >= 0 ? 'pos' : 'neg'}`} style={{ fontSize: 13, fontWeight: 650 }}>
+              {f.solSigned(flowEnd)} SOL
+            </span>
+          </div>
+          <div style={{ padding: '4px 8px 8px' }}>
+            <AreaChart values={flow} height={158} color={flowColor} fmtY={(v) => f.sol(Number(v))} />
+          </div>
+          <p className="faint" style={{ margin: '0 16px 12px', fontSize: 12 }}>
+            Cumulative SOL bought minus sold by verified smart wallets, bucketed by hour.
+          </p>
+        </div>
+      )}
+
       <div className="stat-grid cols-4">
         <div className="stat">
           <div className="stat-label"><span className="stat-ic accent"><Users size={15} /></span> Smart holders</div>
@@ -276,21 +423,23 @@ export default function TokenSmartHolders({ mint }: TokenSmartHoldersProps) {
       </div>
 
       {holders.length === 0 ? (
-        <div className="card">
-          <div className="card-head">
-            <h3><span className="ic"><Sparkles size={16} /></span> Smart money in this coin</h3>
-          </div>
-          <EmptyState
-            icon={Users}
-            title="No smart money here yet"
-            msg="No verified smart wallets currently hold this token."
-          />
-        </div>
+        <TopTradersFallback mint={mint} />
       ) : (
         <div className="card" style={{ overflow: 'hidden' }}>
           <div className="card-head">
             <h3><span className="ic"><Sparkles size={16} /></span> Smart money in this coin</h3>
             <span className="faint" style={{ fontSize: 12 }}>Sorted by position value</span>
+          </div>
+          {/* Conviction band */}
+          <div className="row gap-8 wrap" style={{ padding: '0 16px 10px', fontSize: 12.5 }}>
+            <span className="faint">{holders.length} holders</span>
+            <span className="faint">·</span>
+            <span className="pos">{stillHolding} still holding</span>
+            <span className="faint">·</span>
+            <span className="neg">{exited} exited</span>
+            <span className="faint">·</span>
+            <span className="faint">net</span>
+            <span className={`num ${netSol >= 0 ? 'pos' : 'neg'}`} style={{ fontWeight: 650 }}>{f.solSigned(netSol)} SOL</span>
           </div>
           <div className="table-wrap">
             <table className="dt">
@@ -303,7 +452,7 @@ export default function TokenSmartHolders({ mint }: TokenSmartHoldersProps) {
                   <th className="r">Unrealized</th>
                   <th className="r">Realized</th>
                   <th className="c">Position</th>
-                  <th className="r">Entry</th>
+                  <th className="r">Entry price</th>
                 </tr>
               </thead>
               <tbody>
@@ -322,7 +471,21 @@ export default function TokenSmartHolders({ mint }: TokenSmartHoldersProps) {
                       <td className="r">{h.currentValueSol > 0 || h.unrealizedSol !== 0 ? <Pnl value={h.unrealizedSol} unit={false} /> : <span className="faint">—</span>}</td>
                       <td className="r"><Pnl value={h.pnlOnThisCoin} unit={false} /></td>
                       <td className="c"><span className={`badge ${pos.cls}`}>{pos.label}</span></td>
-                      <td className="r faint" style={{ fontSize: 12 }}>{h.lastBuy ? f.ago(+new Date(h.lastBuy)) : '—'}</td>
+                      <td className="r">
+                        {h.avgCostSol > 0 ? (
+                          <div className="stack" style={{ gap: 1, alignItems: 'flex-end' }}>
+                            <span className="num">{f.sol(h.avgCostSol)} <span className="faint" style={{ fontSize: 10 }}>SOL</span></span>
+                            {priceSol > 0 && (
+                              <Roi value={(priceSol / h.avgCostSol - 1) * 100} />
+                            )}
+                            {h.lastBuy && (
+                              <span className="faint" style={{ fontSize: 10.5 }}>{f.ago(+new Date(h.lastBuy))}</span>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="faint">—</span>
+                        )}
+                      </td>
                     </tr>
                   );
                 })}

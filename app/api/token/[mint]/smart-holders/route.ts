@@ -42,7 +42,8 @@ interface SmartHolder {
   allTimeRoiPct: number | null;
   verified: boolean;
   solBought: number;
-  pnlOnThisCoin: number;   // average-cost realized PnL on this coin (SOL)
+  avgCostSol: number;      // average entry price per token on this coin (SOL/token)
+  pnlOnThisCoin: number;   // average-cost realized PnL on this coin (SOL), clamped to matched qty
   unrealizedSol: number;   // remaining bag marked to live price (SOL)
   currentValueSol: number; // remaining bag value at live price (SOL)
   tokensRemaining: number;
@@ -67,7 +68,7 @@ export async function GET(
   let token: { symbol?: string; name?: string; icon?: string; icons?: string[] } | undefined;
   try { token = (await getTokenMeta([mint])).get(mint); } catch { /* ignore */ }
 
-  const empty = { mint, token, traderCount: 0, smartHolderCount: 0, smartHolders: [] as SmartHolder[] };
+  const empty = { mint, token, traderCount: 0, smartHolderCount: 0, smartHolders: [] as SmartHolder[], netFlowSeries: [] as number[] };
   if (!isSupabaseConfigured()) return NextResponse.json(empty, { headers });
 
   try {
@@ -130,6 +131,10 @@ export async function GET(
       buys: number; sells: number; lastBuy: number | null;
     }
     const byWallet = new Map<string, Agg>();
+    // Net smart-money flow: signed SOL per hour bucket (buys +, sells −), to be
+    // turned into a cumulative series for the page chart.
+    const flowByHour = new Map<number, number>();
+    const HOUR_MS = 3600_000;
     for (const t of rows) {
       const w = String(t.wallet);
       const amount = Number(t.amount);
@@ -145,6 +150,23 @@ export async function GET(
       } else {
         a.sells += 1; a.solReceived += sol; a.tokensSold += Number.isFinite(amount) ? amount : 0;
       }
+      if (Number.isFinite(ts) && sol > 0) {
+        const bucket = Math.floor(ts / HOUR_MS) * HOUR_MS;
+        flowByHour.set(bucket, (flowByHour.get(bucket) ?? 0) + (isBuy ? sol : -sol));
+      }
+    }
+
+    // Cumulative signed-SOL series, ordered oldest → newest, filling empty hours
+    // so the curve is time-proportional (matches the Dashboard cumulative pattern).
+    const netFlowSeries: number[] = [];
+    if (flowByHour.size > 0) {
+      const buckets = Array.from(flowByHour.keys()).sort((x, y) => x - y);
+      const r4flow = (n: number) => Math.round(n * 1e4) / 1e4;
+      let acc = 0;
+      for (let b = buckets[0]; b <= buckets[buckets.length - 1]; b += HOUR_MS) {
+        acc += flowByHour.get(b) ?? 0;
+        netFlowSeries.push(r4flow(acc));
+      }
     }
 
     // Live SOL price for the coin (proven oracle; SOL per UI-token, same unit as
@@ -155,7 +177,12 @@ export async function GET(
     const r4 = (n: number) => Math.round(n * 1e4) / 1e4;
     const holders: SmartHolder[] = Array.from(byWallet.entries()).map(([wallet, a]) => {
       const avgCost = a.tokensBought > 0 ? a.solSpent / a.tokensBought : 0;
-      const realized = a.solReceived - avgCost * a.tokensSold; // 0 for pure holders
+      // Clamp realized PnL to the quantity we actually have a cost basis for —
+      // unbacked sells (bought before our trade window) would invent phantom
+      // profit at cost-basis 0. Mirrors lib/indexer/token-traders.ts.
+      const avgSell = a.tokensSold > 0 ? a.solReceived / a.tokensSold : 0;
+      const matchedSold = Math.min(a.tokensSold, a.tokensBought);
+      const realized = matchedSold * (avgSell - avgCost); // 0 for pure holders
       const tokensRemaining = Math.max(0, a.tokensBought - a.tokensSold);
       const currentValueSol = priceSol > 0 ? tokensRemaining * priceSol : 0;
       const unrealizedSol = priceSol > 0 ? tokensRemaining * (priceSol - avgCost) : 0;
@@ -166,6 +193,7 @@ export async function GET(
         allTimeRoiPct: m?.roi ?? null,
         verified: true,
         solBought: r4(a.solSpent),
+        avgCostSol: r4(avgCost),
         pnlOnThisCoin: r4(realized),
         unrealizedSol: r4(unrealizedSol),
         currentValueSol: r4(currentValueSol),
@@ -177,7 +205,7 @@ export async function GET(
     }).sort((x, y) => (y.currentValueSol || y.solBought) - (x.currentValueSol || x.solBought));
 
     return NextResponse.json(
-      { mint, token, priceSol, traderCount: holders.length, smartHolderCount: holders.length, smartHolders: holders },
+      { mint, token, priceSol, traderCount: holders.length, smartHolderCount: holders.length, smartHolders: holders, netFlowSeries },
       { headers }
     );
   } catch {

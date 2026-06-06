@@ -2,11 +2,11 @@
 
 import { useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { ChevronLeft, ExternalLink, FileSearch } from 'lucide-react';
+import { ChevronLeft, FileSearch } from 'lucide-react';
 import { TokenInsiderReport } from '@/lib/types';
 import ReportView from '@/components/ReportView';
 import TokenSmartHolders from '@/components/TokenSmartHolders';
-import { ErrorState } from '@/components/ui';
+import { ErrorState, TradeLinks } from '@/components/ui';
 
 /**
  * Deep insider analysis (creator / clusters / snipers) is heavy and not always
@@ -72,18 +72,11 @@ export default function TokenPage() {
 
   return (
     <div className="view stack gap-20">
-      <div className="row between">
+      <div className="row between wrap gap-12">
         <button className="btn ghost sm" onClick={() => router.back()}>
           <ChevronLeft size={15} /> Back
         </button>
-        <a
-          className="btn sm"
-          href={`https://dexscreener.com/solana/${mint}`}
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          DEXScreener <ExternalLink size={14} />
-        </a>
+        {mint && <TradeLinks mint={mint} />}
       </div>
 
       {/* Primary: smart money in this coin (self-contained, own states) */}

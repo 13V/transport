@@ -1,11 +1,11 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { Flame } from 'lucide-react';
 import * as f from '@/lib/format';
 import {
-  TokenMark, Sparkline, EmptyState, ErrorState, SkTable, CHART_COLORS,
+  TokenMark, Sparkline, EmptyState, ErrorState, SkTable, TradeLinks, CHART_COLORS,
 } from '@/components/ui';
 
 interface SmartBuyToken {
@@ -20,6 +20,12 @@ interface SmartBuyToken {
   firstBuy: string | null;
   lastBuy: string | null;
   sampleBuyers: string[];
+  momentum?: number[] | null;
+  sellers?: number;
+  solSold?: number;
+  netSolFlow?: number;
+  firstBuyPriceSol?: number | null;
+  priceChangeSincePct?: number | null;
 }
 
 interface SmartMoneyBuysResponse {
@@ -30,8 +36,15 @@ interface SmartMoneyBuysResponse {
 }
 
 type Window = 6 | 24 | 72;
+type Sort = 'buyers' | 'volume' | 'recency';
 
 const WINDOWS: Window[] = [6, 24, 72];
+const SORTS: { key: Sort; label: string }[] = [
+  { key: 'buyers', label: 'Buyers' },
+  { key: 'volume', label: 'SOL vol' },
+  { key: 'recency', label: 'Recent' },
+];
+const MIN_BUYERS: number[] = [1, 2, 3, 5];
 const AUTO_REFRESH_MS = 2 * 60 * 1000;
 
 // Parse an ISO timestamp into epoch ms (or null) for the ms-based formatters.
@@ -41,27 +54,49 @@ function ms(iso: string | null | undefined): number | null {
   return Number.isFinite(t) ? t : null;
 }
 
-// Deterministic, purely-visual rising series derived from the mint — mirrors
-// the prototype's sparkline so each token gets a stable "buy trend" curve.
-function trendSeries(mint: string): number[] {
-  let x = (Array.from(mint).reduce((a, c) => a + c.charCodeAt(0), 0) % 97) / 97;
-  const out: number[] = [];
-  let acc = 0;
-  for (let k = 0; k < 14; k++) {
-    x = ((x * 9301 + 49297) % 233280) / 233280;
-    acc += x * 0.7 + 0.15;
-    out.push(acc);
-  }
-  return out;
-}
-
-function Header({ hours, onWindow }: { hours: Window; onWindow: (w: Window) => void }) {
+function Header({
+  hours, onWindow, minBuyers, onMinBuyers, sort, onSort,
+}: {
+  hours: Window;
+  onWindow: (w: Window) => void;
+  minBuyers: number;
+  onMinBuyers: (n: number) => void;
+  sort: Sort;
+  onSort: (s: Sort) => void;
+}) {
   return (
     <div className="page-head">
       <div className="sub">
         Tokens bought by multiple verified smart wallets in the selected window.
       </div>
-      <div className="page-head-actions">
+      <div className="page-head-actions row gap-10 wrap">
+        <div className="seg">
+          {MIN_BUYERS.map((n) => (
+            <button
+              key={n}
+              type="button"
+              className={minBuyers === n ? 'on' : ''}
+              onClick={() => onMinBuyers(n)}
+              aria-pressed={minBuyers === n}
+              title={`Only tokens with at least ${n} distinct smart buyer${n > 1 ? 's' : ''}`}
+            >
+              ≥{n}
+            </button>
+          ))}
+        </div>
+        <div className="seg">
+          {SORTS.map((s) => (
+            <button
+              key={s.key}
+              type="button"
+              className={sort === s.key ? 'on' : ''}
+              onClick={() => onSort(s.key)}
+              aria-pressed={sort === s.key}
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
         <div className="seg">
           {WINDOWS.map((w) => (
             <button
@@ -84,13 +119,15 @@ export default function SmartMoneyBuying() {
   const router = useRouter();
   const [data, setData] = useState<SmartBuyToken[]>([]);
   const [hours, setHours] = useState<Window>(24);
+  const [minBuyers, setMinBuyers] = useState<number>(1);
+  const [sort, setSort] = useState<Sort>('buyers');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchBuys = useCallback(async (window: Window) => {
+  const fetchBuys = useCallback(async (window: Window, min: number) => {
     try {
       const response = await fetch(
-        `/api/smart-money/buying?hours=${window}&limit=50`
+        `/api/smart-money/buying?hours=${window}&limit=50&minBuyers=${min}`
       );
       if (!response.ok) throw new Error('Failed to fetch smart money buys');
 
@@ -104,23 +141,34 @@ export default function SmartMoneyBuying() {
     }
   }, []);
 
-  // Initial fetch + refetch whenever the time window changes.
+  // Initial fetch + refetch whenever window or the buyers floor changes.
   useEffect(() => {
     setLoading(true);
-    fetchBuys(hours);
-  }, [fetchBuys, hours]);
+    fetchBuys(hours, minBuyers);
+  }, [fetchBuys, hours, minBuyers]);
 
-  // Auto-refresh every 2 minutes for the current window.
+  // Auto-refresh every 2 minutes for the current window/filter.
   useEffect(() => {
-    const interval = setInterval(() => fetchBuys(hours), AUTO_REFRESH_MS);
+    const interval = setInterval(() => fetchBuys(hours, minBuyers), AUTO_REFRESH_MS);
     return () => clearInterval(interval);
-  }, [fetchBuys, hours]);
+  }, [fetchBuys, hours, minBuyers]);
+
+  // Sort over the returned rows (client-side; no refetch needed).
+  const rows = useMemo(() => {
+    const copy = data.slice();
+    copy.sort((a, b) => {
+      if (sort === 'volume') return b.solVolume - a.solVolume;
+      if (sort === 'recency') return (ms(b.lastBuy) ?? 0) - (ms(a.lastBuy) ?? 0);
+      return b.distinctSmartBuyers - a.distinctSmartBuyers || b.solVolume - a.solVolume;
+    });
+    return copy;
+  }, [data, sort]);
 
   if (loading) {
     return (
       <div className="view stack gap-24">
-        <Header hours={hours} onWindow={setHours} />
-        <SkTable cols={6} rows={10} />
+        <Header hours={hours} onWindow={setHours} minBuyers={minBuyers} onMinBuyers={setMinBuyers} sort={sort} onSort={setSort} />
+        <SkTable cols={8} rows={10} />
       </div>
     );
   }
@@ -128,26 +176,30 @@ export default function SmartMoneyBuying() {
   if (error) {
     return (
       <div className="view stack gap-24">
-        <Header hours={hours} onWindow={setHours} />
+        <Header hours={hours} onWindow={setHours} minBuyers={minBuyers} onMinBuyers={setMinBuyers} sort={sort} onSort={setSort} />
         <div className="card">
           <ErrorState
             msg="The buying feed didn’t respond."
-            onRetry={() => { setLoading(true); fetchBuys(hours); }}
+            onRetry={() => { setLoading(true); fetchBuys(hours, minBuyers); }}
           />
         </div>
       </div>
     );
   }
 
-  if (data.length === 0) {
+  if (rows.length === 0) {
     return (
       <div className="view stack gap-24">
-        <Header hours={hours} onWindow={setHours} />
+        <Header hours={hours} onWindow={setHours} minBuyers={minBuyers} onMinBuyers={setMinBuyers} sort={sort} onSort={setSort} />
         <div className="card">
           <EmptyState
             icon={Flame}
             title="Quiet window"
-            msg={`No tokens were bought by multiple smart wallets in the last ${hours}h.`}
+            msg={
+              minBuyers > 1
+                ? `No tokens had ≥${minBuyers} smart wallets buying in the last ${hours}h.`
+                : `No tokens were bought by multiple smart wallets in the last ${hours}h.`
+            }
           />
         </div>
       </div>
@@ -156,7 +208,7 @@ export default function SmartMoneyBuying() {
 
   return (
     <div className="view stack gap-16">
-      <Header hours={hours} onWindow={setHours} />
+      <Header hours={hours} onWindow={setHours} minBuyers={minBuyers} onMinBuyers={setMinBuyers} sort={sort} onSort={setSort} />
 
       <div className="card" style={{ overflow: 'hidden' }}>
         <div className="table-wrap">
@@ -166,17 +218,26 @@ export default function SmartMoneyBuying() {
                 <th style={{ width: 34 }}>#</th>
                 <th>Token</th>
                 <th className="r">Smart buyers</th>
-                <th className="r">Buys</th>
-                <th className="r">SOL volume</th>
-                <th className="c">Buy trend</th>
+                <th className="r">Net flow</th>
+                <th className="r">% since 1st buy</th>
+                <th className="c">Buy momentum</th>
                 <th className="r">Last buy</th>
+                <th>Trade</th>
               </tr>
             </thead>
             <tbody>
-              {data.map((t, i) => {
+              {rows.map((t, i) => {
                 const symbol = t.symbol || f.short(t.mint, 4, 4);
                 const firstMs = ms(t.firstBuy);
                 const age = firstMs ? `${f.ago(firstMs).replace(' ago', '')} old` : '—';
+                const net = t.netSolFlow;
+                const sellers = t.sellers ?? 0;
+                // "distribution": smart sellers outnumber buyers OR net flow is
+                // negative — a sign the smart set is offloading, not accumulating.
+                const distributing =
+                  (net != null && net < 0) || sellers > t.distinctSmartBuyers;
+                const momentum = Array.isArray(t.momentum) ? t.momentum : [];
+                const roi = t.priceChangeSincePct;
                 return (
                   <tr
                     key={t.mint}
@@ -210,22 +271,53 @@ export default function SmartMoneyBuying() {
                         {t.distinctSmartBuyers}
                       </span>{' '}
                       <span className="faint" style={{ fontSize: 11 }}>smart</span>
+                      {sellers > 0 && (
+                        <div className="faint" style={{ fontSize: 10.5 }}>
+                          {sellers} sold · {f.sol(t.solVolume)} buy
+                        </div>
+                      )}
                     </td>
-                    <td className="r num faint">{t.buys}</td>
-                    <td className="r num" style={{ fontWeight: 600 }}>
-                      {f.sol(t.solVolume)}{' '}
-                      <span className="faint" style={{ fontWeight: 500, fontSize: 11 }}>SOL</span>
+                    <td className="r">
+                      {net == null ? (
+                        <span className="faint">—</span>
+                      ) : (
+                        <span className={`num ${net >= 0 ? 'pos' : 'neg'}`} style={{ fontWeight: 600 }}>
+                          {f.solSigned(net)}{' '}
+                          <span className="faint" style={{ fontWeight: 500, fontSize: 11 }}>SOL</span>
+                        </span>
+                      )}
+                      {distributing && (
+                        <div className="num neg" style={{ fontSize: 10.5, fontWeight: 600 }}>
+                          distribution
+                        </div>
+                      )}
+                    </td>
+                    <td className="r">
+                      {roi == null || !Number.isFinite(roi) ? (
+                        <span className="faint" title="No price reference yet">—</span>
+                      ) : (
+                        <span className={`num ${roi >= 0 ? 'pos' : 'neg'}`} style={{ fontWeight: 650 }}>
+                          {f.pct(roi, 1)}
+                        </span>
+                      )}
                     </td>
                     <td className="c">
-                      <Sparkline
-                        values={trendSeries(t.mint)}
-                        width={78}
-                        height={22}
-                        color={CHART_COLORS.POS}
-                      />
+                      {momentum.filter((v) => Number.isFinite(v)).length >= 2 ? (
+                        <Sparkline
+                          values={momentum}
+                          width={78}
+                          height={22}
+                          color={CHART_COLORS.POS}
+                        />
+                      ) : (
+                        <span className="faint" style={{ fontSize: 11 }}>—</span>
+                      )}
                     </td>
                     <td className="r faint" style={{ fontSize: 12 }}>
                       {f.ago(ms(t.lastBuy))}
+                    </td>
+                    <td>
+                      <TradeLinks mint={t.mint} size="xs" />
                     </td>
                   </tr>
                 );
@@ -236,7 +328,7 @@ export default function SmartMoneyBuying() {
       </div>
 
       <p className="faint" style={{ fontSize: 12, textAlign: 'center' }}>
-        Ranked by distinct verified smart wallets buying · auto-refreshes every 2 minutes
+        Net flow = smart buys − smart sells · % since 1st buy from the first smart entry · auto-refreshes every 2 minutes
       </p>
     </div>
   );

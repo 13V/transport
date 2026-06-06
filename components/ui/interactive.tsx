@@ -9,6 +9,7 @@ import Link from 'next/link';
 import { Copy, Check, Star, RefreshCw, AlertTriangle } from 'lucide-react';
 import { useWatchlist } from '@/lib/useWatchlist';
 import * as f from '@/lib/format';
+import { tokenLinks, walletLinks } from '@/lib/trade-links';
 
 function stop(e: React.MouseEvent) {
   e.preventDefault();
@@ -94,6 +95,52 @@ export function AddrChip({ address, copy = true, watch = false, len = 4 }: AddrC
       </Link>
       {copy && <CopyIconButton text={address} title="Copy address" />}
       {watch && <WatchStar address={address} />}
+    </span>
+  );
+}
+
+/** Row of quick-trade + explorer chips for a token mint. */
+export function TradeLinks({ mint, size = 'sm' }: { mint: string; size?: 'sm' | 'xs' }) {
+  const links = tokenLinks(mint);
+  if (!links.length) return null;
+  return (
+    <span className="row gap-8 wrap" onClick={(e) => e.stopPropagation()}>
+      {links.map((l) => (
+        <a
+          key={l.label}
+          className={`badge ${l.kind === 'trade' ? 'accent' : 'tag'}`}
+          style={{ height: size === 'xs' ? 18 : 21, textDecoration: 'none' }}
+          href={l.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={`Open in ${l.label}`}
+        >
+          {l.label}
+        </a>
+      ))}
+    </span>
+  );
+}
+
+/** Wallet tracking / explorer chips for an address. */
+export function WalletLinks({ address }: { address: string }) {
+  const links = walletLinks(address);
+  if (!links.length) return null;
+  return (
+    <span className="row gap-8 wrap" onClick={(e) => e.stopPropagation()}>
+      {links.map((l) => (
+        <a
+          key={l.label}
+          className={`badge ${l.kind === 'trade' ? 'accent' : 'tag'}`}
+          style={{ height: 21, textDecoration: 'none' }}
+          href={l.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={`Open in ${l.label}`}
+        >
+          {l.label}
+        </a>
+      ))}
     </span>
   );
 }

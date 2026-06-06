@@ -23,6 +23,7 @@ export const dynamic = 'force-dynamic';
 interface SmartWalletRow {
   address: string;
   score: number;
+  tier: string | null;
   pnl: number;
   roiPct: number | null;
   investedSol: number | null;
@@ -58,6 +59,14 @@ export async function GET(request: NextRequest) {
   // ?gate=0 returns the verified wallets WITHOUT the smart-money filter, so the
   // raw ROI/PnL numbers can be inspected and the thresholds calibrated.
   const applyGate = searchParams.get('gate') !== '0';
+  // Optional, backward-compatible refinements pushed into the query so the
+  // leaderboard's filters stay correct across the full set, not just a page.
+  const q = (searchParams.get('q') || '').trim().toLowerCase();
+  const minPnlRaw = searchParams.get('minPnl');
+  const minPnl = minPnlRaw != null && minPnlRaw !== '' ? Number(minPnlRaw) : null;
+  const activeDaysRaw = searchParams.get('activeDays');
+  const activeDays =
+    activeDaysRaw != null && activeDaysRaw !== '' ? Number(activeDaysRaw) : null;
 
   const supabase = getSupabase();
   const criteria = getSmartCriteria();
@@ -72,6 +81,19 @@ export async function GET(request: NextRequest) {
     'wallet, score, realized_pnl, win_rate, consistency, total_trades, tokens_traded, last_trade_at';
   const extCols = `${baseCols}, seeded, roi_pct, invested_sol, verified`;
   let extQuery = supabase.from('wallet_stats').select(extCols);
+  // Optional refinements — applied independently of the smart-money gate so the
+  // leaderboard's search / min-PnL / active-within filters work across the full
+  // set rather than only the first client-side page.
+  if (q) {
+    extQuery = extQuery.ilike('wallet', `${q}%`);
+  }
+  if (minPnl != null && Number.isFinite(minPnl)) {
+    extQuery = extQuery.gte('realized_pnl', minPnl);
+  }
+  if (activeDays != null && Number.isFinite(activeDays) && activeDays > 0) {
+    const cutoff = new Date(now - activeDays * 86_400_000).toISOString();
+    extQuery = extQuery.gte('last_trade_at', cutoff);
+  }
   if (applyGate) {
     extQuery = extQuery
       .not('roi_pct', 'is', null)

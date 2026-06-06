@@ -7,6 +7,7 @@
  *   GET /api/smart-money/buying                 → JSON { generatedAt, hours, count, tokens[] }
  *   GET /api/smart-money/buying?hours=6         → look back N hours (clamped 1..168)
  *   GET /api/smart-money/buying?limit=20        → cap tokens returned (clamped 1..200)
+ *   GET /api/smart-money/buying?minBuyers=3     → only tokens with ≥N distinct smart buyers (clamped 1..50)
  *
  * Read-only and public (no CRON_SECRET) — safe to poll. Degrades to an empty
  * token list when Supabase isn't configured or the required columns are missing.
@@ -28,16 +29,25 @@ export async function GET(request: NextRequest) {
   const { searchParams } = request.nextUrl;
   const hours = clampInt(searchParams.get('hours'), 24, 1, 168);
   const limit = clampInt(searchParams.get('limit'), 50, 1, 200);
+  const hasMinBuyers = searchParams.get('minBuyers') != null;
+  const minBuyers = hasMinBuyers ? clampInt(searchParams.get('minBuyers'), 1, 1, 50) : 1;
 
   const result = await getSmartMoneyBuys({ hours, limit });
+
+  // Optional floor on distinct smart buyers — filter before enrichment so we
+  // only pay metadata cost for tokens we actually return.
+  const filtered =
+    minBuyers > 1
+      ? result.tokens.filter((t) => t.distinctSmartBuyers >= minBuyers)
+      : result.tokens;
 
   // Enrich tokens with real symbol/name/icon from DexScreener. A metadata
   // failure must never break the feed, so getTokenMeta is resilient and we
   // additionally guard here.
-  let tokens: unknown[] = result.tokens;
+  let tokens: unknown[] = filtered;
   try {
-    const meta = await getTokenMeta(result.tokens.map((t) => t.mint));
-    tokens = result.tokens.map((t) => {
+    const meta = await getTokenMeta(filtered.map((t) => t.mint));
+    tokens = filtered.map((t) => {
       const m = meta.get(t.mint);
       return m ? { ...t, symbol: m.symbol, name: m.name, icon: m.icon, icons: m.icons } : t;
     });
@@ -45,7 +55,7 @@ export async function GET(request: NextRequest) {
     // ignore — return the un-enriched feed
   }
 
-  return NextResponse.json({ ...result, tokens }, {
+  return NextResponse.json({ ...result, count: tokens.length, tokens }, {
     headers: { 'Cache-Control': 'public, max-age=60' },
   });
 }

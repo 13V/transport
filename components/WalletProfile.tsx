@@ -4,20 +4,21 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   ChevronLeft, Clock, ExternalLink, CheckCircle, Star, Wallet,
-  TrendingUp, TrendingDown, List, GitBranch, Link as LinkIcon,
+  TrendingUp, TrendingDown, List, GitBranch, Link as LinkIcon, Sparkles,
 } from 'lucide-react';
 import * as f from '@/lib/format';
 import {
   TierBadge, Roi, Pnl, TokenMark, SourceBadge, EmptyState, ErrorState,
-  SkCard, CopyIconButton, WatchStar,
+  SkCard, CopyIconButton, WatchStar, TradeLinks, WalletLinks,
 } from '@/components/ui';
+import Link from 'next/link';
 import WalletHistoryChart from './WalletHistoryChart';
 
 /**
  * WALLET PROFILE (premium-analytics view)
  *
  * Renders a single wallet's full performance profile by stitching together the
- * /profile and /holdings APIs. Restyled to the deep-slate terminal design while
+ * /profile, /holdings and /cluster APIs. Restyled to the deep-slate terminal design while
  * preserving the original data fetching and shapes. Every field is guarded with
  * optional chaining and renders an em dash when missing.
  */
@@ -84,6 +85,18 @@ interface HoldingsResponse {
   totals: { unrealizedSol: number; currentValueSol: number };
 }
 
+interface ClusterMember {
+  wallet: string;
+  roiPct: number | null;
+  verified: boolean;
+}
+
+interface ClusterResponse {
+  address: string;
+  memberCount: number;
+  members: ClusterMember[];
+}
+
 interface WalletProfileProps {
   walletAddress: string;
 }
@@ -98,6 +111,7 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
   const router = useRouter();
   const [profile, setProfile] = useState<ProfileResponse | null>(null);
   const [holdings, setHoldings] = useState<HoldingsResponse | null>(null);
+  const [clusterMembers, setClusterMembers] = useState<ClusterMember[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
@@ -108,6 +122,7 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
     async function load() {
       setLoading(true);
       setError(null);
+      setClusterMembers(null);
       try {
         const [profileRes, holdingsRes] = await Promise.all([
           fetch(`/api/wallet/${walletAddress}/profile`),
@@ -123,6 +138,22 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
         if (!cancelled) {
           setProfile(profileJson);
           setHoldings(holdingsJson);
+        }
+
+        // Cluster ROI is enrichment: fetch it separately and never let a
+        // failure here break the core profile view.
+        try {
+          const clusterRes = await fetch(`/api/wallet/${walletAddress}/cluster`);
+          if (clusterRes.ok) {
+            const clusterJson = (await clusterRes.json()) as ClusterResponse;
+            if (!cancelled) {
+              setClusterMembers(
+                Array.isArray(clusterJson?.members) ? clusterJson.members : []
+              );
+            }
+          }
+        } catch {
+          /* enrichment only — ignore */
         }
       } catch (err) {
         if (!cancelled) {
@@ -183,6 +214,25 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
   const holdingList = holdings?.holdings ?? [];
   const unrealizedTotal = holdings?.totals?.unrealizedSol ?? null;
 
+  // Cluster ROI: map member wallet -> {roiPct, verified} for the funding section.
+  const clusterStatByWallet = new Map<string, ClusterMember>();
+  for (const m of clusterMembers ?? []) clusterStatByWallet.set(m.wallet, m);
+
+  // "This week's new positions": tokens BOUGHT in the last 7 days that the
+  // wallet still holds (intersect recent BUY trades with current holdings).
+  const heldMints = new Set(holdingList.map((h) => h.mint));
+  const weekAgoMs = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const seenNew = new Set<string>();
+  const newThisWeek = (profile.recentTrades ?? []).filter((t) => {
+    if (String(t.type).toUpperCase() !== 'BUY') return false;
+    const at = toMs(t.at);
+    if (at == null || at < weekAgoMs) return false;
+    if (!heldMints.has(t.mint)) return false;
+    if (seenNew.has(t.mint)) return false;
+    seenNew.add(t.mint);
+    return true;
+  });
+
   // A valid-but-unscanned wallet: no stats row and nothing else to show.
   const isEmpty =
     !stats &&
@@ -216,7 +266,7 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
       <div className="row between">
         {backBtn}
         <span className="badge ghost faint" style={{ fontSize: 11 }}>
-          <Clock size={12} /> Updated {f.ago(lastTradeMs)}
+          <Clock size={12} /> Last trade {f.ago(lastTradeMs)}
         </span>
       </div>
 
@@ -236,9 +286,7 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
             </span>
           )}
           <span className="spacer" />
-          <a className="btn sm" href={`https://solscan.io/address/${profile.address}`} target="_blank" rel="noopener noreferrer">
-            Solscan <ExternalLink size={14} />
-          </a>
+          <WalletLinks address={walletAddress} />
         </div>
 
         <div className="headline-grid">
@@ -277,6 +325,31 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
       {/* Performance history */}
       <WalletHistoryChart walletAddress={walletAddress} />
 
+      {/* This week's new positions */}
+      {newThisWeek.length > 0 && (
+        <div className="card">
+          <div className="card-head">
+            <h3><span className="ic" style={{ color: 'var(--accent-hover)' }}><Sparkles size={16} /></span> This week’s new positions</h3>
+            <span className="faint" style={{ fontSize: 12 }}>Bought in the last 7 days &amp; still held</span>
+          </div>
+          <div className="card-pad stack gap-8">
+            {newThisWeek.map((t, i) => (
+              <div className="trade" key={`${t.mint}-${i}`}>
+                <span className="tradetype buy">BUY</span>
+                <TokenMark symbol={f.short(t.mint, 4, 4)} size={22} />
+                <Link href={`/token/${t.mint}`} style={{ textDecoration: 'none' }}>
+                  <b style={{ fontSize: 12.5 }}>{f.short(t.mint, 4, 4)}</b>
+                </Link>
+                <span className="num" style={{ fontSize: 12.5 }}>{f.sol(t.amountSol)} <span className="faint">SOL</span></span>
+                <span className="spacer" />
+                <span className="faint" style={{ fontSize: 12 }}>{f.ago(toMs(t.at))}</span>
+                <TradeLinks mint={t.mint} size="xs" />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Current holdings */}
       <div className="card">
         <div className="card-head">
@@ -293,23 +366,39 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
           <div className="table-wrap">
             <table className="dt compact">
               <thead>
-                <tr><th>Token</th><th className="r">Tokens</th><th className="r">Value (SOL)</th><th className="r">Unrealized</th><th className="r">Avg cost</th></tr>
+                <tr>
+                  <th>Token</th>
+                  <th className="r">Tokens</th>
+                  <th className="r">Value (SOL)</th>
+                  <th className="r">Unrealized</th>
+                  <th className="r">Entry</th>
+                  <th className="r">vs now</th>
+                  <th className="r">Links</th>
+                </tr>
               </thead>
               <tbody>
-                {holdingList.map((h) => (
-                  <tr key={h.mint}>
-                    <td>
-                      <span className="row gap-8">
-                        <TokenMark symbol={f.short(h.mint, 4, 4)} size={24} />
-                        <b style={{ fontSize: 12.5 }}>{f.short(h.mint, 4, 4)}</b>
-                      </span>
-                    </td>
-                    <td className="r num faint">{f.compact(h.tokens)}</td>
-                    <td className="r num">{f.sol(h.currentValueSol)}</td>
-                    <td className="r"><Pnl value={h.unrealizedSol} unit={false} /></td>
-                    <td className="r num faint">{h.avgCostSol != null ? h.avgCostSol.toFixed(6) : '—'}</td>
-                  </tr>
-                ))}
+                {holdingList.map((h) => {
+                  const canEnter =
+                    h.avgCostSol != null && h.avgCostSol > 0 &&
+                    h.priceSol != null && Number.isFinite(h.priceSol);
+                  const vsNow = canEnter ? (h.priceSol / h.avgCostSol - 1) * 100 : null;
+                  return (
+                    <tr key={h.mint}>
+                      <td>
+                        <Link href={`/token/${h.mint}`} className="row gap-8" style={{ textDecoration: 'none' }}>
+                          <TokenMark symbol={f.short(h.mint, 4, 4)} size={24} />
+                          <b style={{ fontSize: 12.5 }}>{f.short(h.mint, 4, 4)}</b>
+                        </Link>
+                      </td>
+                      <td className="r num faint">{f.compact(h.tokens)}</td>
+                      <td className="r num">{f.sol(h.currentValueSol)}</td>
+                      <td className="r"><Pnl value={h.unrealizedSol} unit={false} /></td>
+                      <td className="r num faint">{h.avgCostSol != null ? f.sol(h.avgCostSol) : '—'}</td>
+                      <td className="r">{vsNow != null ? <Roi value={vsNow} /> : '—'}</td>
+                      <td className="r"><TradeLinks mint={h.mint} size="xs" /></td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -333,7 +422,9 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
                 <div className="trade" key={`${t.txHash}-${i}`}>
                   <span className={`tradetype ${sell ? 'sell' : 'buy'}`}>{sell ? 'SELL' : 'BUY'}</span>
                   <TokenMark symbol={f.short(t.mint, 4, 4)} size={22} />
-                  <b style={{ fontSize: 12.5 }}>{f.short(t.mint, 4, 4)}</b>
+                  <Link href={`/token/${t.mint}`} style={{ textDecoration: 'none' }}>
+                    <b style={{ fontSize: 12.5 }}>{f.short(t.mint, 4, 4)}</b>
+                  </Link>
                   <span className="num" style={{ fontSize: 12.5 }}>{f.sol(t.amountSol)} <span className="faint">SOL</span></span>
                   {t.source && <SourceBadge source={t.source} />}
                   <span className="spacer" />
@@ -355,11 +446,15 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
         <div className="card">
           <div className="card-head">
             <h3><span className="ic"><GitBranch size={16} /></span> Funding cluster</h3>
-            <span className="faint" style={{ fontSize: 12 }}>Likely the same trader</span>
+            <span className="faint" style={{ fontSize: 12 }}>
+              {clusterMembers && clusterMembers.length > 0
+                ? `Likely one trader · ${clusterMembers.length} wallet${clusterMembers.length === 1 ? '' : 's'} in entity`
+                : 'Likely the same trader'}
+            </span>
           </div>
           <div className="card-pad stack gap-16">
-            <ClusterSection title="Funded by" links={fundedBy} router={router} />
-            <ClusterSection title="Funded these wallets" links={funded} router={router} />
+            <ClusterSection title="Funded by" links={fundedBy} statByWallet={clusterStatByWallet} router={router} />
+            <ClusterSection title="Funded these wallets" links={funded} statByWallet={clusterStatByWallet} router={router} />
           </div>
         </div>
       )}
@@ -388,20 +483,21 @@ function TokenTable({
         <div className="table-wrap">
           <table className="dt compact">
             <thead>
-              <tr><th>Token</th><th className="r">PnL (SOL)</th><th className="r">ROI</th><th className="r">Trades</th></tr>
+              <tr><th>Token</th><th className="r">PnL (SOL)</th><th className="r">ROI</th><th className="r">Trades</th><th className="r">Links</th></tr>
             </thead>
             <tbody>
               {rows.map((r) => (
                 <tr key={r.mint}>
                   <td>
-                    <span className="row gap-8">
+                    <Link href={`/token/${r.mint}`} className="row gap-8" style={{ textDecoration: 'none' }}>
                       <TokenMark symbol={f.short(r.mint, 4, 4)} size={22} />
                       <b style={{ fontSize: 12.5 }}>{f.short(r.mint, 4, 4)}</b>
-                    </span>
+                    </Link>
                   </td>
                   <td className="r"><Pnl value={r.realizedPnlSol} unit={false} /></td>
                   <td className="r"><Roi value={r.roiPct} /></td>
                   <td className="r num faint">{r.trades}</td>
+                  <td className="r"><TradeLinks mint={r.mint} size="xs" /></td>
                 </tr>
               ))}
             </tbody>
@@ -413,33 +509,43 @@ function TokenTable({
 }
 
 function ClusterSection({
-  title, links, router,
+  title, links, statByWallet, router,
 }: {
   title: string;
   links: ClusterLink[];
+  statByWallet: Map<string, ClusterMember>;
   router: ReturnType<typeof useRouter>;
 }) {
   if (!links || links.length === 0) return null;
   return (
     <div className="stack gap-8">
       <span className="faint" style={{ fontSize: 12, fontWeight: 600 }}>{title}</span>
-      {links.map((l) => (
-        <div
-          className="trade"
-          key={l.wallet}
-          style={{ cursor: 'pointer' }}
-          onClick={() => router.push(`/smart-money/${l.wallet}`)}
-        >
-          <span className="badge" style={{ color: 'var(--accent-hover)', borderColor: 'var(--accent-ring)', background: 'var(--accent-soft)' }}>
-            <LinkIcon size={11} /> {f.short(l.wallet, 4, 4)}
-          </span>
-          <span className="num" style={{ fontSize: 12.5 }}>{f.sol(l.amountSol)} <span className="faint">SOL</span></span>
-          <span className="faint" style={{ fontSize: 12 }}>{l.transfers} transfer{l.transfers === 1 ? '' : 's'}</span>
-          {l.roiPct != null && <span style={{ fontSize: 12 }}><Roi value={l.roiPct} /></span>}
-          <span className="spacer" />
-          <span className="faint" style={{ fontSize: 12 }}>{f.ago(toMs(l.lastSeen))}</span>
-        </div>
-      ))}
+      {links.map((l) => {
+        const member = statByWallet.get(l.wallet);
+        // Prefer the /cluster endpoint's verified ROI; fall back to any roiPct
+        // already on the funding link.
+        const roi = member?.roiPct ?? l.roiPct ?? null;
+        return (
+          <div
+            className="trade"
+            key={l.wallet}
+            style={{ cursor: 'pointer' }}
+            onClick={() => router.push(`/smart-money/${l.wallet}`)}
+          >
+            <span className="badge" style={{ color: 'var(--accent-hover)', borderColor: 'var(--accent-ring)', background: 'var(--accent-soft)' }}>
+              <LinkIcon size={11} /> {f.short(l.wallet, 4, 4)}
+            </span>
+            {member?.verified && (
+              <span className="badge accent" title="Verified ROI"><CheckCircle size={11} /></span>
+            )}
+            <span className="num" style={{ fontSize: 12.5 }}>{f.sol(l.amountSol)} <span className="faint">SOL</span></span>
+            <span className="faint" style={{ fontSize: 12 }}>{l.transfers} transfer{l.transfers === 1 ? '' : 's'}</span>
+            <span style={{ fontSize: 12 }}>{roi != null ? <Roi value={roi} /> : <span className="faint">—</span>}</span>
+            <span className="spacer" />
+            <span className="faint" style={{ fontSize: 12 }}>{f.ago(toMs(l.lastSeen))}</span>
+          </div>
+        );
+      })}
     </div>
   );
 }

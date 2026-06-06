@@ -2,12 +2,20 @@
  * ALERT NOTIFIER
  *
  * Fans an alert string out to whichever channels are configured:
- *   - Telegram (TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID)
+ *   - Telegram (TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID), HTML parse mode
  *   - A generic webhook (ALERT_WEBHOOK_URL), POSTed as { text }
  *
  * Degrades gracefully: a no-op when nothing is configured, and never throws —
  * a failed alert must never take down the cron that triggered it.
  */
+
+/** Escape a raw string for safe interpolation into a Telegram HTML message. */
+export function escapeHtml(s: string): string {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
 
 export async function sendAlert(text: string): Promise<void> {
   const token = process.env.TELEGRAM_BOT_TOKEN;

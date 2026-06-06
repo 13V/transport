@@ -9,12 +9,12 @@ import {
   ChevronLeft,
   ChevronRight,
   Search,
-  ExternalLink,
   Copy,
   Check,
   Download,
   Sparkles,
-  Link as LinkIcon,
+  Info,
+  BadgeCheck,
 } from 'lucide-react';
 import * as f from '@/lib/format';
 import {
@@ -27,78 +27,60 @@ import {
   AddrChip,
   WatchStar,
   CopyIconButton,
-  Sparkline,
-  CHART_COLORS,
+  WalletLinks,
 } from '@/components/ui';
 
-interface LeaderboardWallet {
-  rank: number;
+/**
+ * A wallet as returned by GET /api/smart-money/list (JSON `wallets[]`). This is
+ * the gate-filtered set (up to 20k) — search / sort / filter run over the FULL
+ * set, then we paginate client-side, so the controls are correct across every
+ * smart wallet rather than only the first page.
+ */
+interface ListWallet {
   address: string;
   score: number;
+  tier?: string;
   pnl: number;
+  roiPct: number | null;
+  investedSol: number | null;
+  verified: boolean;
   winRate: number;
   consistency: number;
-  tokensHeld: number;
-  updatedAt: string;
-  seeded?: boolean;
-  smart?: boolean;
-  roiPct?: number | null;
-  verified?: boolean;
-  fundedBy?: string | null;
-  tier?: string;
-  tags?: string[];
+  totalTrades: number;
+  tokensTraded: number;
+  lastTradeAt: string | null;
+  seeded: boolean;
 }
 
-interface LeaderboardResponse {
-  leaderboard: LeaderboardWallet[];
-  totalWallets: number;
-  pagination: {
-    offset: number;
-    limit: number;
-    hasMore: boolean;
-  };
-  lastUpdated: string;
-  cacheAge: number;
+interface ListResponse {
+  count: number;
+  generatedAt: string;
+  wallets: ListWallet[];
 }
 
 type SortField = 'rank' | 'roiPct' | 'pnl' | 'winRate';
 type SortDirection = 'asc' | 'desc';
 type PageSize = 10 | 25 | 50;
+type ActiveWithin = 'any' | '1' | '7';
 
-/**
- * Build a deterministic ~30-point smooth trend that ends at `endRoi`, used
- * purely for the 30D sparkline column (mirrors the prototype's history()).
- */
-function trendTo(endRoi: number, seedStr: string, points = 30): number[] {
-  // simple string hash → deterministic seed
-  let h = 0;
-  for (let i = 0; i < seedStr.length; i++) h = (Math.imul(31, h) + seedStr.charCodeAt(i)) | 0;
-  let s = (h >>> 0) || 1;
-  const rand = () => {
-    s = (Math.imul(1664525, s) + 1013904223) >>> 0;
-    return s / 0xffffffff;
-  };
-  // start somewhere proportionally below the end value, walk smoothly toward it
-  const start = endRoi - (Math.abs(endRoi) * 0.6 + 8) * (0.6 + rand() * 0.8);
-  const out: number[] = [];
-  for (let i = 0; i < points; i++) {
-    const t = i / (points - 1);
-    const base = start + (endRoi - start) * t;
-    const wobble = (rand() - 0.5) * (Math.abs(endRoi - start) * 0.12 + 2);
-    out.push(i === points - 1 ? endRoi : base + wobble);
-  }
-  return out;
+/** Parse an ISO timestamp to epoch ms (or null) for f.ago(). */
+function toMs(iso: string | null): number | null {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  return Number.isNaN(t) ? null : t;
 }
 
 export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQuery?: string }) {
   const router = useRouter();
-  const [data, setData] = useState<LeaderboardWallet[]>([]);
+  const [data, setData] = useState<ListWallet[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState(initialQuery);
   const [tierFilter, setTierFilter] = useState<'All' | 'S' | 'A' | 'B' | 'C'>('All');
   const [minRoi, setMinRoi] = useState<string>('');
-  const [smartOnly, setSmartOnly] = useState(false);
+  const [minPnl, setMinPnl] = useState<string>('');
+  const [activeWithin, setActiveWithin] = useState<ActiveWithin>('any');
+  const [smartOnly, setSmartOnly] = useState(true);
   const [sortField, setSortField] = useState<SortField>('rank');
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
   const [currentPage, setCurrentPage] = useState(0);
@@ -127,23 +109,35 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
     }
   }, []);
 
-  // Fetch leaderboard data
-  const fetchLeaderboard = useCallback(async (offset = 0) => {
+  // Fetch the gate-filtered smart-wallet set. The server-side q / minPnl /
+  // activeDays / gate params narrow the set; everything else (tier, ROI, sort,
+  // pagination) is applied client-side over the FULL returned set so the
+  // controls stay correct across all smart wallets.
+  const fetchLeaderboard = useCallback(async () => {
     try {
-      const response = await fetch(`/api/smart-money?limit=100&offset=${offset}`);
+      const params = new URLSearchParams();
+      params.set('limit', '20000');
+      params.set('sort', sortField === 'roiPct' ? 'roi' : 'score');
+      params.set('gate', smartOnly ? '1' : '0');
+      if (searchQuery.trim()) params.set('q', searchQuery.trim());
+      const minPnlNum = parseFloat(minPnl);
+      if (!Number.isNaN(minPnlNum)) params.set('minPnl', String(minPnlNum));
+      if (activeWithin !== 'any') params.set('activeDays', activeWithin);
+
+      const response = await fetch(`/api/smart-money/list?${params.toString()}`);
       if (!response.ok) throw new Error('Failed to fetch leaderboard');
 
-      const json = (await response.json()) as LeaderboardResponse;
-      setData(json.leaderboard);
+      const json = (await response.json()) as ListResponse;
+      setData(json.wallets ?? []);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load leaderboard');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [sortField, smartOnly, searchQuery, minPnl, activeWithin]);
 
-  // Initial fetch
+  // Fetch on mount and whenever a server-side filter changes.
   useEffect(() => {
     fetchLeaderboard();
   }, [fetchLeaderboard]);
@@ -154,54 +148,63 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
     return () => clearInterval(interval);
   }, [fetchLeaderboard]);
 
-  // Filter and sort data
+  // Filter and sort the full set client-side. Search / min-PnL / active-within
+  // are already applied server-side, but we re-apply search and tier here so the
+  // table is consistent even before a refetch lands.
   const filteredData = useMemo(() => {
     let result = [...data];
 
-    // Apply search filter
     if (searchQuery.trim()) {
       const query = searchQuery.toLowerCase();
       result = result.filter((w) => w.address.toLowerCase().includes(query));
     }
 
-    // Apply tier filter
+    // Tier filter — `tier` is returned by the list endpoint, so this is correct
+    // across the full set.
     if (tierFilter !== 'All') {
       result = result.filter((w) => w.tier === tierFilter);
     }
 
-    // Apply min ROI% filter (wallets without a known ROI are excluded)
+    // Min ROI% (wallets without a known ROI are excluded).
     const minRoiNum = parseFloat(minRoi);
     if (!Number.isNaN(minRoiNum)) {
       result = result.filter((w) => w.roiPct != null && w.roiPct >= minRoiNum);
     }
 
-    // Apply "Smart only" filter
-    if (smartOnly) {
-      result = result.filter((w) => w.smart);
+    // Sorting. `rank` maps to the server's default ordering (score desc).
+    const dir = sortDirection === 'asc' ? 1 : -1;
+    if (sortField === 'rank') {
+      result.sort((a, b) => (dir === 1 ? b.score - a.score : a.score - b.score));
+    } else {
+      result.sort((a, b) => {
+        let av: number;
+        let bv: number;
+        if (sortField === 'roiPct') {
+          av = a.roiPct == null ? -1e9 : a.roiPct;
+          bv = b.roiPct == null ? -1e9 : b.roiPct;
+        } else if (sortField === 'pnl') {
+          av = a.pnl;
+          bv = b.pnl;
+        } else {
+          av = a.winRate;
+          bv = b.winRate;
+        }
+        return av < bv ? -dir : av > bv ? dir : 0;
+      });
     }
 
-    // Apply sorting
-    const dir = sortDirection === 'asc' ? 1 : -1;
-    result.sort((a, b) => {
-      let av: number = a[sortField] ?? 0;
-      let bv: number = b[sortField] ?? 0;
-      // wallets with unknown ROI sort to the bottom
-      if (sortField === 'roiPct') {
-        av = a.roiPct == null ? -1e9 : a.roiPct;
-        bv = b.roiPct == null ? -1e9 : b.roiPct;
-      }
-      return av < bv ? -dir : av > bv ? dir : 0;
-    });
-
     return result;
-  }, [data, searchQuery, tierFilter, minRoi, smartOnly, sortField, sortDirection]);
+  }, [data, searchQuery, tierFilter, minRoi, sortField, sortDirection]);
 
   // Paginate filtered data
   const maxPage = Math.ceil(filteredData.length / pageSize) || 1;
   const safePage = Math.min(currentPage, maxPage - 1);
   const paginatedData = useMemo(() => {
     const start = safePage * pageSize;
-    return filteredData.slice(start, start + pageSize);
+    return filteredData.slice(start, start + pageSize).map((w, i) => ({
+      ...w,
+      rank: start + i + 1,
+    }));
   }, [filteredData, safePage, pageSize]);
 
   const handleWalletClick = (address: string) => {
@@ -219,12 +222,27 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
   };
 
   // ---- pieces ------------------------------------------------------------
-  const SortTh = ({ field, label, align }: { field: SortField; label: string; align?: 'r' | 'c' }) => {
+  const SortTh = ({
+    field,
+    label,
+    align,
+    tip,
+  }: {
+    field: SortField;
+    label: string;
+    align?: 'r' | 'c';
+    tip?: string;
+  }) => {
     const on = sortField === field;
     return (
       <th className={align}>
         <button className={`th-sort ${on ? 'sorted' : ''}`} onClick={() => handleSort(field)}>
           {label}
+          {tip && (
+            <span className="th-info" title={tip} style={{ display: 'inline-flex', marginLeft: 2 }}>
+              <Info size={12} />
+            </span>
+          )}
           <span className="sort-ic">
             {on ? (
               sortDirection === 'asc' ? <ChevronUp size={13} /> : <ChevronDown size={13} />
@@ -306,6 +324,31 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
           setCurrentPage(0);
         }}
       />
+      <input
+        className="input sm"
+        type="number"
+        inputMode="numeric"
+        placeholder="Min PnL (SOL)"
+        value={minPnl}
+        style={{ width: 130 }}
+        onChange={(e) => {
+          setMinPnl(e.target.value);
+          setCurrentPage(0);
+        }}
+      />
+      <select
+        className="select sm"
+        value={activeWithin}
+        title="Only show wallets that traded within this window"
+        onChange={(e) => {
+          setActiveWithin(e.target.value as ActiveWithin);
+          setCurrentPage(0);
+        }}
+      >
+        <option value="any">Active: any</option>
+        <option value="1">Active: 24h</option>
+        <option value="7">Active: 7d</option>
+      </select>
       <label className="check sm">
         <input
           type="checkbox"
@@ -392,7 +435,7 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
     return (
       <div className="view stack gap-16">
         {pageHead}
-        <SkTable cols={8} rows={12} />
+        <SkTable cols={9} rows={12} />
       </div>
     );
   }
@@ -448,17 +491,25 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
                 <SortTh field="rank" label="#" />
                 <th>Wallet</th>
                 <th className="c">Tier</th>
-                <SortTh field="roiPct" label="ROI" align="r" />
+                <SortTh
+                  field="roiPct"
+                  label="ROI"
+                  align="r"
+                  tip="Realized ROI = realized PnL ÷ cost of sold tokens, all-time (FIFO)"
+                />
                 <SortTh field="pnl" label="PnL" align="r" />
-                <th className="c">30D</th>
                 <SortTh field="winRate" label="Win" align="r" />
+                <th>Last active</th>
                 <th>Traits</th>
-                <th className="r" style={{ width: 100 }}>Actions</th>
+                <th className="r" style={{ width: 220 }}>Actions</th>
               </tr>
             </thead>
             <tbody>
               {paginatedData.map((w) => {
-                const tags = (w.tags ?? []).slice(0, 2);
+                const traits: string[] = [];
+                if (w.verified) traits.push('Verified');
+                if (w.seeded) traits.push('Trusted');
+                const lastMs = toMs(w.lastTradeAt);
                 return (
                   <tr
                     key={w.address}
@@ -469,17 +520,17 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
                     <td>
                       <div className="row gap-8" style={{ flexWrap: 'nowrap', whiteSpace: 'nowrap' }}>
                         <AddrChip address={w.address} copy={false} />
-                        {w.smart && (
+                        {w.verified && (
                           <span
                             className="wmark"
-                            title={w.seeded ? 'Trusted smart wallet' : 'Smart wallet — clears the quality gate'}
+                            title="Deep-scanned — accurate all-time ROI"
                           >
-                            <Sparkles size={12} />
+                            <BadgeCheck size={12} />
                           </span>
                         )}
-                        {w.fundedBy && (
-                          <span className="wmark faint" title="Funded by a smart wallet — likely the same trader">
-                            <LinkIcon size={12} />
+                        {w.seeded && (
+                          <span className="wmark faint" title="Trusted smart wallet">
+                            <Sparkles size={12} />
                           </span>
                         )}
                       </div>
@@ -487,23 +538,14 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
                     <td className="c"><TierBadge tier={w.tier} /></td>
                     <td className="r"><Roi value={w.roiPct} /></td>
                     <td className="r"><Pnl value={w.pnl} /></td>
-                    <td className="c">
-                      {w.roiPct == null ? (
-                        <span className="faint">—</span>
-                      ) : (
-                        <Sparkline
-                          values={trendTo(w.roiPct, w.address)}
-                          color={w.roiPct >= 0 ? CHART_COLORS.POS : CHART_COLORS.NEG}
-                          width={64}
-                          height={20}
-                        />
-                      )}
-                    </td>
                     <td className="r num faint">{Math.round(w.winRate * 100)}%</td>
+                    <td className="faint num" style={{ whiteSpace: 'nowrap' }}>
+                      {f.ago(lastMs)}
+                    </td>
                     <td>
                       <div className="row gap-8" style={{ flexWrap: 'nowrap', whiteSpace: 'nowrap' }}>
-                        {tags.length > 0 ? (
-                          tags.map((t) => <span key={t} className="badge tag">{t}</span>)
+                        {traits.length > 0 ? (
+                          traits.map((t) => <span key={t} className="badge tag">{t}</span>)
                         ) : (
                           <span className="faint">—</span>
                         )}
@@ -512,21 +554,12 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
                     <td className="r">
                       <div
                         className="row-actions"
-                        style={{ justifyContent: 'flex-end' }}
+                        style={{ justifyContent: 'flex-end', flexWrap: 'nowrap' }}
                         onClick={(e) => e.stopPropagation()}
                       >
                         <WatchStar address={w.address} />
                         <CopyIconButton text={w.address} title="Copy address" />
-                        <a
-                          className="iconbtn"
-                          href={`https://solscan.io/address/${w.address}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          title="Solscan"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <ExternalLink size={14} />
-                        </a>
+                        <WalletLinks address={w.address} />
                       </div>
                     </td>
                   </tr>
