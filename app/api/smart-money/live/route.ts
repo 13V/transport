@@ -97,6 +97,10 @@ export async function GET(request: NextRequest) {
     bursts = bursts.map((b) => {
       const m = meta.get(b.mint);
       if (!m) return b;
+      // Read newer TokenMeta fields loosely: another agent is adding these to
+      // TokenMeta in parallel, so access them off a loose alias with optional
+      // chaining. Safe (undefined) even before the fields land on the type.
+      const mx = m as Record<string, unknown>;
       return {
         ...b,
         symbol: m.symbol,
@@ -108,6 +112,13 @@ export async function GET(request: NextRequest) {
         priceChange24h: m.priceChange24h,
         priceUsd: m.priceUsd,
         pairAddress: m.pairAddress,
+        mintRenounced: mx?.mintRenounced as boolean | undefined,
+        freezeRenounced: mx?.freezeRenounced as boolean | undefined,
+        pairCreatedAt: mx?.pairCreatedAt as number | undefined,
+        buys24h: mx?.buys24h as number | undefined,
+        sells24h: mx?.sells24h as number | undefined,
+        volume24hUsd: mx?.volume24hUsd as number | undefined,
+        topHolderPct: mx?.topHolderPct as number | undefined,
       };
     });
   } catch {

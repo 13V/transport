@@ -62,6 +62,31 @@ export interface LiveBurst {
    */
   tiers: (string | null)[];
   /**
+   * Per-buyer conviction stats ALIGNED to `sampleBuyers` order. Tier is derived
+   * from the wallet's score (tierFromScore); roiPct/winRate are the wallet's
+   * verified historical stats. null fields mean the stat wasn't available.
+   */
+  buyerStats?: { addr: string; tier: string | null; roiPct: number | null; winRate: number | null }[];
+  /** Wallet of the FIRST (earliest) trade in the accumulation streak. */
+  leadBuyer?: string;
+  /** Tier of the lead buyer's wallet (tierFromScore), or null. */
+  leadTier?: string | null;
+  /**
+   * Total distinct smart ENTITIES across the whole smart-wallet set, so clients
+   * can show coverage ("% of smart set in"). Counts entities by mapping every
+   * smart wallet through the wallet→entity map (wallets with no cluster are
+   * their own entity); this is the entity-deduped denominator.
+   */
+  smartSetSize?: number;
+  /**
+   * Transparent, conviction-scaled size SUGGESTION in SOL (NOT financial advice).
+   * Formula: tierWeight = sum over sampleBuyers of (S=3, A=2, B=1, else 0.5);
+   * raw = 0.15 * tierWeight * log1p(solTotal); then CLAMP to [0.1, 5] and round
+   * to 2 decimals. Deliberately modest — scales with both buyer quality and the
+   * streak's SOL size, but capped so it never reads as a large recommendation.
+   */
+  suggestedSizeSol?: number;
+  /**
    * True once the streak can no longer absorb new buys (windowEnd is older than
    * windowSec before now), i.e. accumulation has settled. False while the streak
    * is still accumulating (more buys can extend it).
@@ -78,6 +103,15 @@ export interface LiveBurst {
   priceChange24h?: number;
   priceUsd?: number;
   pairAddress?: string;
+  // Additional TokenMeta enrichment (filled by the route; safe-optional in case
+  // a field isn't yet present on TokenMeta).
+  mintRenounced?: boolean;
+  freezeRenounced?: boolean;
+  pairCreatedAt?: number;
+  buys24h?: number;
+  sells24h?: number;
+  volume24hUsd?: number;
+  topHolderPct?: number;
 }
 
 export interface LiveBurstsResult {
@@ -97,6 +131,11 @@ export interface SmartSet {
   wallets: Set<string>;
   walletToEntity: Map<string, string>;
   scoreByWallet: Map<string, number>;
+  /**
+   * Per-wallet verified conviction stats (the same rows already read for the
+   * curation gate, just retained). Used to surface buyer ROI/win-rate on bursts.
+   */
+  statsByWallet: Map<string, { score: number; roiPct: number | null; winRate: number | null; realizedPnl: number }>;
 }
 
 const WALLET_CHUNK = 200; // Supabase .in() list size per query
@@ -109,6 +148,21 @@ function chunk<T>(arr: T[], size: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
   return out;
+}
+
+/**
+ * Count distinct smart ENTITIES across the whole smart-wallet set: every wallet
+ * is mapped through the wallet→entity map; a wallet with no cluster is its own
+ * entity. This is the entity-deduped denominator clients use for "% of smart set
+ * in" coverage.
+ */
+function countSmartEntities(
+  wallets: Set<string>,
+  walletToEntity: Map<string, string>
+): number {
+  const entities = new Set<string>();
+  for (const w of wallets) entities.add(walletToEntity.get(w) ?? w);
+  return entities.size;
 }
 
 /** Stable id: short content hash so the id doesn't drift as the window grows. */
@@ -182,6 +236,7 @@ async function resolveSmartSet(): Promise<SmartSet> {
     wallets: new Set(),
     walletToEntity: new Map(),
     scoreByWallet: new Map(),
+    statsByWallet: new Map(),
   };
   if (!isSupabaseConfigured()) return empty;
 
@@ -203,13 +258,20 @@ async function resolveSmartSet(): Promise<SmartSet> {
 
     const wallets = new Set<string>();
     const scoreByWallet = new Map<string, number>();
+    const statsByWallet = new Map<
+      string,
+      { score: number; roiPct: number | null; winRate: number | null; realizedPnl: number }
+    >();
     for (const r of statRead.data as any[]) {
+      const realizedPnl = Number(r.realized_pnl);
+      const roiPct = r.roi_pct == null ? null : Number(r.roi_pct);
+      const winRate = Number(r.win_rate);
       const ok = isSmartWallet(
         {
-          realizedPnl: Number(r.realized_pnl),
-          roiPct: r.roi_pct == null ? null : Number(r.roi_pct),
+          realizedPnl,
+          roiPct,
           investedSol: r.invested_sol == null ? null : Number(r.invested_sol),
-          winRate: Number(r.win_rate),
+          winRate,
           totalTrades: Number(r.total_trades),
           tokensTraded: Number(r.tokens_traded),
           lastTradeAt: r.last_trade_at,
@@ -223,12 +285,19 @@ async function resolveSmartSet(): Promise<SmartSet> {
       wallets.add(wallet);
       const score = Number(r.score);
       if (Number.isFinite(score)) scoreByWallet.set(wallet, score);
+      // Retain the verified stats already read above for buyer conviction display.
+      statsByWallet.set(wallet, {
+        score: Number.isFinite(score) ? score : 0,
+        roiPct: roiPct != null && Number.isFinite(roiPct) ? roiPct : null,
+        winRate: Number.isFinite(winRate) ? winRate : null,
+        realizedPnl: Number.isFinite(realizedPnl) ? realizedPnl : 0,
+      });
     }
 
     if (wallets.size === 0) return empty;
 
     const walletToEntity = await resolveEntityMap(Array.from(wallets));
-    return { wallets, walletToEntity, scoreByWallet };
+    return { wallets, walletToEntity, scoreByWallet, statsByWallet };
   } catch {
     return empty;
   }
@@ -295,7 +364,12 @@ function detectBurstsForRows(
   minBuyers: number,
   scoreByWallet: Map<string, number>,
   now: number,
-  side: 'buy' | 'sell' = 'buy'
+  side: 'buy' | 'sell' = 'buy',
+  statsByWallet?: Map<
+    string,
+    { score: number; roiPct: number | null; winRate: number | null; realizedPnl: number }
+  >,
+  smartSetSize?: number
 ): LiveBurst[] {
   const windowMs = windowSec * 1000;
   const out: LiveBurst[] = [];
@@ -311,15 +385,41 @@ function detectBurstsForRows(
     solTotal: number;
     sampleBuyers: string[];
     sampleSeen: Set<string>;
+    leadBuyer: string; // wallet of the FIRST (earliest) trade in the streak
   }
+
+  const tierFor = (w: string): string | null => {
+    const score = scoreByWallet.get(w);
+    return score == null ? null : tierFromScore(score);
+  };
+
+  /**
+   * Conviction-scaled, transparent size SUGGESTION in SOL (NOT advice).
+   *   tierWeight = sum over sampleBuyers of (S=3, A=2, B=1, else 0.5)
+   *   raw        = 0.15 * tierWeight * log1p(solTotal)
+   * then CLAMP to [0.1, 5] and round to 2 decimals. Modest by design.
+   */
+  const suggestSize = (tiers: (string | null)[], solTotal: number): number => {
+    let tierWeight = 0;
+    for (const t of tiers) tierWeight += t ? TIER_WEIGHT[t] ?? 0.5 : 0.5;
+    const raw = 0.15 * tierWeight * Math.log1p(Math.max(0, solTotal));
+    const clamped = Math.min(5, Math.max(0.1, raw));
+    return Math.round(clamped * 100) / 100;
+  };
 
   // A streak only becomes a burst once it holds ≥ minBuyers distinct entities;
   // emitted with the FULL accumulated totals so a sustained run is one card.
   const flush = (s: Streak): void => {
     if (s.entities.size < minBuyers) return;
-    const tiers = s.sampleBuyers.map((w) => {
-      const score = scoreByWallet.get(w);
-      return score == null ? null : tierFromScore(score);
+    const tiers = s.sampleBuyers.map(tierFor);
+    const buyerStats = s.sampleBuyers.map((w) => {
+      const st = statsByWallet?.get(w);
+      return {
+        addr: w,
+        tier: tierFor(w),
+        roiPct: st ? st.roiPct : null,
+        winRate: st ? st.winRate : null,
+      };
     });
     out.push({
       // id keyed on the streak's FIRST buy -> stable as the streak grows.
@@ -334,6 +434,11 @@ function detectBurstsForRows(
       wallets: Array.from(s.wallets),
       side,
       tiers,
+      buyerStats,
+      leadBuyer: s.leadBuyer,
+      leadTier: tierFor(s.leadBuyer),
+      smartSetSize,
+      suggestedSizeSol: suggestSize(tiers, s.solTotal),
       // Settled once the streak can no longer absorb a new buy within windowSec.
       finalized: now - s.endMs > windowMs,
     });
@@ -357,6 +462,8 @@ function detectBurstsForRows(
         solTotal: 0,
         sampleBuyers: [],
         sampleSeen: new Set(),
+        // rows are time-sorted ascending, so the streak's first row is the lead.
+        leadBuyer: r.wallet,
       };
     }
     // Accumulate this buy into the running streak (SOL adds to the total).
@@ -408,9 +515,14 @@ export async function getLiveBursts(opts: {
     const now = Date.now();
 
     // 1. Resolve the smart-wallet set (memoized: wallets + entity map + scores).
-    const { wallets, walletToEntity, scoreByWallet } = await getSmartWalletSet();
+    const { wallets, walletToEntity, scoreByWallet, statsByWallet } =
+      await getSmartWalletSet();
     const smartWallets = Array.from(wallets);
     if (smartWallets.length === 0) return empty;
+
+    // Total distinct smart ENTITIES across the whole set, for coverage display:
+    // map every smart wallet through the entity map (no cluster = own entity).
+    const smartSetSize = countSmartEntities(wallets, walletToEntity);
 
     // 2. Pull recent BUY trades for those wallets. Fetch NEWEST first so that
     // when the MAX_TRADE_ROWS cap bites under load we keep the freshest rows
@@ -467,7 +579,10 @@ export async function getLiveBursts(opts: {
           windowSec,
           minBuyers,
           scoreByWallet,
-          now
+          now,
+          'buy',
+          statsByWallet,
+          smartSetSize
         )
       );
     }
@@ -523,9 +638,11 @@ export async function detectBurstsForMints(
     const supabase = getSupabase();
     const now = Date.now();
 
-    const { wallets, walletToEntity, scoreByWallet } = await getSmartWalletSet();
+    const { wallets, walletToEntity, scoreByWallet, statsByWallet } =
+      await getSmartWalletSet();
     if (wallets.size === 0) return [];
 
+    const smartSetSize = countSmartEntities(wallets, walletToEntity);
     const sinceIso = new Date(now - lookbackMs).toISOString();
 
     // Pull recent trades (BUY or SELL per `side`) for the given mints, newest
@@ -578,7 +695,9 @@ export async function detectBurstsForMints(
           minBuyers,
           scoreByWallet,
           now,
-          side
+          side,
+          statsByWallet,
+          smartSetSize
         )
       );
     }

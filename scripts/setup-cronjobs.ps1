@@ -36,7 +36,15 @@ $jobs = @(
   @{ t="track-links";         p="/api/cron/track-links";                                 m=@(0); h=@(0,6,12,18) },
   @{ t="alerts";              p="/api/cron/alerts";                                      m=(Every 5) },
   @{ t="growth-alert";        p="/api/cron/growth-alert";                                m=@(0) },
-  @{ t="snapshot";            p="/api/cron/snapshot";                                    m=@(0) }
+  @{ t="snapshot";            p="/api/cron/snapshot";                                    m=@(0) },
+  # --- live burst outcome proof ---
+  # Capture growing smart-money buy bursts (every 2 min so still-live bursts are
+  # refreshed and new ones get their measurement baseline stamped on first sight).
+  @{ t="persist-bursts";      p="/api/cron/persist-bursts";                              m=(Every 2) },
+  # Measure what each burst's token did 15m/1h/24h later from real candle history.
+  @{ t="measure-bursts";      p="/api/cron/measure-bursts";                              m=(Every 5) },
+  # Once-daily recap of measured outcomes (count, median return, best call).
+  @{ t="daily-digest";        p="/api/cron/daily-digest";                                m=@(5); h=@(0) }
 )
 
 if ($apiKey -eq "PASTE_YOUR_CRONJOB_ORG_API_KEY") { Write-Host "Edit `$apiKey first." -ForegroundColor Red; return }

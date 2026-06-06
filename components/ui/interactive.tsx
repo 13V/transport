@@ -101,17 +101,34 @@ export function AddrChip({ address, copy = true, watch = false, len = 4 }: AddrC
 
 /**
  * Row of quick-trade + explorer chips for a token mint.
- * `primary` promotes the FIRST trade-kind link (the preferred terminal) to a
- * larger filled "one-tap ape" button; the rest stay as chips.
+ * `primary` promotes a trade-kind link to a larger filled "one-tap ape" button;
+ * the rest stay as chips. When `preferred` (a platform label, e.g. 'GMGN') is
+ * set and matches a link case-insensitively, that link is promoted; otherwise
+ * the FIRST trade-kind link is used. `pairAddress` is forwarded so Photon links
+ * to the pool/pair address.
  */
 export function TradeLinks({
-  mint, size = 'sm', primary = false,
-}: { mint: string; size?: 'sm' | 'xs'; primary?: boolean }) {
-  const links = tokenLinks(mint);
+  mint, size = 'sm', primary = false, preferred, pairAddress,
+}: {
+  mint: string;
+  size?: 'sm' | 'xs';
+  primary?: boolean;
+  preferred?: string;
+  pairAddress?: string;
+}) {
+  const links = tokenLinks(mint, { pairAddress });
   if (!links.length) return null;
 
-  // Index of the first trade link to promote (only when `primary`).
-  const primaryIdx = primary ? links.findIndex((l) => l.kind === 'trade') : -1;
+  // Index of the trade link to promote (only when `primary`). Prefer the link
+  // matching `preferred` (case-insensitive); fall back to the first trade link.
+  let primaryIdx = -1;
+  if (primary) {
+    if (preferred) {
+      const key = preferred.toLowerCase();
+      primaryIdx = links.findIndex((l) => l.kind === 'trade' && l.label.toLowerCase() === key);
+    }
+    if (primaryIdx < 0) primaryIdx = links.findIndex((l) => l.kind === 'trade');
+  }
 
   return (
     <span className="row gap-8 wrap" onClick={(e) => e.stopPropagation()}>

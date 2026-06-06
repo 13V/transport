@@ -48,14 +48,24 @@ export interface ExtLink {
   kind: 'trade' | 'explorer';
 }
 
+/** Options for {@link tokenLinks}. */
+export interface TokenLinksOpts {
+  /** Pool/pair address for Photon's `/en/lp/<pair>` path. When omitted, Photon
+   *  falls back to the mint (legacy behavior). */
+  pairAddress?: string;
+}
+
 /** Quick-trade + explorer links for a token mint. */
-export function tokenLinks(mint: string): ExtLink[] {
+export function tokenLinks(mint: string, opts?: TokenLinksOpts): ExtLink[] {
   if (!mint) return [];
+  // Photon's `/lp/` path expects the POOL/pair address; use it when available
+  // and fall back to the mint otherwise so existing callers keep working.
+  const photonTarget = opts?.pairAddress || mint;
   return [
     { label: 'Axiom', url: withParam(`https://axiom.trade/meme/${mint}`, 'ref', REF.axiom), kind: 'trade' },
     { label: 'GMGN', url: withParam(`https://gmgn.ai/sol/token/${mint}`, 'ref', REF.gmgn), kind: 'trade' },
     { label: 'BullX', url: withParam(`https://neo.bullx.io/terminal?chainId=1399811149&address=${mint}`, 'r', REF.bullx), kind: 'trade' },
-    { label: 'Photon', url: withParam(`https://photon-sol.tinyastro.io/en/lp/${mint}`, 'handle', REF.photon), kind: 'trade' },
+    { label: 'Photon', url: withParam(`https://photon-sol.tinyastro.io/en/lp/${photonTarget}`, 'handle', REF.photon), kind: 'trade' },
     { label: 'Jupiter', url: withParam(`https://jup.ag/swap/SOL-${mint}`, 'referrer', REF.jupiter), kind: 'trade' },
     { label: 'DexScreener', url: `https://dexscreener.com/solana/${mint}`, kind: 'explorer' },
     { label: 'Solscan', url: `https://solscan.io/token/${mint}`, kind: 'explorer' },
