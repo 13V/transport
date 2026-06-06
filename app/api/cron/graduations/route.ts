@@ -16,6 +16,13 @@ import { runGraduationScan } from '../../../../lib/indexer/run-graduation-scan';
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
 
+function clampParam(raw: string | null, min: number, max: number): number | undefined {
+  if (raw === null) return undefined;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return undefined;
+  return Math.min(max, Math.max(min, Math.trunc(n)));
+}
+
 export async function GET(request: NextRequest) {
   const secret = process.env.CRON_SECRET;
   if (secret) {
@@ -25,8 +32,18 @@ export async function GET(request: NextRequest) {
     }
   }
 
+  // Per-call overrides so the cron driver can dial bulk-ingest volume.
+  //   ?maxCoins=8   graduated coins to fully scan this call (1..40)
+  //   ?maxTxs=3000  history depth per coin (500..5000)
+  const sp = request.nextUrl.searchParams;
+  const opts: { maxCoins?: number; maxTxsPerCoin?: number } = {};
+  const maxCoins = clampParam(sp.get('maxCoins'), 1, 40);
+  const maxTxs = clampParam(sp.get('maxTxs'), 500, 5000);
+  if (maxCoins !== undefined) opts.maxCoins = maxCoins;
+  if (maxTxs !== undefined) opts.maxTxsPerCoin = maxTxs;
+
   try {
-    const result = await runGraduationScan();
+    const result = await runGraduationScan(opts);
     return NextResponse.json(result, {
       status: result.ok ? 200 : 500,
       headers: { 'Cache-Control': 'no-store' },

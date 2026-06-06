@@ -65,8 +65,8 @@ jobs:
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
         run: |
           set -u
-          ITER="${INDEX_ITERATIONS:-4}"
-          TOK="${INDEX_MAX_TOKENS:-20}"
+          ITER="${INDEX_ITERATIONS:-8}"
+          TOK="${INDEX_MAX_TOKENS:-30}"
           echo "Token-first index: $ITER iterations x $TOK tokens"
           for i in $(seq 1 "$ITER"); do
             echo "--- index iteration $i/$ITER ---"
@@ -108,13 +108,13 @@ jobs:
     timeout-minutes: 55
     # PARALLEL SHARDED DRAIN: N jobs each scan a disjoint shard of the backlog
     # (hash(wallet) % shards), so throughput ~= shards x iterations x wallets/call.
-    #   6 shards x 40 iters x 30 wallets = ~7,200 wallet scans/hr nominal.
-    # Helius spend/limits scale with this — if you see 429s, lower REFINE_SHARDS
-    # (must match the matrix length below) or REFINE_ITERATIONS, or raise SLEEP.
+    #   10 shards x 50 iters x 30 wallets = ~15,000 wallet scans/hr nominal.
+    # Tuned for a PAID Helius plan. If you see 429s, lower REFINE_SHARDS (must
+    # match the matrix length below) / REFINE_ITERATIONS, or raise SLEEP.
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
     steps:
       - name: Drain deep-scan backlog (shard ${{ matrix.shard }})
         env:
@@ -122,10 +122,10 @@ jobs:
           SHARD: ${{ matrix.shard }}
         run: |
           set -u
-          SHARDS="${REFINE_SHARDS:-6}"
-          ITER="${REFINE_ITERATIONS:-40}"
+          SHARDS="${REFINE_SHARDS:-10}"
+          ITER="${REFINE_ITERATIONS:-50}"
           MAXW="${REFINE_MAX_WALLETS:-30}"
-          SLEEP="${REFINE_SLEEP_SECONDS:-3}"
+          SLEEP="${REFINE_SLEEP_SECONDS:-1}"
           echo "Shard ${SHARD}/${SHARDS}: up to $ITER iterations x $MAXW wallets (~$((SHARDS * ITER * MAXW))/hr nominal across all shards)"
           total=0
           for i in $(seq 1 "$ITER"); do
@@ -163,15 +163,38 @@ jobs:
           echo "Drain complete: ~$total wallets processed this run."
 
   graduations:
-    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '15 */3 * * *'
+    # BULK WALLET INGEST (the main lever for "Wallets indexed"). Each graduated
+    # coin's full scan stub-rows EVERY trader into wallet_stats (verified=false),
+    # so one coin can add hundreds–thousands of wallets, and feeds the drain.
+    # Loops over fresh coins; coins fully scanned in the last 24h are skipped, so
+    # it advances instead of re-scanning. Hourly.
+    # NOTE: new-wallet volume is ultimately bounded by how many NEW graduated
+    # coins DexScreener surfaces per wave — sourcing, not scan rate, is the cap.
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '15 * * * *'
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
-      - name: Capture graduated coins (every wallet)
+      - name: Capture graduated coins (bulk wallet ingest)
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
         run: |
-          curl -fsS --max-time 120 \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            "$BASE_URL/api/cron/graduations" | head -c 2000
-          echo
+          set -u
+          ITER="${GRAD_ITERATIONS:-15}"
+          COINS="${GRAD_MAX_COINS:-6}"
+          echo "Graduations bulk ingest: up to $ITER iterations x $COINS coins"
+          for i in $(seq 1 "$ITER"); do
+            echo "--- graduations iteration $i/$ITER ---"
+            body="$(curl -sS --max-time 70 \
+              -H "Authorization: Bearer ${CRON_SECRET}" \
+              "$BASE_URL/api/cron/graduations?maxCoins=${COINS}")" || body=''
+            echo "$body" | head -c 1000; echo
+            # Stop early once no fresh coins remain to scan (coinsScanned == 0).
+            if echo "$body" | grep -q '"coinsScanned":0'; then
+              echo "No fresh graduated coins — stopping after $i iterations."
+              break
+            fi
+            sleep 2
+          done
 
   chain-discovery:
     if: github.event_name == 'workflow_dispatch' || github.event.schedule == '45 */6 * * *'

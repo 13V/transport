@@ -50,7 +50,7 @@ export async function runGraduationScan(
   }
 
   const supabase = getSupabase();
-  const candidates = await getGraduatedCoins(40);
+  const candidates = await getGraduatedCoins(Math.max(80, maxCoins * 3));
   if (candidates.length === 0) {
     return { ...blank(start), ok: true, error: 'No graduated coins returned by DexScreener' };
   }
