@@ -12,7 +12,13 @@
  */
 
 import { getSupabase, isSupabaseConfigured } from '../supabase-client';
-import { getGraduatedCoins, fullScanCoin } from './graduations';
+import {
+  getGraduatedCoins,
+  getAgedWinnerCoins,
+  resolvePairAddress,
+  fullScanCoin,
+  type GraduatedCoin,
+} from './graduations';
 import { envInt } from './env';
 
 export interface GraduationScanResult {
@@ -50,9 +56,37 @@ export async function runGraduationScan(
   }
 
   const supabase = getSupabase();
-  const candidates = await getGraduatedCoins(Math.max(80, maxCoins * 3));
+
+  // Candidate pool comes from TWO sources, merged & deduped by mint:
+  //   1. getGraduatedCoins()  — fresh/active graduations (ranked by 24h txns).
+  //   2. getAgedWinnerCoins() — AGED winners that ran up to ~100k+ market cap.
+  //      Their value is the historical trader base, so they do NOT require any
+  //      current 24h activity — this is the bulk "Wallets indexed" lever.
+  // Aged sourcing is on by default; gate it off with GRAD_INCLUDE_AGED=0.
+  // Env knobs: AGED_MIN_MC_USD (min market cap, default 100000),
+  //            AGED_MAX_COINS (max aged candidates pulled, default 400).
+  const includeAged = process.env.GRAD_INCLUDE_AGED !== '0';
+  const [fresh, aged] = await Promise.all([
+    getGraduatedCoins(Math.max(80, maxCoins * 3)),
+    includeAged ? getAgedWinnerCoins() : Promise.resolve<GraduatedCoin[]>([]),
+  ]);
+
+  // Order: fresh active coins first (highest txns24h), then aged winners by
+  // marketCapUsd desc. The <24h rescan skip below guarantees we ADVANCE through
+  // new coins on each run rather than re-scanning the same head of the list.
+  const freshSorted = [...fresh].sort((a, b) => (b.txns24h ?? 0) - (a.txns24h ?? 0));
+  const agedSorted = [...aged].sort((a, b) => (b.marketCapUsd ?? 0) - (a.marketCapUsd ?? 0));
+
+  const candidates: GraduatedCoin[] = [];
+  const seen = new Set<string>();
+  for (const c of [...freshSorted, ...agedSorted]) {
+    if (!c.mint || seen.has(c.mint)) continue;
+    seen.add(c.mint);
+    candidates.push(c);
+  }
+
   if (candidates.length === 0) {
-    return { ...blank(start), ok: true, error: 'No graduated coins returned by DexScreener' };
+    return { ...blank(start), ok: true, error: 'No graduated/aged coins returned by sources' };
   }
 
   // Skip coins already fully scanned recently.
@@ -79,16 +113,29 @@ export async function runGraduationScan(
     if (Date.now() - start > timeBudgetMs) break;
 
     try {
-      const res = await fullScanCoin(supabase, coin.mint, coin.symbol, maxTxsPerCoin, coin.pairAddress);
+      // fullScanCoin needs the AMM pool address. Fresh coins carry it; aged
+      // winners may not, so resolve it here (within the time budget). If it
+      // can't be resolved, skip the coin rather than wasting a scan slot.
+      let pairAddress = coin.pairAddress;
+      if (!pairAddress) {
+        pairAddress = await resolvePairAddress(coin.mint);
+        if (!pairAddress) {
+          detail.push({ mint: coin.mint, symbol: coin.symbol, skipped: 'no_pair' });
+          continue;
+        }
+      }
+
+      const res = await fullScanCoin(supabase, coin.mint, coin.symbol, maxTxsPerCoin, pairAddress);
       coinsScanned += 1;
       tradesIngested += res.trades;
       walletsCaptured += res.wallets;
       detail.push({
         mint: coin.mint,
         symbol: coin.symbol,
-        pair: coin.pairAddress ?? null,
+        pair: pairAddress ?? null,
         txns24h: coin.txns24h ?? null,
         volumeUsd24h: coin.volumeUsd24h ?? null,
+        marketCapUsd: coin.marketCapUsd ?? null,
         trades: res.trades,
         wallets: res.wallets,
       });

@@ -16,6 +16,7 @@
 import axios from 'axios';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { fetchAllWalletTradesForToken } from './swap-fetcher';
+import { getPumpFunCoins } from './pumpfun-coins';
 
 const DEXSCREENER_SEARCH = 'https://api.dexscreener.com/latest/dex/search';
 const DEXSCREENER_BOOSTS = [
@@ -38,6 +39,7 @@ export interface GraduatedCoin {
   pairAddress?: string; // AMM pool — scan THIS for every swap, not the mint
   txns24h?: number;
   volumeUsd24h?: number;
+  marketCapUsd?: number;
 }
 
 /** Collect a broad pool of candidate Solana mints from boosts + search. */
@@ -92,6 +94,7 @@ export async function getGraduatedCoins(limit = 12): Promise<GraduatedCoin[]> {
         if (!mint || EXCLUDED.has(mint)) continue;
         const txns = Number(p?.txns?.h24?.buys ?? 0) + Number(p?.txns?.h24?.sells ?? 0);
         const vol = Number(p?.volume?.h24 ?? 0);
+        const mc = Number(p?.marketCap ?? p?.fdv);
         const prev = ranked.get(mint);
         // Keep the most-active pair per token (its pool has the most swaps).
         if (!prev || txns > (prev.txns24h ?? 0)) {
@@ -101,6 +104,7 @@ export async function getGraduatedCoins(limit = 12): Promise<GraduatedCoin[]> {
             pairAddress: p?.pairAddress,
             txns24h: txns,
             volumeUsd24h: vol,
+            marketCapUsd: Number.isNaN(mc) ? undefined : mc,
           });
         }
       }
@@ -116,6 +120,42 @@ export async function getGraduatedCoins(limit = 12): Promise<GraduatedCoin[]> {
     .filter((c) => (c.txns24h ?? 0) >= minTxns)
     .sort((a, b) => (b.txns24h ?? 0) - (a.txns24h ?? 0))
     .slice(0, limit);
+}
+
+/**
+ * AGED WINNER COINS — bulk wallet-sourcing lever.
+ *
+ * Fresh-graduation sourcing (getGraduatedCoins) is gated on CURRENT 24h activity,
+ * which limits the candidate pool to whatever is hot right now. Aged winners are
+ * coins that already ran up to a meaningful market cap (~100k+) at some point;
+ * their value is the HISTORICAL trader base, so we intentionally do NOT require
+ * any current 24h activity. fullScanCoin will stub-row every wallet that ever
+ * traded them, which is the real "Wallets indexed" lever.
+ *
+ * Sourced from the pump.fun coin list (./pumpfun-coins). Resilient: returns []
+ * on any failure so the scan falls back to fresh graduations only.
+ */
+export async function getAgedWinnerCoins(opts?: {
+  minMcUsd?: number;
+  maxCoins?: number;
+}): Promise<GraduatedCoin[]> {
+  try {
+    const coins = await getPumpFunCoins({
+      minMcUsd: opts?.minMcUsd ?? Number(process.env.AGED_MIN_MC_USD ?? 100000),
+      maxCoins: opts?.maxCoins ?? Number(process.env.AGED_MAX_COINS ?? 400),
+    });
+    return (coins ?? [])
+      .filter((c) => c?.mint && !EXCLUDED.has(c.mint))
+      .map((c) => ({
+        mint: c.mint,
+        symbol: c.symbol,
+        pairAddress: c.pairAddress,
+        marketCapUsd: c.marketCapUsd,
+      }));
+  } catch (err) {
+    console.error('[GRAD] aged winner source failed:', (err as Error).message);
+    return [];
+  }
 }
 
 /** Resolve a mint's busiest Solana pool address (where the swaps live). */
