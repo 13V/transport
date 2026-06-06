@@ -1,6 +1,7 @@
 'use client';
 
 import { use } from 'react';
+import WalletProfile from '@/components/WalletProfile';
 import WalletDetail from '@/components/WalletDetail';
 
 interface WalletDetailPageProps {
@@ -14,6 +15,7 @@ export default function WalletDetailPage({ params }: WalletDetailPageProps) {
 
   return (
     <div className="space-y-8 py-8">
+      <WalletProfile walletAddress={wallet} />
       <WalletDetail walletAddress={wallet} />
     </div>
   );

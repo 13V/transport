@@ -22,13 +22,15 @@ export default function RootLayout({
       <body className="bg-gray-950 text-gray-100 font-sans">
         <header className="border-b border-gray-800 bg-gray-900 sticky top-0 z-10">
           <nav className="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
-            <div className="flex items-center gap-2">
+            <a href="/" className="flex items-center gap-2">
               <span className="text-2xl">🔍</span>
               <h1 className="text-xl font-bold">Solana Insider Tracker</h1>
+            </a>
+            <div className="flex items-center gap-5 text-sm">
+              <a href="/smart-money" className="text-gray-300 hover:text-white transition-colors">Leaderboard</a>
+              <a href="/smart-money/buying" className="text-gray-300 hover:text-white transition-colors">Buying</a>
+              <a href="/docs" className="text-gray-300 hover:text-white transition-colors">API</a>
             </div>
-            <p className="text-sm text-gray-400">
-              Detect creators, smart money, and bundle activity
-            </p>
           </nav>
         </header>
 

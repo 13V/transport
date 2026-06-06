@@ -15,6 +15,8 @@
  * Every threshold is env-tunable so the bar can be moved without a deploy.
  */
 
+import { detectBot } from './bot-filter';
+
 export interface SmartCriteria {
   minRoiPct: number; // all-time realized ROI floor (%); requires an accurate ROI
   minPnlSol: number; // realized PnL floor (SOL) — keeps out tiny-size noise
@@ -74,6 +76,25 @@ export function isSmartWallet(
   if (criteria.maxWinRate < 1 && s.winRate > criteria.maxWinRate) return false;
   if (s.totalTrades < criteria.minTrades) return false;
   if (s.tokensTraded < criteria.minTokens) return false;
+
+  // Exclude likely bots / MEV / arb unless explicitly disabled (SMART_ALLOW_BOTS=1).
+  if (process.env.SMART_ALLOW_BOTS !== '1') {
+    const avgTradeSol =
+      s.totalTrades > 0 && s.investedSol != null ? s.investedSol / s.totalTrades : undefined;
+    if (
+      detectBot({
+        totalTrades: s.totalTrades,
+        tokensTraded: s.tokensTraded,
+        realizedPnl: s.realizedPnl,
+        investedSol: s.investedSol,
+        roiPct: s.roiPct,
+        winRate: s.winRate,
+        avgTradeSol,
+      }).isLikelyBot
+    ) {
+      return false;
+    }
+  }
 
   if (criteria.maxIdleDays > 0 && s.lastTradeAt) {
     const last = new Date(s.lastTradeAt).getTime();
