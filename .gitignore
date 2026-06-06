@@ -9,3 +9,7 @@ dist/
 .DS_Store
 *.swp
 *.swo
+
+# TS incremental build cache (regenerated; not source)
+tsconfig.tsbuildinfo
+*.tsbuildinfo
