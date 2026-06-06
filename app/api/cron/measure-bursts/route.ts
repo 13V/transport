@@ -15,7 +15,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { measureBursts } from '../../../../lib/indexer/burst-outcomes';
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 120;
+export const maxDuration = 60; // Vercel Hobby caps functions at 60s
 
 export async function GET(request: NextRequest) {
   const secret = process.env.CRON_SECRET;
