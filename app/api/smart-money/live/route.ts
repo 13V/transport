@@ -57,7 +57,9 @@ export async function GET(request: NextRequest) {
     { ...result, count: bursts.length, bursts },
     {
       headers: {
-        'Cache-Control': 'public, s-maxage=10, stale-while-revalidate=30',
+        // Short s-maxage so the feed is near-real-time; the CDN still coalesces
+        // bursts of polls across users to one origin hit per ~2s, bounding DB load.
+        'Cache-Control': 'public, s-maxage=2, stale-while-revalidate=10',
       },
     }
   );

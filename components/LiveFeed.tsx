@@ -35,7 +35,7 @@ interface LiveResponse {
 
 const MIN_BUYERS: number[] = [3, 4, 5];
 const WINDOW_SEC: number[] = [15, 30, 60];
-const POLL_MS = 7 * 1000;
+const POLL_MS = 3 * 1000;
 
 // Parse an ISO timestamp into epoch ms (or null) for the ms-based formatters.
 function ms(iso: string | null | undefined): number | null {
@@ -157,7 +157,7 @@ export default function LiveFeed() {
     return () => { mountedRef.current = false; };
   }, [fetchLive, minBuyers, windowSec]);
 
-  // Poll every 7s for the current controls (data updates in near real-time).
+  // Poll every 3s for the current controls (data updates in near real-time).
   useEffect(() => {
     const interval = setInterval(() => fetchLive(minBuyers, windowSec), POLL_MS);
     return () => clearInterval(interval);
@@ -220,7 +220,7 @@ export default function LiveFeed() {
             }}
           />
           <span className="faint" style={{ fontSize: 12 }}>
-            Updated {f.ago(ms(generatedAt))} · auto-refreshes every 7s
+            Updated {f.ago(ms(generatedAt))} · auto-refreshes every 3s
           </span>
         </div>
       </div>
