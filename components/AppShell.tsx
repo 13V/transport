@@ -153,6 +153,24 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         </header>
         <main className="main" id="main-content">{children}</main>
       </div>
+
+      <nav className="mobile-nav" aria-label="Primary mobile">
+        {NAV.flatMap((g) => g.items).map((n) => {
+          const Icon = n.icon;
+          const active = owner === n.owner;
+          return (
+            <Link
+              key={n.href}
+              href={n.href}
+              className={`mnav-link ${active ? 'active' : ''}`}
+              aria-current={active ? 'page' : undefined}
+            >
+              <Icon size={20} />
+              <span>{n.label}</span>
+            </Link>
+          );
+        })}
+      </nav>
     </div>
   );
 }

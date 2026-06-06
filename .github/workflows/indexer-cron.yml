@@ -39,8 +39,8 @@ env:
   REFINE_MAX_WALLETS: '30'
   REFINE_SLEEP_SECONDS: '3'
   # Token-first index drain knobs (feeds NEW unverified wallets into the backlog).
-  INDEX_ITERATIONS: '4'
-  INDEX_MAX_TOKENS: '20'
+  INDEX_ITERATIONS: '8'
+  INDEX_MAX_TOKENS: '30'
 
 jobs:
   alerts:

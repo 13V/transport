@@ -7,9 +7,16 @@
  * rotating set of active Solana tokens. Smart-money wallets are found by looking
  * at who is trading the currently-active tokens — not the largest holders of
  * USDC/SOL (those are exchanges).
+ *
+ * Two levers keep each run targeting FRESH coins so the indexer keeps adding NEW
+ * wallets instead of re-deduping the same trending head every time:
+ *   - EXCLUDE coins already fully scanned recently (coins.full_scanned_at < ~24h).
+ *   - ROTATE ordering/offset by an hour bucket so successive runs surface a
+ *     different slice of the candidate pool.
  */
 
 import axios from 'axios';
+import { getSupabase, isSupabaseConfigured } from '../supabase-client';
 
 const DEXSCREENER_BASE = 'https://api.dexscreener.com';
 
@@ -26,16 +33,50 @@ export interface UniverseToken {
 }
 
 /**
- * Fetch a set of currently-active Solana token mints to scan.
- * Combines "top boosts" and "latest boosts" for a mix of established + fresh,
- * then prioritizes pump.fun coins (mints ending in "pump") since they're the
- * focus of the smart-money leaderboard.
+ * Mints fully scanned within the last `withinMs` — exclude them so each run
+ * targets fresh coins. Degrades to an empty set (no exclusion) on any error.
  */
-export async function getTokenUniverse(limit = 30): Promise<UniverseToken[]> {
-  // Pull from several DexScreener endpoints so a high-volume backlog-feeding run
-  // sees a WIDER, fresher universe instead of re-deduping the same ~30 trending
-  // coins every time. `token-profiles/latest` surfaces newly-listed coins, which
-  // is exactly where fresh unverified wallets come from.
+async function getRecentlyScannedMints(withinMs: number): Promise<Set<string>> {
+  const excluded = new Set<string>();
+  if (!isSupabaseConfigured()) return excluded;
+  try {
+    const since = new Date(Date.now() - withinMs).toISOString();
+    const { data, error } = await getSupabase()
+      .from('coins')
+      .select('mint, full_scanned_at')
+      .gte('full_scanned_at', since)
+      .limit(5000);
+    if (error || !data) return excluded;
+    for (const row of data) {
+      const mint = (row as { mint?: string }).mint;
+      if (mint) excluded.add(mint);
+    }
+  } catch (err) {
+    console.error('[UNIVERSE] recently-scanned exclusion query failed:', (err as Error).message);
+  }
+  return excluded;
+}
+
+/**
+ * Fetch a set of currently-active Solana token mints to scan.
+ * Combines "top boosts", "latest boosts" and newly-listed profiles for a mix of
+ * established + fresh coins, then:
+ *   - excludes coins already fully scanned in the last `excludeWithinMs`,
+ *   - prioritizes pump.fun coins (mints ending in "pump"),
+ *   - ROTATES the returned slice by an hour bucket so successive runs differ.
+ *
+ * Signature stays `getTokenUniverse(limit)`; rotation/exclusion are optional.
+ */
+export async function getTokenUniverse(
+  limit = 30,
+  opts: { excludeWithinMs?: number } = {}
+): Promise<UniverseToken[]> {
+  const excludeWithinMs = opts.excludeWithinMs ?? 24 * 60 * 60 * 1000;
+
+  // Pull a LARGER candidate set from several DexScreener endpoints so a
+  // high-volume backlog-feeding run sees a WIDER, fresher universe instead of
+  // re-deduping the same ~30 trending coins every time. `token-profiles/latest`
+  // surfaces newly-listed coins — exactly where fresh unverified wallets come from.
   const endpoints = [
     `${DEXSCREENER_BASE}/token-boosts/top/v1`,
     `${DEXSCREENER_BASE}/token-boosts/latest/v1`,
@@ -61,9 +102,23 @@ export async function getTokenUniverse(limit = 30): Promise<UniverseToken[]> {
     }
   }
 
+  // EXCLUDE coins already fully scanned recently so we target fresh coins.
+  const recentlyScanned = await getRecentlyScannedMints(excludeWithinMs);
+  const fresh = recentlyScanned.size
+    ? tokens.filter((t) => !recentlyScanned.has(t.mint))
+    : tokens;
+
   // Pump.fun coins first, so the limited scan budget is spent where it matters.
   const isPump = (m: string) => m.toLowerCase().endsWith('pump');
-  tokens.sort((a, b) => Number(isPump(b.mint)) - Number(isPump(a.mint)));
+  fresh.sort((a, b) => Number(isPump(b.mint)) - Number(isPump(a.mint)));
 
-  return tokens.slice(0, limit);
+  // ROTATE: vary the offset into the fresh pool by an hour bucket so successive
+  // runs surface DIFFERENT coins instead of always re-scanning the same head.
+  // The bucket-derived offset walks a `limit`-sized window through the pool,
+  // wrapping around so the whole candidate set is covered over time.
+  if (fresh.length <= limit) return fresh;
+  const hourBucket = Math.floor(Date.now() / 3_600_000);
+  const offset = (hourBucket * limit) % fresh.length;
+  const rotated = [...fresh.slice(offset), ...fresh.slice(0, offset)];
+  return rotated.slice(0, limit);
 }
