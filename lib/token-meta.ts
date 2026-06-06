@@ -26,6 +26,13 @@ export interface TokenMeta {
   icons?: string[];    // ordered fallback chain
   links?: TokenLink[]; // website / socials
   description?: string;
+  // Live market stats (from the highest-liquidity DexScreener pair).
+  pairAddress?: string;   // for the DexScreener chart embed
+  priceUsd?: number;
+  marketCapUsd?: number;
+  liquidityUsd?: number;
+  volume24hUsd?: number;
+  priceChange24h?: number; // 24h % change
 }
 
 interface CacheEntry {
@@ -67,7 +74,16 @@ function imageCandidates(raw?: string): string[] {
   return out;
 }
 
-interface Acc { symbol?: string; name?: string; cands: string[]; links: TokenLink[]; description?: string }
+interface Acc {
+  symbol?: string; name?: string; cands: string[]; links: TokenLink[]; description?: string;
+  pairAddress?: string; priceUsd?: number; marketCapUsd?: number;
+  liquidityUsd?: number; volume24hUsd?: number; priceChange24h?: number;
+}
+
+function numOrU(v: unknown): number | undefined {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+}
 
 // Normalize a social/website entry to an absolute https URL, else skip.
 function normLink(url?: string): string | undefined {
@@ -105,6 +121,14 @@ async function fetchDexScreener(mints: string[], acc: Map<string, Acc>): Promise
         const entry: Acc = acc.get(addr) ?? { cands: [], links: [] };
         entry.symbol = base?.symbol || entry.symbol;
         entry.name = base?.name || entry.name;
+        // This block only runs for the highest-weight pair seen so far, so the
+        // last write wins — i.e. these are the busiest pool's live stats.
+        entry.pairAddress = pair?.pairAddress || entry.pairAddress;
+        entry.priceUsd = numOrU(pair?.priceUsd) ?? entry.priceUsd;
+        entry.marketCapUsd = numOrU(pair?.marketCap) ?? numOrU(pair?.fdv) ?? entry.marketCapUsd;
+        entry.liquidityUsd = numOrU(pair?.liquidity?.usd) ?? entry.liquidityUsd;
+        entry.volume24hUsd = numOrU(pair?.volume?.h24) ?? entry.volume24hUsd;
+        entry.priceChange24h = numOrU(pair?.priceChange?.h24) ?? entry.priceChange24h;
         const cands: string[] = [];
         if (typeof info?.imageUrl === 'string' && info.imageUrl) cands.push(info.imageUrl);
         if (typeof base?.icon === 'string' && base.icon) cands.push(base.icon);
@@ -184,6 +208,12 @@ function finalize(entry: Acc): TokenMeta {
     icons,
     links: links.length ? links : undefined,
     description: entry.description,
+    pairAddress: entry.pairAddress,
+    priceUsd: entry.priceUsd,
+    marketCapUsd: entry.marketCapUsd,
+    liquidityUsd: entry.liquidityUsd,
+    volume24hUsd: entry.volume24hUsd,
+    priceChange24h: entry.priceChange24h,
   };
 }
 

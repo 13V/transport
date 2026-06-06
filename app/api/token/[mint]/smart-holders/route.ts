@@ -22,6 +22,7 @@ import { getSupabase, isSupabaseConfigured } from '../../../../../lib/supabase-c
 import { getSmartCriteria, isSmartWallet } from '../../../../../lib/indexer/curation';
 import { tierFromScore } from '../../../../../lib/format';
 import { getTokenMeta } from '../../../../../lib/token-meta';
+import { fetchTokenPricesSol } from '../../../../../lib/prices/price-oracle';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 30;
@@ -41,7 +42,9 @@ interface SmartHolder {
   allTimeRoiPct: number | null;
   verified: boolean;
   solBought: number;
-  pnlOnThisCoin: number; // average-cost realized PnL on this coin (SOL)
+  pnlOnThisCoin: number;   // average-cost realized PnL on this coin (SOL)
+  unrealizedSol: number;   // remaining bag marked to live price (SOL)
+  currentValueSol: number; // remaining bag value at live price (SOL)
   tokensRemaining: number;
   buys: number;
   sells: number;
@@ -144,26 +147,37 @@ export async function GET(
       }
     }
 
+    // Live SOL price for the coin (proven oracle; SOL per UI-token, same unit as
+    // our trade `amount`). Used to mark each holder's remaining bag to market.
+    let priceSol = 0;
+    try { priceSol = (await fetchTokenPricesSol([mint])).get(mint) ?? 0; } catch { /* no live price */ }
+
+    const r4 = (n: number) => Math.round(n * 1e4) / 1e4;
     const holders: SmartHolder[] = Array.from(byWallet.entries()).map(([wallet, a]) => {
       const avgCost = a.tokensBought > 0 ? a.solSpent / a.tokensBought : 0;
       const realized = a.solReceived - avgCost * a.tokensSold; // 0 for pure holders
+      const tokensRemaining = Math.max(0, a.tokensBought - a.tokensSold);
+      const currentValueSol = priceSol > 0 ? tokensRemaining * priceSol : 0;
+      const unrealizedSol = priceSol > 0 ? tokensRemaining * (priceSol - avgCost) : 0;
       const m = meta.get(wallet);
       return {
         wallet,
         tier: m?.tier ?? null,
         allTimeRoiPct: m?.roi ?? null,
         verified: true,
-        solBought: Math.round(a.solSpent * 1e4) / 1e4,
-        pnlOnThisCoin: Math.round(realized * 1e4) / 1e4,
-        tokensRemaining: Math.max(0, a.tokensBought - a.tokensSold),
+        solBought: r4(a.solSpent),
+        pnlOnThisCoin: r4(realized),
+        unrealizedSol: r4(unrealizedSol),
+        currentValueSol: r4(currentValueSol),
+        tokensRemaining,
         buys: a.buys,
         sells: a.sells,
         lastBuy: a.lastBuy == null ? null : new Date(a.lastBuy).toISOString(),
       };
-    }).sort((x, y) => y.solBought - x.solBought);
+    }).sort((x, y) => (y.currentValueSol || y.solBought) - (x.currentValueSol || x.solBought));
 
     return NextResponse.json(
-      { mint, token, traderCount: holders.length, smartHolderCount: holders.length, smartHolders: holders },
+      { mint, token, priceSol, traderCount: holders.length, smartHolderCount: holders.length, smartHolders: holders },
       { headers }
     );
   } catch {

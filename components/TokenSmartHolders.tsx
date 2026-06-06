@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { Sparkles, Users, Wallet, TrendingUp, Globe, Twitter, Send, MessageCircle, ExternalLink } from 'lucide-react';
+import { Sparkles, Users, Wallet, TrendingUp, Globe, Twitter, Send, MessageCircle, ExternalLink, LineChart } from 'lucide-react';
 import * as f from '@/lib/format';
 import {
   TokenMark, TierBadge, Roi, Pnl, AddrChip, CopyIconButton,
@@ -22,6 +22,8 @@ interface SmartHolder {
   verified: boolean;
   solBought: number;
   pnlOnThisCoin: number;
+  unrealizedSol: number;
+  currentValueSol: number;
   tokensRemaining: number;
   buys: number;
   sells: number;
@@ -36,6 +38,12 @@ interface TokenInfo {
   icons?: string[];
   links?: TokenLink[];
   description?: string;
+  pairAddress?: string;
+  priceUsd?: number;
+  marketCapUsd?: number;
+  liquidityUsd?: number;
+  volume24hUsd?: number;
+  priceChange24h?: number;
 }
 
 function LinkIcon({ kind }: { kind: string }) {
@@ -50,9 +58,21 @@ function LinkIcon({ kind }: { kind: string }) {
 interface SmartHoldersResponse {
   mint: string;
   token?: TokenInfo;
+  priceSol?: number;
   traderCount: number;
   smartHolderCount: number;
   smartHolders: SmartHolder[];
+}
+
+// Compact USD formatter for live market stats.
+function usd(n?: number): string {
+  if (n == null || !Number.isFinite(n)) return '—';
+  const a = Math.abs(n);
+  if (a >= 1e9) return `$${(n / 1e9).toFixed(2)}B`;
+  if (a >= 1e6) return `$${(n / 1e6).toFixed(2)}M`;
+  if (a >= 1e3) return `$${(n / 1e3).toFixed(1)}K`;
+  if (a >= 1) return `$${n.toFixed(2)}`;
+  return `$${n.toPrecision(3)}`;
 }
 
 interface TokenSmartHoldersProps {
@@ -165,8 +185,9 @@ export default function TokenSmartHolders({ mint }: TokenSmartHoldersProps) {
     return (
       <div className="view stack gap-20">
         <SkCard h={110} />
-        <div className="stat-grid cols-3"><SkStat /><SkStat /><SkStat /></div>
-        <SkTable cols={6} rows={8} />
+        <SkCard h={460} />
+        <div className="stat-grid cols-4"><SkStat /><SkStat /><SkStat /><SkStat /></div>
+        <SkTable cols={8} rows={8} />
       </div>
     );
   }
@@ -191,26 +212,61 @@ export default function TokenSmartHolders({ mint }: TokenSmartHoldersProps) {
 
   const holders = data.smartHolders ?? [];
   const smartHolders = data.smartHolderCount ?? holders.length;
-  // Total SOL these smart wallets put into the coin (conviction signal).
-  const totalSolIn = holders.reduce((a, h) => a + (h.solBought || 0), 0);
-  // Average all-time ROI across the smart wallets holding this coin (real data).
+  // Live, marked-to-market aggregates across the smart holders.
+  const valueHeld = holders.reduce((a, h) => a + (h.currentValueSol || 0), 0);
+  const unrealizedTotal = holders.reduce((a, h) => a + (h.unrealizedSol || 0), 0);
+  const hasLive = holders.some((h) => h.currentValueSol > 0);
   const roiVals = holders.map((h) => h.allTimeRoiPct).filter((v): v is number => v != null && Number.isFinite(v));
   const avgRoi = roiVals.length ? roiVals.reduce((a, v) => a + v, 0) / roiVals.length : null;
+  const tk = data.token;
+  const chg = tk?.priceChange24h;
 
   return (
     <div className="view stack gap-20">
       <TitleCard mint={mint} token={data?.token} count={smartHolders} />
 
-      <div className="stat-grid cols-3">
+      {/* Live market stats (DexScreener) */}
+      {tk && (tk.marketCapUsd != null || tk.priceUsd != null) && (
+        <div className="metricbar">
+          <div className="mseg"><div className="k">Market cap</div><div className="v num">{usd(tk.marketCapUsd)}</div></div>
+          <div className="mseg"><div className="k">Price</div><div className="v num">{usd(tk.priceUsd)}</div></div>
+          <div className="mseg"><div className="k">Liquidity</div><div className="v num">{usd(tk.liquidityUsd)}</div></div>
+          <div className="mseg"><div className="k">Volume 24h</div><div className="v num">{usd(tk.volume24hUsd)}</div></div>
+          <div className="mseg"><div className="k">24h</div><div className={`v num ${chg == null ? '' : chg >= 0 ? 'pos' : 'neg'}`}>{chg == null ? '—' : `${chg >= 0 ? '+' : ''}${chg.toFixed(1)}%`}</div></div>
+        </div>
+      )}
+
+      {/* Live DexScreener chart */}
+      {tk?.pairAddress && (
+        <div className="card" style={{ overflow: 'hidden' }}>
+          <div className="card-head">
+            <h3><span className="ic"><LineChart size={16} /></span> Live chart</h3>
+            <span className="faint" style={{ fontSize: 12 }}>DexScreener</span>
+          </div>
+          <iframe
+            src={`https://dexscreener.com/solana/${tk.pairAddress}?embed=1&theme=dark&info=0&trades=0`}
+            title="DexScreener chart"
+            loading="lazy"
+            style={{ width: '100%', height: 460, border: 0, display: 'block' }}
+          />
+        </div>
+      )}
+
+      <div className="stat-grid cols-4">
         <div className="stat">
           <div className="stat-label"><span className="stat-ic accent"><Users size={15} /></span> Smart holders</div>
           <div className="stat-val num">{smartHolders}</div>
           <div className="stat-foot"><span className="faint">verified wallets holding now</span></div>
         </div>
         <div className="stat">
-          <div className="stat-label"><span className="stat-ic pos"><Wallet size={15} /></span> Smart SOL in</div>
-          <div className="stat-val num">{f.sol(totalSolIn)}<span className="unit">SOL</span></div>
-          <div className="stat-foot"><span className="faint">bought by these wallets</span></div>
+          <div className="stat-label"><span className="stat-ic pos"><Wallet size={15} /></span> Value held</div>
+          <div className="stat-val num">{hasLive ? f.sol(valueHeld) : '—'}<span className="unit">SOL</span></div>
+          <div className="stat-foot"><span className="faint">remaining bags at live price</span></div>
+        </div>
+        <div className="stat">
+          <div className="stat-label"><span className="stat-ic"><TrendingUp size={15} /></span> Unrealized PnL</div>
+          <div className="stat-val">{hasLive ? <Pnl value={unrealizedTotal} /> : <span className="faint">—</span>}</div>
+          <div className="stat-foot"><span className="faint">open positions, marked to market</span></div>
         </div>
         <div className="stat">
           <div className="stat-label"><span className="stat-ic"><TrendingUp size={15} /></span> Avg wallet ROI</div>
@@ -244,7 +300,8 @@ export default function TokenSmartHolders({ mint }: TokenSmartHoldersProps) {
                   <th className="c">Tier</th>
                   <th className="r">Wallet ROI</th>
                   <th className="r">Value</th>
-                  <th className="r">PnL</th>
+                  <th className="r">Unrealized</th>
+                  <th className="r">Realized</th>
                   <th className="c">Position</th>
                   <th className="r">Entry</th>
                 </tr>
@@ -261,7 +318,8 @@ export default function TokenSmartHolders({ mint }: TokenSmartHoldersProps) {
                       <td><AddrChip address={h.wallet} /></td>
                       <td className="c"><TierBadge tier={h.tier} /></td>
                       <td className="r"><Roi value={h.allTimeRoiPct} /></td>
-                      <td className="r num">{f.sol(h.solBought)} <span className="faint" style={{ fontSize: 11 }}>SOL</span></td>
+                      <td className="r num">{h.currentValueSol > 0 ? <>{f.sol(h.currentValueSol)} <span className="faint" style={{ fontSize: 11 }}>SOL</span></> : <span className="faint">—</span>}</td>
+                      <td className="r">{h.currentValueSol > 0 || h.unrealizedSol !== 0 ? <Pnl value={h.unrealizedSol} unit={false} /> : <span className="faint">—</span>}</td>
                       <td className="r"><Pnl value={h.pnlOnThisCoin} unit={false} /></td>
                       <td className="c"><span className={`badge ${pos.cls}`}>{pos.label}</span></td>
                       <td className="r faint" style={{ fontSize: 12 }}>{h.lastBuy ? f.ago(+new Date(h.lastBuy)) : '—'}</td>
