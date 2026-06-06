@@ -21,9 +21,9 @@ on:
     - cron: '0 1 * * *'    # daily    -> snapshot leaderboard (history)
   workflow_dispatch: {} # manual "Run workflow" button (runs everything)
 
-concurrency:
-  group: indexer-cron
-  cancel-in-progress: false
+# No workflow-level concurrency group: the drain (:30, ~55m) and the discovery
+# jobs (index :00, graduations :15) must run CONCURRENTLY for max throughput.
+# Each job is hourly with a bounded timeout < 60m, so same-job runs never overlap.
 
 env:
   # MUST point at the LIVE production deployment. If this is stale (preview URL,
