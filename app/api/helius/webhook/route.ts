@@ -27,7 +27,7 @@ import {
 } from '../../../../lib/indexer/live-bursts';
 import { readCooldowns, writeCooldowns } from '../../../../lib/alerts/cooldowns';
 import { sendAlert, escapeHtml } from '../../../../lib/alerts/notifier';
-import { sendWebPushToAll } from '../../../../lib/push';
+import { sendWebPushToAll, sendWebPushToOwner } from '../../../../lib/push';
 import { tokenLinks } from '../../../../lib/trade-links';
 
 export const dynamic = 'force-dynamic';
@@ -37,6 +37,11 @@ const CHUNK = 500;
 
 // Real-time burst-alert cooldown blob (mint -> last-alert epoch-ms).
 const BURST_COOLDOWN_KEY = 'alert_cooldowns_burst';
+// Separate cooldown blob for sell/exit bursts so they never share suppression
+// with buy bursts (a token can fire a buy burst and later an exit burst).
+const SELL_BURST_COOLDOWN_KEY = 'alert_cooldowns_sell_burst';
+// Per-user watchlist push de-dup, keyed `${owner}:${mint}` -> last-push ms.
+const WATCH_COOLDOWN_KEY = 'alert_cooldowns_watch';
 
 function envInt(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -56,6 +61,12 @@ function fmtSol(n: number): string {
   if (!Number.isFinite(n)) return '0';
   if (n >= 100) return Math.round(n).toString();
   return (Math.round(n * 100) / 100).toString();
+}
+
+/** Short, human-friendly wallet form, e.g. "9xQa…7kPz". */
+function shortWallet(w: string): string {
+  if (!w || w.length <= 10) return w;
+  return `${w.slice(0, 4)}…${w.slice(-4)}`;
 }
 
 /** "2×S · 1×A" style summary of the tiers present in a burst. */
@@ -97,6 +108,11 @@ async function runBurstAlerts(touchedMints: string[]): Promise<void> {
       windowSec: 30,
       minBuyers,
     });
+
+    // PER-USER WATCHLIST PUSH — fires for ANY detected buy burst (even below the
+    // broadcast bar), since each such user explicitly opted into that wallet.
+    // Runs off the SAME detected bursts; one watchlists query per batch.
+    await runWatchlistPush(bursts, now);
 
     // QUALITY GATE — higher bar than the feed.
     const qualified = bursts.filter((b: LiveBurst) => {
@@ -163,9 +179,190 @@ async function runBurstAlerts(touchedMints: string[]): Promise<void> {
     }
 
     if (stamped) await writeCooldowns(BURST_COOLDOWN_KEY, cooldowns);
+
+    // EXIT / SELL-BURST ALERTS — distinct broadcast, separate cooldown blob.
+    await runSellBurstAlerts(mints, now);
   } catch (error) {
     // Alerting must NEVER affect ingestion.
     console.error('[HELIUS WEBHOOK] burst alert step failed:', (error as Error).message);
+  }
+}
+
+/**
+ * EXIT / SELL-BURST broadcast: detects ≥N distinct smart-money ENTITIES SELLING
+ * the same token within the window and, when the gate passes (min entities + min
+ * SOL), broadcasts a distinct "smart money EXITING" alert via Telegram + web
+ * push. Uses a SEPARATE per-mint cooldown blob so it never collides with buy
+ * bursts. Env-gated; mirrors the buy path's stamp-on-delivery + try/catch
+ * isolation. Wrapped so any failure is swallowed.
+ */
+async function runSellBurstAlerts(mints: string[], now: number): Promise<void> {
+  try {
+    if (process.env.ALERT_SELL_BURSTS === '0') return;
+
+    const minEntities = envInt('ALERT_SELL_MIN_ENTITIES', 3);
+    const minSol = envNum('ALERT_SELL_MIN_SOL', 5);
+    const cooldownMin = envInt('ALERT_SELL_COOLDOWN_MIN', 30);
+    const cooldownMs = cooldownMin * 60_000;
+
+    const bursts = await detectBurstsForMints(mints, {
+      windowSec: 30,
+      minBuyers: minEntities,
+      side: 'sell',
+    });
+
+    // GATE — min entities + real SOL size.
+    const qualified = bursts.filter((b: LiveBurst) => {
+      if (b.buyers < minEntities) return false;
+      if (b.solTotal < minSol) return false;
+      return true;
+    });
+    if (qualified.length === 0) return;
+
+    // Keep the strongest exit (most entities, then most SOL) per mint.
+    const bestByMint = new Map<string, LiveBurst>();
+    for (const b of qualified) {
+      const cur = bestByMint.get(b.mint);
+      if (!cur || b.buyers > cur.buyers || (b.buyers === cur.buyers && b.solTotal > cur.solTotal)) {
+        bestByMint.set(b.mint, b);
+      }
+    }
+
+    const cooldowns = await readCooldowns(SELL_BURST_COOLDOWN_KEY);
+    let stamped = false;
+
+    for (const [mint, b] of bestByMint) {
+      const last = cooldowns[mint];
+      if (typeof last === 'number' && now - last < cooldownMs) continue; // cooling
+
+      const symbol = b.symbol ? `$${b.symbol}` : `${mint.slice(0, 6)}…`;
+      const trade = tokenLinks(mint).find((l) => l.kind === 'trade');
+      const link = trade
+        ? `\n<a href="${escapeHtml(trade.url)}">${escapeHtml(trade.label)}</a>`
+        : '';
+      const text =
+        `🔴 <b>Smart money EXITING ${escapeHtml(symbol)}</b> — ${b.buyers} entities ` +
+        `sold ${fmtSol(b.solTotal)} SOL in 30s` +
+        `\n<code>${escapeHtml(mint)}</code>` +
+        link;
+
+      try {
+        const delivered = await sendAlert(text);
+        if (delivered) {
+          cooldowns[mint] = now; // stamp ONLY on confirmed delivery
+          stamped = true;
+        }
+      } catch (error) {
+        console.error('[HELIUS WEBHOOK] sell-burst alert send failed for', mint, (error as Error).message);
+      }
+
+      try {
+        await sendWebPushToAll({
+          title: `🔴 Smart money exiting ${symbol}`,
+          body: `${b.buyers} entities sold ${fmtSol(b.solTotal)} SOL in 30s`,
+          url: `/token/${mint}`,
+        });
+      } catch (error) {
+        console.error('[HELIUS WEBHOOK] sell-burst web push failed for', mint, (error as Error).message);
+      }
+    }
+
+    if (stamped) await writeCooldowns(SELL_BURST_COOLDOWN_KEY, cooldowns);
+  } catch (error) {
+    console.error('[HELIUS WEBHOOK] sell-burst alert step failed:', (error as Error).message);
+  }
+}
+
+/**
+ * PER-USER WATCHLIST PUSH: for the given detected BUY bursts, find owners who
+ * watch any wallet present in a burst and push them a personal alert. One
+ * watchlists query per webhook batch (NOT per burst). De-duped per (owner, mint)
+ * via a cooldown blob, and muted owners (alert_prefs.muted) are skipped.
+ * Wrapped so any failure is swallowed.
+ */
+async function runWatchlistPush(bursts: LiveBurst[], now: number): Promise<void> {
+  try {
+    if (bursts.length === 0 || !isSupabaseConfigured()) return;
+
+    // Collect the full distinct wallet set across all bursts.
+    const allWallets = new Set<string>();
+    for (const b of bursts) for (const w of b.wallets ?? []) allWallets.add(w);
+    if (allWallets.size === 0) return;
+
+    const supabase = getSupabase();
+
+    // ONE query: which owners watch any wallet in these bursts.
+    const { data: watchRows, error: watchErr } = await supabase
+      .from('watchlists')
+      .select('owner_id, address')
+      .in('address', Array.from(allWallets));
+    if (watchErr || !watchRows || watchRows.length === 0) return;
+
+    // wallet -> owners watching it.
+    const ownersByWallet = new Map<string, Set<string>>();
+    const owners = new Set<string>();
+    for (const r of watchRows as { owner_id: string; address: string }[]) {
+      if (!r.owner_id || !r.address) continue;
+      owners.add(r.owner_id);
+      let set = ownersByWallet.get(r.address);
+      if (!set) {
+        set = new Set();
+        ownersByWallet.set(r.address, set);
+      }
+      set.add(r.owner_id);
+    }
+    if (owners.size === 0) return;
+
+    // Honor mutes: fetch muted owners among the matched set (best-effort).
+    const muted = new Set<string>();
+    try {
+      const { data: prefRows } = await supabase
+        .from('alert_prefs')
+        .select('owner_id, muted')
+        .in('owner_id', Array.from(owners));
+      for (const p of (prefRows ?? []) as { owner_id: string; muted: boolean }[]) {
+        if (p.muted) muted.add(p.owner_id);
+      }
+    } catch {
+      // alert_prefs missing / pre-migration → treat all as unmuted.
+    }
+
+    const cooldownMs = envInt('ALERT_WATCH_COOLDOWN_MIN', 30) * 60_000;
+    const cooldowns = await readCooldowns(WATCH_COOLDOWN_KEY);
+    let stamped = false;
+
+    for (const b of bursts) {
+      const mint = b.mint;
+      const symbol = b.symbol ? `$${b.symbol}` : `${mint.slice(0, 6)}…`;
+      // Map each matched (owner, wallet) so the body names the watched wallet.
+      for (const w of b.wallets ?? []) {
+        const ownerSet = ownersByWallet.get(w);
+        if (!ownerSet) continue;
+        for (const owner of ownerSet) {
+          if (muted.has(owner)) continue;
+          const ckey = `${owner}:${mint}`;
+          const last = cooldowns[ckey];
+          if (typeof last === 'number' && now - last < cooldownMs) continue;
+          // Stamp first so multiple matching wallets for one (owner, mint) only
+          // push once per batch.
+          cooldowns[ckey] = now;
+          stamped = true;
+          try {
+            await sendWebPushToOwner(owner, {
+              title: '⭐ Watched wallet just bought',
+              body: `${shortWallet(w)} aped ${symbol} — ${fmtSol(b.solTotal)} SOL`,
+              url: `/token/${mint}`,
+            });
+          } catch (error) {
+            console.error('[HELIUS WEBHOOK] watchlist push failed for', owner, (error as Error).message);
+          }
+        }
+      }
+    }
+
+    if (stamped) await writeCooldowns(WATCH_COOLDOWN_KEY, cooldowns);
+  } catch (error) {
+    console.error('[HELIUS WEBHOOK] watchlist push step failed:', (error as Error).message);
   }
 }
 

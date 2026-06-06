@@ -47,6 +47,13 @@ export interface LiveBurst {
   /** Up to 5 distinct buyer wallet addresses from the window. */
   sampleBuyers: string[];
   /**
+   * FULL distinct buyer/seller wallet address set in the window (pre-cluster).
+   * Used for per-user watchlist matching; `sampleBuyers` stays the 5-cap UI set.
+   */
+  wallets: string[];
+  /** Which side of the trade this burst represents. Defaults to 'buy'. */
+  side: 'buy' | 'sell';
+  /**
    * Tier string (S/A/B/C) or null per buyer, ALIGNED to `sampleBuyers` order.
    * Derived from each wallet's composite score via tierFromScore.
    */
@@ -268,7 +275,8 @@ function detectBurstsForRows(
   windowSec: number,
   minBuyers: number,
   scoreByWallet: Map<string, number>,
-  now: number
+  now: number,
+  side: 'buy' | 'sell' = 'buy'
 ): LiveBurst[] {
   const windowMs = windowSec * 1000;
   const out: LiveBurst[] = [];
@@ -314,6 +322,8 @@ function detectBurstsForRows(
         windowStart: new Date(windowStartMs).toISOString(),
         windowEnd: new Date(windowEndMs).toISOString(),
         sampleBuyers,
+        wallets: Array.from(wallets),
+        side,
         tiers,
         finalized: windowEndMs < now - windowMs,
       });
@@ -452,11 +462,18 @@ export async function getLiveBursts(opts: {
  */
 export async function detectBurstsForMints(
   mints: string[],
-  opts?: { windowSec?: number; minBuyers?: number; lookbackMs?: number }
+  opts?: {
+    windowSec?: number;
+    minBuyers?: number;
+    lookbackMs?: number;
+    side?: 'buy' | 'sell';
+  }
 ): Promise<LiveBurst[]> {
   const windowSec = opts?.windowSec ?? 30;
   const minBuyers = opts?.minBuyers ?? 3;
   const lookbackMs = opts?.lookbackMs ?? 5 * 60 * 1000;
+  const side = opts?.side ?? 'buy';
+  const tradeType = side === 'sell' ? 'SELL' : 'BUY';
 
   const uniqueMints = Array.from(
     new Set(mints.filter((m) => typeof m === 'string' && m))
@@ -472,15 +489,15 @@ export async function detectBurstsForMints(
 
     const sinceIso = new Date(now - lookbackMs).toISOString();
 
-    // Pull recent BUYs for the given mints, newest first, then filter to smart
-    // wallets in memory. Scoping by mint (a short .in() list) keeps this cheap
-    // enough for the per-webhook hot path.
+    // Pull recent trades (BUY or SELL per `side`) for the given mints, newest
+    // first, then filter to smart wallets in memory. Scoping by mint (a short
+    // .in() list) keeps this cheap enough for the per-webhook hot path.
     const trades: any[] = [];
     for (const group of chunk(uniqueMints, WALLET_CHUNK)) {
       const tradeRead = await supabase
         .from('trades')
         .select('wallet, token_mint, amount, price, block_time')
-        .eq('trade_type', 'BUY')
+        .eq('trade_type', tradeType)
         .in('token_mint', group)
         .gte('block_time', sinceIso)
         .order('block_time', { ascending: false })
@@ -521,7 +538,8 @@ export async function detectBurstsForMints(
           windowSec,
           minBuyers,
           scoreByWallet,
-          now
+          now,
+          side
         )
       );
     }

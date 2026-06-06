@@ -75,13 +75,41 @@ export function getPublicVapidKey(): string | null {
  * Never throws.
  */
 export async function sendWebPushToAll(payload: WebPushPayload): Promise<void> {
+  return sendWebPushToSubscribers(payload, null);
+}
+
+/**
+ * Send a push payload to ONLY one owner's stored subscriptions (the per-device
+ * `owner_id` shared with the watchlist). Same resilience contract as
+ * sendWebPushToAll: no VAPID / no Supabase / no subscriptions → silent no-op,
+ * per-subscription failures logged not thrown, dead subscriptions pruned. Used
+ * for per-user watchlist-burst pushes. Never throws.
+ */
+export async function sendWebPushToOwner(
+  ownerId: string,
+  payload: WebPushPayload
+): Promise<void> {
+  if (!ownerId) return;
+  return sendWebPushToSubscribers(payload, ownerId);
+}
+
+/**
+ * Shared fan-out: when `ownerId` is null, target all subscriptions; otherwise
+ * only that owner's rows. Best-effort and resilient; never throws.
+ */
+async function sendWebPushToSubscribers(
+  payload: WebPushPayload,
+  ownerId: string | null
+): Promise<void> {
   try {
     if (!ensureVapid() || !isSupabaseConfigured()) return;
 
     const supabase = getSupabase();
-    const { data, error } = await supabase
+    let query = supabase
       .from('push_subscriptions')
       .select('endpoint, p256dh, auth');
+    if (ownerId !== null) query = query.eq('owner_id', ownerId);
+    const { data, error } = await query;
 
     if (error || !data || data.length === 0) return;
 
@@ -120,6 +148,6 @@ export async function sendWebPushToAll(payload: WebPushPayload): Promise<void> {
     }
   } catch (error) {
     // Alerting must NEVER affect ingestion.
-    console.error('[PUSH] sendWebPushToAll failed:', (error as Error).message);
+    console.error('[PUSH] sendWebPushToSubscribers failed:', (error as Error).message);
   }
 }
