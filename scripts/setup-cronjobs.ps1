@@ -17,10 +17,16 @@ $EVERY = @(-1)                                              # cron-job.org "ever
 
 # Job list — mirrors CRON_SETUP.md. m = minutes, h = hours (default every hour).
 $jobs = @(
-  @{ t="drain-shard-0";       p="/api/cron/seed-wallets?maxWallets=30&shard=0&shards=4&timeBudgetMs=24000"; m=$EVERY },
-  @{ t="drain-shard-1";       p="/api/cron/seed-wallets?maxWallets=30&shard=1&shards=4&timeBudgetMs=24000"; m=$EVERY },
-  @{ t="drain-shard-2";       p="/api/cron/seed-wallets?maxWallets=30&shard=2&shards=4&timeBudgetMs=24000"; m=$EVERY },
-  @{ t="drain-shard-3";       p="/api/cron/seed-wallets?maxWallets=30&shard=3&shards=4&timeBudgetMs=24000"; m=$EVERY },
+  # --- seed-wallets drain (shards 0-3) ---
+  # Down-tuned from every-minute to every-5-min to cut ~80% of drain Helius spend.
+  # The Helius webhook now ingests the verified smart set's new trades in real time,
+  # so the drain no longer needs minute cadence to keep verified wallets fresh.
+  # Its remaining job is DISCOVERY/verification of NEW/unverified wallets, which a
+  # steady every-5-min pass clears the backlog for. Kept all 4 shards + timeBudgetMs.
+  @{ t="drain-shard-0";       p="/api/cron/seed-wallets?maxWallets=30&shard=0&shards=4&timeBudgetMs=24000"; m=(Every 5) },
+  @{ t="drain-shard-1";       p="/api/cron/seed-wallets?maxWallets=30&shard=1&shards=4&timeBudgetMs=24000"; m=(Every 5) },
+  @{ t="drain-shard-2";       p="/api/cron/seed-wallets?maxWallets=30&shard=2&shards=4&timeBudgetMs=24000"; m=(Every 5) },
+  @{ t="drain-shard-3";       p="/api/cron/seed-wallets?maxWallets=30&shard=3&shards=4&timeBudgetMs=24000"; m=(Every 5) },
   @{ t="index";               p="/api/cron/index?maxTokens=10";                          m=(Every 2) },
   @{ t="graduations-shard-0"; p="/api/cron/graduations?maxCoins=3&shard=0&shards=3";      m=(Every 3) },
   @{ t="graduations-shard-1"; p="/api/cron/graduations?maxCoins=3&shard=1&shards=3";      m=(Every 3) },
