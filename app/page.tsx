@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { isValidPublicKey } from '@/lib/solana';
 import SearchBar from '@/components/SearchBar';
+import Dashboard from '@/components/Dashboard';
 import Link from 'next/link';
 import { Zap } from 'lucide-react';
 
@@ -40,6 +41,9 @@ export default function Home() {
 
   return (
     <div className="space-y-12 py-12">
+      {/* Smart money dashboard */}
+      <Dashboard />
+
       {/* Hero */}
       <div className="text-center space-y-4">
         <h2 className="text-4xl font-bold bg-gradient-to-r from-blue-400 to-cyan-400 bg-clip-text text-transparent">

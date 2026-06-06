@@ -86,6 +86,20 @@ create table if not exists coins (
 );
 create index if not exists coins_scanned_idx on coins (full_scanned_at);
 
+-- Daily leaderboard snapshots → rank/ROI over time, rising-wallet detection.
+create table if not exists leaderboard_snapshots (
+  wallet       text not null,
+  day          date not null,
+  rank         integer,
+  score        double precision,
+  roi_pct      double precision,
+  realized_pnl double precision,
+  captured_at  timestamptz not null default now(),
+  primary key (wallet, day)
+);
+create index if not exists leaderboard_snapshots_day_idx on leaderboard_snapshots (day);
+create index if not exists leaderboard_snapshots_wallet_idx on leaderboard_snapshots (wallet);
+
 -- Funding graph: smart wallets that sent SOL to other wallets. A fresh wallet
 -- funded by known smart money is almost always the same trader on a new wallet,
 -- so we link them and track the recipient forever.
