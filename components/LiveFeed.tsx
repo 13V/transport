@@ -260,7 +260,7 @@ function Header({
               className={windowSec === w ? 'on' : ''}
               onClick={() => onWindowSec(w)}
               aria-pressed={windowSec === w}
-              title={`Group buys within a ${w}s window`}
+              title={`Max gap between buys in an accumulation streak: ${w}s`}
             >
               {w}s
             </button>
@@ -498,7 +498,7 @@ export default function LiveFeed() {
           />
         </div>
       ) : (
-        <div className="stack gap-12">
+        <div className="bf-list stack gap-8">
           {bursts.map((b) => {
             const symbol = b.symbol || f.short(b.mint, 4, 4);
             const startMs = ms(b.windowStart);
@@ -507,6 +507,13 @@ export default function LiveFeed() {
               startMs != null && endMs != null
                 ? Math.max(0, Math.round((endMs - startMs) / 1000))
                 : null;
+            // Burst duration as a tidy "over Xm"/"over Xs" string.
+            const durLabel =
+              spanSec == null
+                ? null
+                : spanSec >= 60
+                ? `over ${Math.round(spanSec / 60)}m`
+                : `over ${spanSec}s`;
             const isNew = newIds.has(b.id);
             const sample = b.sampleBuyers.slice(0, 4);
             const tiers = b.tiers ?? [];
@@ -524,128 +531,140 @@ export default function LiveFeed() {
             const mcap = usdCompact(b.marketCapUsd);
             const liq = usdCompact(b.liquidityUsd);
             const chg = b.priceChange24h;
+            // A burst is still accumulating until it's been finalized.
+            const isLive = b.finalized === false;
             return (
               <div
                 key={b.id}
-                className="card card-pad clickable"
+                className={`bf-row${isNew ? ' is-new' : ''}`}
                 onClick={() => router.push(`/token/${b.mint}`)}
-                style={
-                  isNew
-                    ? {
-                        borderLeft: `3px solid ${CHART_COLORS.ACCENT}`,
-                        animation: 'lf-fade-in 0.6s ease-out',
-                      }
-                    : undefined
-                }
               >
-                <div className="stack gap-10">
-                  <div className="row gap-10" style={{ alignItems: 'center' }}>
+                {/* LEFT: identity → hero SOL → accumulating cue → metrics → buyers */}
+                <div className="stack gap-10" style={{ minWidth: 0 }}>
+                  <div className="bf-id">
                     <TokenMark
                       symbol={b.symbol || b.mint}
                       icon={b.icon ?? undefined}
                       icons={b.icons ?? undefined}
-                      size={36}
+                      size={34}
                     />
-                    <div className="stack" style={{ gap: 2 }}>
-                      <div className="row gap-8">
-                        <b style={{ fontSize: 13 }}>{symbol}</b>
-                        {b.name && (
-                          <span
-                            className="faint"
-                            style={{
-                              fontSize: 11, maxWidth: 180, overflow: 'hidden',
-                              textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                            }}
-                          >
-                            {b.name}
-                          </span>
-                        )}
-                        <span className="faint" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
-                          {f.ago(endMs)}
-                        </span>
+                    <div className="bf-id-text">
+                      <div className="bf-ticker-line">
+                        <span className="bf-ticker">{symbol}</span>
+                        {b.name && <span className="bf-name">{b.name}</span>}
                       </div>
-                      <span className="mono faint" style={{ fontSize: 10.5 }}>
-                        {f.short(b.mint, 4, 4)}
-                      </span>
+                      <div className="bf-meta-line">
+                        <span className="bf-mint mono">{f.short(b.mint, 4, 4)}</span>
+                        <span className="bf-age">· {f.ago(endMs)}</span>
+                      </div>
                     </div>
                   </div>
 
-                  <div style={{ fontSize: 13.5, fontWeight: 600 }} className="row gap-8 wrap">
-                    <span>
-                      <span className="num pos" style={{ fontWeight: 700 }}>{b.buyers}</span>{' '}
-                      smart wallets bought within {windowSec}s
+                  {/* Hero: cumulative SOL is the headline now that bursts accumulate */}
+                  <div className="bf-hero">
+                    <span className="bf-sol">
+                      {f.sol(b.solTotal)}<span className="unit">SOL</span>
+                    </span>
+                    <span className="bf-wallets">
+                      <b>{b.buyers}</b> smart {b.buyers === 1 ? 'wallet' : 'wallets'}
                     </span>
                     {tierSummary && (
                       <span
-                        className="mono"
-                        style={{ fontWeight: 700, fontSize: 12, letterSpacing: '.02em', color: 'var(--text-2)' }}
+                        className="bf-tiermix"
                         title="Tiers of the sampled buyers (conviction at a glance)"
                       >
                         {tierSummary}
                       </span>
                     )}
-                    {isTrap ? (
-                      <span className="badge neg" title="Many wallets map to few entities — likely one actor faking a crowd">
-                        TRAP · {b.buyerWallets} wallets / {b.buyers} entities
-                      </span>
-                    ) : (
-                      b.buyerWallets > b.buyers && (
-                        <span className="faint" style={{ fontWeight: 500, fontSize: 12 }}>
-                          · {b.buyerWallets} wallets / {b.buyers} entities
+                  </div>
+
+                  {(isLive || (b.buyerWallets > b.buyers && !isTrap)) && (
+                    <div className="bf-sub">
+                      {isLive && (
+                        <span className="bf-accum" title="This burst is still growing as new buys land">
+                          ▲ accumulating
                         </span>
-                      )
-                    )}
-                  </div>
+                      )}
+                      {b.buyerWallets > b.buyers && !isTrap && (
+                        <span>{b.buyerWallets} wallets / {b.buyers} entities</span>
+                      )}
+                    </div>
+                  )}
 
-                  <div className="row gap-10 wrap faint" style={{ fontSize: 12 }}>
-                    <span>
-                      <span className="num">{f.sol(b.solTotal)}</span> SOL
-                    </span>
-                    {spanSec != null && <span>over {spanSec}s</span>}
-                  </div>
-
-                  {/* Live market context — render only fields that are present
-                      (no fake zeros); '—' is shown for absent metrics inline. */}
-                  {(mcap || liq || chg != null || lowLiq) && (
-                    <div className="row gap-12 wrap" style={{ fontSize: 12 }}>
+                  {/* Compact metric strip — render only fields that are present */}
+                  {(mcap || liq || (chg != null && Number.isFinite(chg)) || durLabel || isTrap || lowLiq) && (
+                    <div className="bf-metrics">
                       {mcap && (
-                        <span className="faint">
-                          MC <span className="num" style={{ color: 'var(--text)' }}>{mcap}</span>
-                        </span>
+                        <div className="bf-metric">
+                          <span className="k">MC</span>
+                          <span className="v">{mcap}</span>
+                        </div>
                       )}
                       {liq && (
-                        <span className="faint">
-                          Liq <span className="num" style={{ color: 'var(--text)' }}>{liq}</span>
-                        </span>
+                        <div className="bf-metric">
+                          <span className="k">Liq</span>
+                          <span className="v">{liq}</span>
+                        </div>
                       )}
                       {chg != null && Number.isFinite(chg) && (
-                        <span className="faint">
-                          24h{' '}
-                          <span className={`num ${chg >= 0 ? 'pos' : 'neg'}`} style={{ fontWeight: 650 }}>
-                            {f.pct(chg)}
-                          </span>
+                        <div className="bf-metric">
+                          <span className="k">24h</span>
+                          <span className={`v ${chg >= 0 ? 'pos' : 'neg'}`}>{f.pct(chg)}</span>
+                        </div>
+                      )}
+                      {durLabel && (
+                        <div className="bf-metric">
+                          <span className="k">Span</span>
+                          <span className="v dim">{durLabel}</span>
+                        </div>
+                      )}
+                      {isTrap && (
+                        <span
+                          className="bf-trap"
+                          style={{ alignSelf: 'center' }}
+                          title="Many wallets map to few entities — likely one actor faking a crowd"
+                        >
+                          TRAP · {b.buyerWallets}w / {b.buyers}e
                         </span>
                       )}
                       {lowLiq && (
-                        <span className="badge neg" title={`Liquidity under $${(LOW_LIQ_USD / 1000)}k — high rug risk`}>
-                          low liq
+                        <span
+                          className="bf-trap"
+                          style={{ alignSelf: 'center' }}
+                          title={`Liquidity under $${LOW_LIQ_USD / 1000}k — high rug risk`}
+                        >
+                          LOW LIQ
                         </span>
                       )}
                     </div>
                   )}
 
                   {sample.length > 0 && (
-                    <div className="row gap-10 wrap">
+                    <div className="bf-buyers">
                       {sample.map((addr, i) => (
-                        <span key={addr} className="row gap-8">
+                        <span key={addr} className="bf-buyer">
                           <AddrChip address={addr} />
                           {tiers[i] && <TierBadge tier={tiers[i]} />}
                         </span>
                       ))}
                     </div>
                   )}
+                </div>
 
-                  <TradeLinks mint={b.mint} size="xs" primary />
+                {/* RIGHT: live/ended status on top, prominent Ape + subdued links below */}
+                <div className="bf-right">
+                  {isLive ? (
+                    <span className="bf-status live" title="This burst is still being added to">
+                      <span className="dot" aria-hidden /> Live
+                    </span>
+                  ) : (
+                    <span className="bf-status ended" title={`Burst ended ${f.ago(endMs)}`}>
+                      ended
+                    </span>
+                  )}
+                  <div className="bf-actions">
+                    <TradeLinks mint={b.mint} size="xs" primary />
+                  </div>
                 </div>
               </div>
             );

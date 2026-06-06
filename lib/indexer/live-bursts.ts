@@ -12,10 +12,12 @@
  *      gate) + a wallet→entity (funding-cluster) map so wallets controlled by
  *      one trader collapse to a single entity, plus a wallet→score map for tiers.
  *   2. Pull their recent BUY trades over the last `hours`.
- *   3. Per token, sort buys ascending by time and slide a `windowSec` window;
- *      a window holding ≥ `minBuyers` DISTINCT ENTITIES is a burst. A
- *      non-overlapping sweep advances past each fired window so each token
- *      emits distinct bursts rather than dozens of overlapping near-duplicates.
+ *   3. Per token, sort buys ascending by time and group them into ACCUMULATION
+ *      STREAKS: consecutive buys whose gap to the previous buy is ≤ `windowSec`
+ *      belong to the same streak (momentum is still going). A streak with
+ *      ≥ `minBuyers` DISTINCT ENTITIES becomes a single burst whose SOL total and
+ *      buyer count KEEP GROWING as more smart money buys — sustained
+ *      accumulation is ONE growing burst, not many fragmented fixed windows.
  *
  * Degrades gracefully: any failure (Supabase unconfigured, missing columns,
  * cluster resolution error) returns an empty burst list instead of throwing.
@@ -29,25 +31,26 @@ import { tierFromScore } from '../format';
 
 export interface LiveBurst {
   /**
-   * Stable content hash of (mint, windowStartMs, minBuyers, windowSec). Stays
-   * constant as the window absorbs more buys, so clients can dedupe reliably.
+   * Stable content hash of (mint, windowStartMs, minBuyers, windowSec) where
+   * windowStartMs is the streak's FIRST buy. Stays constant as the streak keeps
+   * accumulating later buys, so clients can dedupe reliably.
    */
   id: string;
   mint: string;
-  /** Distinct smart-money ENTITIES (cluster-deduped) in the burst window. */
+  /** Distinct smart-money ENTITIES (cluster-deduped) over the whole streak. */
   buyers: number;
-  /** Raw distinct buyer WALLET addresses in the window (pre-cluster-dedup). */
+  /** Raw distinct buyer WALLET addresses over the streak (pre-cluster-dedup). */
   buyerWallets: number;
-  /** Sum of amount*price (SOL value) of buys in the window. */
+  /** Cumulative sum of amount*price (SOL value) over the whole streak. */
   solTotal: number;
-  /** ISO timestamp of the first buy in the burst window. */
+  /** ISO timestamp of the FIRST buy in the accumulation streak. */
   windowStart: string;
-  /** ISO timestamp of the last buy in the burst window. */
+  /** ISO timestamp of the LATEST buy in the accumulation streak. */
   windowEnd: string;
-  /** Up to 5 distinct buyer wallet addresses from the window. */
+  /** Up to 5 distinct buyer wallet addresses from the streak. */
   sampleBuyers: string[];
   /**
-   * FULL distinct buyer/seller wallet address set in the window (pre-cluster).
+   * FULL distinct buyer/seller wallet address set over the streak (pre-cluster).
    * Used for per-user watchlist matching; `sampleBuyers` stays the 5-cap UI set.
    */
   wallets: string[];
@@ -59,8 +62,9 @@ export interface LiveBurst {
    */
   tiers: (string | null)[];
   /**
-   * True once the window can no longer absorb new buys (windowEnd is older than
-   * windowSec before now), i.e. the burst is settled. False while still live.
+   * True once the streak can no longer absorb new buys (windowEnd is older than
+   * windowSec before now), i.e. accumulation has settled. False while the streak
+   * is still accumulating (more buys can extend it).
    */
   finalized: boolean;
   // Enrichment fields (left undefined here; the route fills these in).
@@ -264,10 +268,25 @@ interface BuyRow {
 }
 
 /**
- * Slide a non-overlapping window over one token's time-ordered buys and emit a
- * burst whenever a window covers ≥ minBuyers distinct entities. Shared by both
- * the full live sweep and the mint-scoped real-time detector so the dedup +
- * window logic stays identical.
+ * Group one token's time-ordered buys into ACCUMULATION STREAKS and emit a
+ * single growing burst per streak that reaches ≥ minBuyers distinct entities.
+ *
+ * A streak is a run of consecutive buys where each buy's gap to the PREVIOUS
+ * buy in the streak is ≤ windowSec — i.e. momentum never stalled for longer than
+ * windowSec. As long as the streak continues, distinct entities, distinct
+ * wallets, SOL total and windowEnd all KEEP ACCUMULATING, so when another smart
+ * wallet buys after, its SOL is ADDED to the running total rather than starting
+ * a separate fragmented card. windowStart is pinned to the streak's first buy,
+ * which keeps the burst id stable as the streak grows. When the gap to the next
+ * buy exceeds windowSec the streak ends and a new one begins.
+ *
+ * `windowSec` here means "max gap between consecutive buys to stay in one
+ * accumulation streak" (NOT a fixed bucket length). The input rows are already
+ * capped by the caller's lookback (`hours`/`lookbackMs`), so a perpetually-bought
+ * token can't produce an unbounded streak.
+ *
+ * Shared by both the full live sweep and the mint-scoped real-time detector so
+ * the dedup + streak logic stays identical (buy and sell sides alike).
  */
 function detectBurstsForRows(
   mint: string,
@@ -283,56 +302,75 @@ function detectBurstsForRows(
   // Sort ascending by time (chunked reads / fetch order can interleave).
   const rows = rowsUnsorted.slice().sort((a, b) => a.ts - b.ts);
 
-  let i = 0;
-  while (i < rows.length) {
-    const startTs = rows[i].ts;
-    const endLimit = startTs + windowMs;
-    let j = i;
-    while (j < rows.length && rows[j].ts <= endLimit) j++;
-    // Window is rows[i .. j-1].
-    const entities = new Set<string>();
-    const wallets = new Set<string>();
-    let solTotal = 0;
-    const sampleBuyers: string[] = [];
-    const sampleSeen = new Set<string>();
-    for (let k = i; k < j; k++) {
-      const r = rows[k];
-      entities.add(r.entity);
-      wallets.add(r.wallet);
-      solTotal += r.sol;
-      if (sampleBuyers.length < 5 && !sampleSeen.has(r.wallet)) {
-        sampleSeen.add(r.wallet);
-        sampleBuyers.push(r.wallet);
-      }
-    }
+  interface Streak {
+    startMs: number;
+    endMs: number;
+    prevMs: number;
+    entities: Set<string>;
+    wallets: Set<string>;
+    solTotal: number;
+    sampleBuyers: string[];
+    sampleSeen: Set<string>;
+  }
 
-    if (entities.size >= minBuyers) {
-      const windowStartMs = rows[i].ts;
-      const windowEndMs = rows[j - 1].ts;
-      const tiers = sampleBuyers.map((w) => {
-        const s = scoreByWallet.get(w);
-        return s == null ? null : tierFromScore(s);
-      });
-      out.push({
-        id: burstId(mint, windowStartMs, minBuyers, windowSec),
-        mint,
-        buyers: entities.size,
-        buyerWallets: wallets.size,
-        solTotal: Math.round(solTotal * 1e4) / 1e4,
-        windowStart: new Date(windowStartMs).toISOString(),
-        windowEnd: new Date(windowEndMs).toISOString(),
-        sampleBuyers,
-        wallets: Array.from(wallets),
-        side,
-        tiers,
-        finalized: windowEndMs < now - windowMs,
-      });
-      // Advance past this window's buys to keep bursts non-overlapping.
-      i = j;
-    } else {
-      i += 1;
+  // A streak only becomes a burst once it holds ≥ minBuyers distinct entities;
+  // emitted with the FULL accumulated totals so a sustained run is one card.
+  const flush = (s: Streak): void => {
+    if (s.entities.size < minBuyers) return;
+    const tiers = s.sampleBuyers.map((w) => {
+      const score = scoreByWallet.get(w);
+      return score == null ? null : tierFromScore(score);
+    });
+    out.push({
+      // id keyed on the streak's FIRST buy -> stable as the streak grows.
+      id: burstId(mint, s.startMs, minBuyers, windowSec),
+      mint,
+      buyers: s.entities.size,
+      buyerWallets: s.wallets.size,
+      solTotal: Math.round(s.solTotal * 1e4) / 1e4,
+      windowStart: new Date(s.startMs).toISOString(),
+      windowEnd: new Date(s.endMs).toISOString(),
+      sampleBuyers: s.sampleBuyers,
+      wallets: Array.from(s.wallets),
+      side,
+      tiers,
+      // Settled once the streak can no longer absorb a new buy within windowSec.
+      finalized: now - s.endMs > windowMs,
+    });
+  };
+
+  let streak: Streak | null = null;
+  for (const r of rows) {
+    // Continue the streak while the gap to the PREVIOUS buy is within windowSec;
+    // otherwise momentum stalled -> close this streak and open a fresh one.
+    if (streak && r.ts - streak.prevMs > windowMs) {
+      flush(streak);
+      streak = null;
+    }
+    if (!streak) {
+      streak = {
+        startMs: r.ts,
+        endMs: r.ts,
+        prevMs: r.ts,
+        entities: new Set(),
+        wallets: new Set(),
+        solTotal: 0,
+        sampleBuyers: [],
+        sampleSeen: new Set(),
+      };
+    }
+    // Accumulate this buy into the running streak (SOL adds to the total).
+    streak.endMs = r.ts;
+    streak.prevMs = r.ts;
+    streak.entities.add(r.entity);
+    streak.wallets.add(r.wallet);
+    streak.solTotal += r.sol;
+    if (streak.sampleBuyers.length < 5 && !streak.sampleSeen.has(r.wallet)) {
+      streak.sampleSeen.add(r.wallet);
+      streak.sampleBuyers.push(r.wallet);
     }
   }
+  if (streak) flush(streak);
 
   return out;
 }
@@ -456,8 +494,9 @@ export async function getLiveBursts(opts: {
 /**
  * Mint-SCOPED burst sweep for real-time alerts: given a small set of mints
  * (e.g. those just seen in a webhook), pull only those mints' recent smart buys
- * over a short lookback and detect bursts using the same entity-dedup window
- * logic as getLiveBursts. Tiers are populated; market enrichment is left to the
+ * over a short lookback and detect bursts using the same entity-dedup
+ * accumulation-streak logic as getLiveBursts. Tiers are populated; market
+ * enrichment is left to the
  * caller (optional here). Degrades to an empty list on any failure.
  */
 export async function detectBurstsForMints(
