@@ -116,6 +116,19 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
 
   const fresh = freshnessFor(lastIndexMs);
 
+  // When THIS view was loaded. The topbar "Updated" reflects the freshness of
+  // what you're looking at (every page fetches on mount, and token market data
+  // is live), so it resets on each navigation — distinct from the indexer's own
+  // last-run age, which the dot colour + tooltip still surface honestly.
+  const [loadedAt, setLoadedAt] = useState<number>(() => Date.now());
+  useEffect(() => { setLoadedAt(Date.now()); }, [pathname]);
+  // Re-render every 30s so the "Updated Xm ago" label ages while you sit here.
+  const [, setNowTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setNowTick((n) => n + 1), 30_000);
+    return () => clearInterval(id);
+  }, []);
+
   // "/" focuses global search
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -199,18 +212,21 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           <span className="topbar-sep" aria-hidden="true" />
           <span
             className="topbar-meta"
-            title={lastIndexMs ? `Last index run ${f.time(lastIndexMs)}` : 'Indexer status unavailable'}
+            title={
+              `View loaded ${f.time(loadedAt)}` +
+              (statusReady
+                ? lastIndexMs
+                  ? ` · smart-money index updated ${f.time(lastIndexMs)}`
+                  : ' · index status unavailable'
+                : '')
+            }
           >
             <span
               className={`net-dot ${fresh.live ? 'live' : ''}`}
               style={{ background: fresh.color, boxShadow: `0 0 0 3px ${fresh.color}22` }}
               aria-hidden="true"
             />
-            <span suppressHydrationWarning>
-              {!statusReady ? 'Updating…'
-                : lastIndexMs ? `Updated ${f.ago(lastIndexMs)}`
-                : 'Status unavailable'}
-            </span>
+            <span suppressHydrationWarning>{`Updated ${f.ago(loadedAt)}`}</span>
           </span>
           <div className="topbar-right">
             {/* Token-gating affordance. Renders ONLY when the gating flag is on

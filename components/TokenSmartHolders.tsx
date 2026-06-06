@@ -392,12 +392,24 @@ export default function TokenSmartHolders({ mint }: TokenSmartHoldersProps) {
         <div className="card" style={{ overflow: 'hidden' }}>
           <div className="card-head">
             <h3><span className="ic"><LineChart size={16} /></span> Live chart</h3>
-            <span className="faint" style={{ fontSize: 12 }}>DexScreener</span>
+            <a
+              className="faint"
+              style={{ fontSize: 12, textDecoration: 'none' }}
+              href={`https://dexscreener.com/solana/${tk.pairAddress}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Open full chart on DexScreener"
+            >
+              DexScreener ↗
+            </a>
           </div>
+          {/* Eager-load (not lazy): this is the card's primary content, and a
+              lazy iframe inside an `overflow:hidden` card can stay blank when the
+              intersection math is thrown off. The header link above is always a
+              working fallback if the embed itself fails to render. */}
           <iframe
             src={`https://dexscreener.com/solana/${tk.pairAddress}?embed=1&theme=dark&info=0&trades=0`}
             title="DexScreener chart"
-            loading="lazy"
             // Responsive height: shorter on small/mobile viewports, capped at
             // 460px on desktop. Avoids a 460px chart dominating a phone screen.
             style={{ width: '100%', height: 'clamp(320px, 52vh, 460px)', border: 0, display: 'block' }}
