@@ -47,7 +47,7 @@ export function pct(n: number | null | undefined, d = 1): string {
 }
 
 export function ago(ms?: number | null): string {
-  if (!ms) return '—';
+  if (ms == null || !Number.isFinite(ms)) return '—';
   const diff = Date.now() - ms;
   if (diff < 0) return 'just now';
   const s = Math.floor(diff / 1000);

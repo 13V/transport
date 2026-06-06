@@ -119,6 +119,25 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
   useEffect(() => {
     let cancelled = false;
 
+    // Cluster ROI is enrichment: fetch it in parallel with the core profile so
+    // it never gates the main render, and never let a failure here break the
+    // core profile view.
+    async function loadCluster() {
+      try {
+        const clusterRes = await fetch(`/api/wallet/${walletAddress}/cluster`);
+        if (clusterRes.ok) {
+          const clusterJson = (await clusterRes.json()) as ClusterResponse;
+          if (!cancelled) {
+            setClusterMembers(
+              Array.isArray(clusterJson?.members) ? clusterJson.members : []
+            );
+          }
+        }
+      } catch {
+        /* enrichment only — ignore */
+      }
+    }
+
     async function load() {
       setLoading(true);
       setError(null);
@@ -139,22 +158,6 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
           setProfile(profileJson);
           setHoldings(holdingsJson);
         }
-
-        // Cluster ROI is enrichment: fetch it separately and never let a
-        // failure here break the core profile view.
-        try {
-          const clusterRes = await fetch(`/api/wallet/${walletAddress}/cluster`);
-          if (clusterRes.ok) {
-            const clusterJson = (await clusterRes.json()) as ClusterResponse;
-            if (!cancelled) {
-              setClusterMembers(
-                Array.isArray(clusterJson?.members) ? clusterJson.members : []
-              );
-            }
-          }
-        } catch {
-          /* enrichment only — ignore */
-        }
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : 'Failed to load wallet profile');
@@ -165,6 +168,7 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
     }
 
     load();
+    loadCluster();
     return () => {
       cancelled = true;
     };
@@ -314,7 +318,7 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
 
         <div className="kv">
           <div className="kv-item"><div className="k">Win rate</div><div className="v">{stats?.winRate != null ? `${Math.round(stats.winRate * 100)}%` : '—'}</div></div>
-          <div className="kv-item"><div className="k">Consistency</div><div className="v">{stats?.consistency != null ? `${stats.consistency}/100` : '—'}</div></div>
+          <div className="kv-item"><div className="k">Consistency</div><div className="v">{stats?.consistency != null ? `${Math.round(stats.consistency * 100)}/100` : '—'}</div></div>
           <div className="kv-item"><div className="k">Total trades</div><div className="v num">{f.num(stats?.totalTrades)}</div></div>
           <div className="kv-item"><div className="k">Tokens traded</div><div className="v num">{f.num(stats?.tokensTraded)}</div></div>
           <div className="kv-item"><div className="k">Invested</div><div className="v num">{f.sol(stats?.investedSol)} SOL</div></div>

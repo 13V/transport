@@ -447,7 +447,7 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
         <div className="card">
           <ErrorState
             title="Leaderboard unavailable"
-            msg="The ranking service didn’t respond. Cached data may be stale."
+            msg="Couldn’t load the leaderboard — this is usually transient. Retry."
             onRetry={() => {
               setLoading(true);
               setError(null);

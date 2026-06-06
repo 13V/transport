@@ -24,7 +24,7 @@ import { tierFromScore } from '../../../../../lib/format';
 import { getTokenMeta } from '../../../../../lib/token-meta';
 import { fetchTokenPricesSol } from '../../../../../lib/prices/price-oracle';
 
-export const dynamic = 'force-dynamic';
+export const revalidate = 30;
 export const maxDuration = 30;
 
 const WALLET_CHUNK = 200;
@@ -58,10 +58,13 @@ export async function GET(
 ) {
   const { mint } = await params;
   if (!mint || mint.length < 32 || mint.length > 64) {
-    return NextResponse.json({ error: 'Invalid mint address' }, { status: 400 });
+    return NextResponse.json(
+      { error: 'Invalid mint address' },
+      { status: 400, headers: { 'Cache-Control': 'no-store' } }
+    );
   }
 
-  const headers = { 'Cache-Control': 'public, max-age=60' };
+  const headers = { 'Cache-Control': 'public, s-maxage=30, stale-while-revalidate=300' };
 
   // Token identity (logo / ticker / name) for the page header — resolved once,
   // included in every response so the title shows even with zero smart holders.

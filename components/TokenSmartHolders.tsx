@@ -81,15 +81,37 @@ interface SmartHoldersResponse {
   netFlowSeries?: number[];
 }
 
+// Render a sub-$1 price without exponential notation. For tiny values we use
+// the "subscript zeros" convention common on DEX UIs (e.g. $0.0₈123 means
+// 0.0 followed by 8 zeros then 123), so pump tokens at 1.23e-8 read cleanly.
+const SUBSCRIPTS = '₀₁₂₃₄₅₆₇₈₉';
+function subscript(n: number): string {
+  return String(n).split('').map((d) => SUBSCRIPTS[+d]).join('');
+}
+function smallUsd(n: number): string {
+  const sign = n < 0 ? '-' : '';
+  const a = Math.abs(n);
+  if (a === 0) return '$0.00';
+  if (a >= 0.01) return `${sign}$${a.toFixed(a >= 0.1 ? 3 : 4)}`;
+  // Count the leading zeros after the decimal point (epsilon guards FP edges
+  // on exact powers of ten, e.g. 0.001 → log10 of -2.9999…).
+  const zeros = Math.max(0, -Math.floor(Math.log10(a) + 1e-12) - 1);
+  // Up to ~4 significant digits, stripped of trailing zeros.
+  const sig = (a * Math.pow(10, zeros + 4)).toFixed(0).replace(/0+$/, '') || '0';
+  if (zeros <= 3) return `${sign}$0.${'0'.repeat(zeros)}${sig}`;
+  return `${sign}$0.0${subscript(zeros)}${sig}`;
+}
+
 // Compact USD formatter for live market stats.
 function usd(n?: number): string {
   if (n == null || !Number.isFinite(n)) return '—';
   const a = Math.abs(n);
+  if (a >= 1e12) return `$${(n / 1e12).toFixed(2)}T`;
   if (a >= 1e9) return `$${(n / 1e9).toFixed(2)}B`;
   if (a >= 1e6) return `$${(n / 1e6).toFixed(2)}M`;
   if (a >= 1e3) return `$${(n / 1e3).toFixed(1)}K`;
   if (a >= 1) return `$${n.toFixed(2)}`;
-  return `$${n.toPrecision(3)}`;
+  return smallUsd(n);
 }
 
 interface TokenSmartHoldersProps {
@@ -376,7 +398,9 @@ export default function TokenSmartHolders({ mint }: TokenSmartHoldersProps) {
             src={`https://dexscreener.com/solana/${tk.pairAddress}?embed=1&theme=dark&info=0&trades=0`}
             title="DexScreener chart"
             loading="lazy"
-            style={{ width: '100%', height: 460, border: 0, display: 'block' }}
+            // Responsive height: shorter on small/mobile viewports, capped at
+            // 460px on desktop. Avoids a 460px chart dominating a phone screen.
+            style={{ width: '100%', height: 'clamp(320px, 52vh, 460px)', border: 0, display: 'block' }}
           />
         </div>
       )}

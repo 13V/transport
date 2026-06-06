@@ -18,7 +18,11 @@ import { getSupabase, isSupabaseConfigured } from '../../../../lib/supabase-clie
 import { getSmartCriteria, isSmartWallet } from '../../../../lib/indexer/curation';
 import { tierFromScore } from '../../../../lib/format';
 
-export const dynamic = 'force-dynamic';
+export const revalidate = 60;
+
+const CACHE_HEADERS = {
+  'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=300',
+};
 
 interface SmartWalletRow {
   address: string;
@@ -45,7 +49,7 @@ export async function GET(request: NextRequest) {
   if (!isSupabaseConfigured()) {
     return NextResponse.json(
       { error: 'Supabase not configured' },
-      { status: 503 }
+      { status: 503, headers: { 'Cache-Control': 'no-store' } }
     );
   }
 
@@ -123,7 +127,10 @@ export async function GET(request: NextRequest) {
       : extRead;
 
   if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json(
+      { error: error.message },
+      { status: 500, headers: { 'Cache-Control': 'no-store' } }
+    );
   }
 
   const hasVerifiedCol = !extRead.error;
@@ -174,7 +181,7 @@ export async function GET(request: NextRequest) {
       headers: {
         'Content-Type': 'text/plain; charset=utf-8',
         'Content-Disposition': 'attachment; filename="smart-wallets.txt"',
-        'Cache-Control': 'public, max-age=300',
+        ...CACHE_HEADERS,
       },
     });
   }
@@ -203,7 +210,7 @@ export async function GET(request: NextRequest) {
       headers: {
         'Content-Type': 'text/csv; charset=utf-8',
         'Content-Disposition': 'attachment; filename="smart-wallets.csv"',
-        'Cache-Control': 'public, max-age=300',
+        ...CACHE_HEADERS,
       },
     });
   }
@@ -215,6 +222,6 @@ export async function GET(request: NextRequest) {
       generatedAt: new Date().toISOString(),
       wallets,
     },
-    { headers: { 'Cache-Control': 'public, max-age=300' } }
+    { headers: CACHE_HEADERS }
   );
 }

@@ -28,6 +28,27 @@ const NAV: { group: string; items: NavItem[] }[] = [
 ];
 
 const B58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+// A real Solana pubkey (wallet OR mint) is 32 bytes → 43–44 base58 chars.
+// Anything shorter that still matches B58 is almost never a live address.
+const PUBKEY_LEN_MIN = 43;
+
+// Freshness palette for the network dot. We only ever colour it from the REAL
+// last-index time returned by /api/status — never a hardcoded "live" green.
+const FRESH_MS = 15 * 60 * 1000;   // < 15m  → healthy (green)
+const STALE_MS = 60 * 60 * 1000;   // < 60m  → lagging (amber), else stale (red)
+const DOT_GREEN = '#34D399';       // var(--pos)
+const DOT_AMBER = '#E2B86B';       // matches code-accent amber in globals.css
+const DOT_RED = '#FB7185';         // var(--neg)
+const DOT_GREY = '#4C5366';        // var(--text-4) — unknown / status unavailable
+
+type Freshness = { color: string; live: boolean };
+function freshnessFor(lastRunMs: number | null): Freshness {
+  if (lastRunMs == null) return { color: DOT_GREY, live: false };
+  const age = Date.now() - lastRunMs;
+  if (age < FRESH_MS) return { color: DOT_GREEN, live: true };
+  if (age < STALE_MS) return { color: DOT_AMBER, live: false };
+  return { color: DOT_RED, live: false };
+}
 
 function ownerFor(path: string): string {
   if (path === '/') return 'dashboard';
@@ -61,10 +82,37 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const owner = ownerFor(pathname);
   const searchRef = useRef<HTMLInputElement>(null);
-  const [updated, setUpdated] = useState<string>('');
+  // Real indexer freshness, sourced from /api/status (field: lastIndexRun.at).
+  // null = not yet loaded / unavailable → neutral grey dot, never a fake "live".
+  const [lastIndexMs, setLastIndexMs] = useState<number | null>(null);
+  const [statusReady, setStatusReady] = useState(false);
 
-  // client-only timestamp (avoids SSR hydration mismatch)
-  useEffect(() => { setUpdated(f.time(Date.now())); }, [pathname]);
+  // Poll real indexer freshness: once on mount + a light 60s refresh.
+  useEffect(() => {
+    let alive = true;
+    async function load() {
+      try {
+        const res = await fetch('/api/status', { cache: 'no-store' });
+        if (!res.ok) throw new Error(`status ${res.status}`);
+        const json = await res.json();
+        // lastIndexRun is the bookkeeping record { at: ISO, ... } from the
+        // indexer; .at is the wall-clock time of the last successful run.
+        const at = json?.lastIndexRun?.at;
+        const ms = at ? Date.parse(at) : NaN;
+        if (alive) {
+          setLastIndexMs(Number.isFinite(ms) ? ms : null);
+          setStatusReady(true);
+        }
+      } catch {
+        if (alive) { setLastIndexMs(null); setStatusReady(true); }
+      }
+    }
+    load();
+    const id = setInterval(load, 60_000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  const fresh = freshnessFor(lastIndexMs);
 
   // "/" focuses global search
   useEffect(() => {
@@ -82,8 +130,21 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
     if (e.key !== 'Enter') return;
     const v = e.currentTarget.value.trim();
     if (!v) return;
-    if (B58.test(v)) router.push(`/smart-money/${v}`);
-    else router.push(`/smart-money?q=${encodeURIComponent(v)}`);
+    // Routing heuristic. We can't tell a wallet from a token mint by string
+    // alone — both are 32-byte base58 pubkeys — so we route by VALIDITY, not by
+    // guessing the kind:
+    //   • Full-length pubkey (43–44 chars, valid base58) → wallet view. This is
+    //     the high-intent case (someone pasted an address); /smart-money/{addr}
+    //     resolves wallets and the page itself handles the not-a-wallet case.
+    //   • Anything else (names, tickers, partial input) → leaderboard search.
+    //   • Obviously-invalid base58-ish junk that's too short to be an address is
+    //     NOT pushed to a wallet route (which would 404); it falls through to the
+    //     forgiving leaderboard query instead.
+    if (B58.test(v) && v.length >= PUBKEY_LEN_MIN) {
+      router.push(`/smart-money/${v}`);
+    } else {
+      router.push(`/smart-money?q=${encodeURIComponent(v)}`);
+    }
     e.currentTarget.blur();
   }
 
@@ -120,7 +181,12 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         </nav>
         <div className="side-foot">
           <div className="side-status">
-            <span className="net-dot live" aria-hidden="true" /> <span className="mono">Solana mainnet</span>
+            <span
+              className={`net-dot ${fresh.live ? 'live' : ''}`}
+              style={{ background: fresh.color, boxShadow: `0 0 0 3px ${fresh.color}22` }}
+              aria-hidden="true"
+            />{' '}
+            <span className="mono">Solana mainnet</span>
           </div>
         </div>
       </aside>
@@ -129,9 +195,20 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         <header className="topbar">
           <h1 className="topbar-title">{title}</h1>
           <span className="topbar-sep" aria-hidden="true" />
-          <span className="topbar-meta">
-            <span className="net-dot live" aria-hidden="true" />
-            <span>Updated <span suppressHydrationWarning>{updated || '—'}</span></span>
+          <span
+            className="topbar-meta"
+            title={lastIndexMs ? `Last index run ${f.time(lastIndexMs)}` : 'Indexer status unavailable'}
+          >
+            <span
+              className={`net-dot ${fresh.live ? 'live' : ''}`}
+              style={{ background: fresh.color, boxShadow: `0 0 0 3px ${fresh.color}22` }}
+              aria-hidden="true"
+            />
+            <span suppressHydrationWarning>
+              {!statusReady ? 'Updating…'
+                : lastIndexMs ? `Updated ${f.ago(lastIndexMs)}`
+                : 'Status unavailable'}
+            </span>
           </span>
           <div className="topbar-right">
             <div className="topbar-search" role="search">

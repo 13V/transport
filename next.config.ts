@@ -21,15 +21,12 @@ const config: NextConfig = {
   // Headers for caching
   async headers() {
     return [
-      {
-        source: '/api/smart-money',
-        headers: [
-          {
-            key: 'Cache-Control',
-            value: 'public, max-age=60, s-maxage=60',
-          },
-        ],
-      },
+      // Per-route Cache-Control is set directly in each /api/smart-money/*
+      // route handler (with the correct per-route s-maxage and
+      // stale-while-revalidate), so a blanket header rule here would only
+      // conflict with those. The previous `source: '/api/smart-money'` rule
+      // also matched ONLY the exact path, never the sub-routes — it was a no-op
+      // for the routes that actually serve data. Removed as redundant.
       {
         source: '/(.*)',
         headers: [

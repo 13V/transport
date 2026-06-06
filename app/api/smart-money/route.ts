@@ -14,9 +14,6 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { HeliusDataFetcher } from '../../../lib/helius-data-fetcher';
-import { TradeProcessor } from '../../../lib/pnl-engine';
-import { WalletAnalyzer } from '../../../lib/wallet-analyzer';
 import { getSupabase, isSupabaseConfigured } from '../../../lib/supabase-client';
 import { getSmartCriteria, isSmartWallet } from '../../../lib/indexer/curation';
 import { classifyWallet } from '../../../lib/indexer/wallet-tags';
@@ -289,175 +286,6 @@ function setLeaderboardCache(data: LeaderboardResponse): void {
 }
 
 // ============================================================================
-// REAL DATA FETCHING
-// ============================================================================
-
-/**
- * Fetch real blockchain data and calculate smart money scores
- */
-async function generateRealLeaderboard(timeoutSeconds: number = 45): Promise<LeaderboardResponse> {
-  const startTime = Date.now();
-  const timeoutMs = timeoutSeconds * 1000;
-  const wallets: Array<{
-    rank: number;
-    address: string;
-    score: number;
-    pnl: number;
-    winRate: number;
-    consistency: number;
-    tokensHeld: number;
-    updatedAt: string;
-  }> = [];
-
-  try {
-    console.log('[SMART-MONEY] Starting real leaderboard generation...');
-
-    // Initialize data fetcher
-    const fetcher = new HeliusDataFetcher({ timeout: 30000 });
-
-    // Fetch top tokens with holders
-    console.log('[SMART-MONEY] Fetching top tokens and holders...');
-    const tokensWithHolders = await Promise.race([
-      fetcher.getTokensWithHolders(50, 100),
-      new Promise<any[]>((_, reject) =>
-        setTimeout(() => reject(new Error('Token fetch timeout')), timeoutMs / 2)
-      ),
-    ]);
-
-    console.log(`[SMART-MONEY] Got ${tokensWithHolders.length} tokens with holders`);
-
-    // Collect all unique wallet addresses
-    const walletAddressSet = new Set<string>();
-    for (const token of tokensWithHolders) {
-      for (const holder of token.holders) {
-        walletAddressSet.add(holder.address);
-      }
-    }
-
-    const walletAddresses = Array.from(walletAddressSet);
-    console.log(`[SMART-MONEY] Analyzing ${walletAddresses.length} wallets for smart money...`);
-
-    // Process wallets in batches with timeout protection
-    const analyzeWalletsWithTimeout = async () => {
-      const batchSize = 10;
-      const walletScores: Array<{
-        address: string;
-        score: number;
-        pnl: number;
-        winRate: number;
-        consistency: number;
-        tokensHeld: number;
-      }> = [];
-
-      for (let i = 0; i < walletAddresses.length && Date.now() - startTime < timeoutMs; i += batchSize) {
-        const batch = walletAddresses.slice(i, Math.min(i + batchSize, walletAddresses.length));
-
-        // Analyze batch in parallel
-        const batchResults = await Promise.allSettled(
-          batch.map(async (address) => {
-            try {
-              // Fetch wallet transactions
-              const fetcher = new HeliusDataFetcher({ timeout: 10000 });
-              const transactions = await fetcher.getWalletTransactions(address, 100);
-
-              if (transactions.length === 0) {
-                return null;
-              }
-
-              // Calculate PnL
-              const processor = new TradeProcessor();
-              // Note: For now we don't have full trade data from Helius
-              // In production, this would parse transactions into Trade objects
-              const pnlData = processor.calculatePnL();
-
-              // Calculate smart money score
-              const analyzer = new WalletAnalyzer(address, 1); // Default price = 1 SOL
-              const scoreData = await analyzer.analyze();
-
-              return {
-                address,
-                score: Math.round(scoreData.score),
-                pnl: Math.round(pnlData.totalRealizedPnL * 100) / 100,
-                winRate: Math.round(pnlData.winRate * 10000) / 10000,
-                consistency: Math.round(scoreData.metrics.consistency * 100) / 100,
-                tokensHeld: scoreData.metrics.totalTrades || 0,
-              };
-            } catch (error) {
-              console.error(`Error analyzing wallet ${address}:`, error);
-              return null;
-            }
-          })
-        );
-
-        // Process batch results
-        for (const result of batchResults) {
-          if (result.status === 'fulfilled' && result.value) {
-            walletScores.push(result.value);
-          }
-        }
-
-        // Check timeout
-        if (Date.now() - startTime > timeoutMs * 0.9) {
-          console.warn(`[SMART-MONEY] Approaching timeout, returning partial results (${walletScores.length} wallets analyzed)`);
-          break;
-        }
-      }
-
-      return walletScores;
-    };
-
-    // Get wallet scores
-    const walletScores = await analyzeWalletsWithTimeout();
-
-    // Sort by score and assign ranks
-    walletScores.sort((a, b) => b.score - a.score);
-
-    for (let i = 0; i < walletScores.length; i++) {
-      wallets.push({
-        rank: i + 1,
-        address: walletScores[i].address,
-        score: walletScores[i].score,
-        pnl: walletScores[i].pnl,
-        winRate: walletScores[i].winRate,
-        consistency: walletScores[i].consistency,
-        tokensHeld: walletScores[i].tokensHeld,
-        updatedAt: new Date().toISOString(),
-      });
-    }
-
-    const elapsedMs = Date.now() - startTime;
-    console.log(`[SMART-MONEY] Leaderboard generated in ${elapsedMs}ms with ${wallets.length} wallets`);
-
-    return {
-      leaderboard: wallets.slice(0, 100),
-      totalWallets: wallets.length,
-      pagination: {
-        offset: 0,
-        limit: 100,
-        hasMore: wallets.length > 100,
-      },
-      lastUpdated: new Date().toISOString(),
-      cacheAge: 0,
-    };
-  } catch (error) {
-    console.error('[SMART-MONEY] Error generating real leaderboard, returning empty:', error);
-
-    // Return empty leaderboard on error (client will handle gracefully)
-    return {
-      leaderboard: [],
-      totalWallets: 0,
-      pagination: {
-        offset: 0,
-        limit: 100,
-        hasMore: false,
-      },
-      lastUpdated: new Date().toISOString(),
-      cacheAge: 0,
-    };
-  }
-}
-
-// ============================================================================
 // API HANDLERS
 // ============================================================================
 
@@ -629,132 +457,37 @@ async function handleGetLeaderboard(
 }
 
 async function handleGetWalletDetails(
-  walletAddress: string,
-  isAuthenticated: boolean
-): Promise<NextResponse<WalletDetailsResponse | ErrorResponse>> {
-  // Validate wallet address format
-  if (!walletAddress || walletAddress.length < 32 || walletAddress.length > 256) {
-    return NextResponse.json(
-      {
-        error: 'Invalid wallet address format',
-        code: 'INVALID_ADDRESS',
-        timestamp: new Date().toISOString(),
-      } as ErrorResponse,
-      { status: 400 }
-    );
-  }
-
-  // Get wallet details from leaderboard or analyze on demand
-  try {
-    const fetcher = new HeliusDataFetcher({ timeout: 15000 });
-    const analyzer = new WalletAnalyzer(walletAddress, 1);
-    const scoreData = await analyzer.analyze();
-
-    // Fetch transactions for additional metrics
-    const transactions = await fetcher.getWalletTransactions(walletAddress, 100);
-
-    const details: WalletDetailsResponse = {
-      address: walletAddress,
-      rank: null, // Would need to check leaderboard
-      rankScore: scoreData.score,
-      percentile: scoreData.percentile,
-      metrics: {
-        smartMoneyScore: scoreData.score,
-        pnl: 0, // Would need transaction parsing
-        winRate: scoreData.metrics.winRate,
-        consistency: scoreData.metrics.consistency,
-        totalTrades: scoreData.metrics.totalTrades,
-        tokensHeld: 0, // Would need to calculate from holdings
-      },
-      recentActivity: {
-        lastActivityTime: new Date().toISOString(),
-        averageHoldTime: scoreData.metrics.avgHoldTimeHours,
-        tradingFrequency: scoreData.metrics.frequency,
-      },
-      historicalRanking: [], // Would need historical snapshots
-    };
-
-    return NextResponse.json(details, {
-      headers: {
-        'Cache-Control': 'public, max-age=300', // 5 minutes for individual wallets
-        'X-RateLimit-Limit': String(isAuthenticated ? AUTHENTICATED_RATE_LIMIT : PUBLIC_RATE_LIMIT),
-        'X-RateLimit-Remaining': String(isAuthenticated ? AUTHENTICATED_RATE_LIMIT - 1 : PUBLIC_RATE_LIMIT - 1),
-      },
-    });
-  } catch (error) {
-    console.error(`Error fetching wallet details for ${walletAddress}:`, error);
-    return NextResponse.json(
-      {
-        error: 'Failed to retrieve wallet details',
-        code: 'WALLET_ERROR',
-        timestamp: new Date().toISOString(),
-      } as ErrorResponse,
-      { status: 500 }
-    );
-  }
+  _walletAddress: string,
+  _isAuthenticated: boolean
+): Promise<NextResponse<ErrorResponse>> {
+  // This endpoint previously returned hardcoded placeholder metrics (pnl: 0,
+  // tokensHeld: 0, lastActivityTime: "now", rank: null, historicalRanking: [])
+  // while firing slow live Helius calls on every request. Real, accurate
+  // per-wallet data is served by the /api/wallet/[address]/* endpoints, so we
+  // no longer expose fabricated numbers here.
+  return NextResponse.json(
+    {
+      error: 'Wallet details are not available here. Use /api/wallet/{address}/profile.',
+      code: 'GONE',
+      timestamp: new Date().toISOString(),
+    } as ErrorResponse,
+    { status: 410 }
+  );
 }
 
 async function handleGetHistory(
-  request: NextRequest,
-  isAuthenticated: boolean
-): Promise<NextResponse<HistoryResponse | ErrorResponse>> {
-  try {
-    const { searchParams } = request.nextUrl;
-    const address = searchParams.get('address');
-    const days = parseInt(searchParams.get('days') || '90', 10);
-
-    if (days < 1 || days > 365) {
-      return NextResponse.json(
-        {
-          error: 'Invalid days parameter. Must be between 1 and 365.',
-          code: 'INVALID_PARAMETER',
-          timestamp: new Date().toISOString(),
-        } as ErrorResponse,
-        { status: 400 }
-      );
-    }
-
-    // Generate mock history data
-    const endDate = new Date();
-    const startDate = new Date();
-    startDate.setDate(endDate.getDate() - days);
-
-    const snapshots = Array.from({ length: days }, (_, i) => {
-      const date = new Date(startDate);
-      date.setDate(date.getDate() + i);
-      return {
-        date: date.toISOString().split('T')[0],
-        rank: address ? (Math.floor(Math.random() * 80) + 1) : null,
-        score: 75 + Math.floor(Math.random() * 20),
-      };
-    });
-
-    return NextResponse.json(
-      {
-        snapshots,
-        period: {
-          start: startDate.toISOString().split('T')[0],
-          end: endDate.toISOString().split('T')[0],
-        },
-        address,
-      } as HistoryResponse,
-      {
-        headers: {
-          'Cache-Control': 'public, max-age=3600', // 1 hour for history
-          'X-RateLimit-Limit': String(isAuthenticated ? AUTHENTICATED_RATE_LIMIT : PUBLIC_RATE_LIMIT),
-          'X-RateLimit-Remaining': String(isAuthenticated ? AUTHENTICATED_RATE_LIMIT - 1 : PUBLIC_RATE_LIMIT - 1),
-        },
-      }
-    );
-  } catch (error) {
-    console.error('History error:', error);
-    return NextResponse.json(
-      {
-        error: 'Failed to retrieve history',
-        code: 'HISTORY_ERROR',
-        timestamp: new Date().toISOString(),
-      } as ErrorResponse,
-      { status: 500 }
-    );
-  }
+  _request: NextRequest,
+  _isAuthenticated: boolean
+): Promise<NextResponse<ErrorResponse>> {
+  // Historical ranking snapshots are not collected, so there is no honest data
+  // to return here. This previously emitted random Math.random() rank/score
+  // values, which must never reach a user.
+  return NextResponse.json(
+    {
+      error: 'Historical ranking is not available.',
+      code: 'GONE',
+      timestamp: new Date().toISOString(),
+    } as ErrorResponse,
+    { status: 410 }
+  );
 }

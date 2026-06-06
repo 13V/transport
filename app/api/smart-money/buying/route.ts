@@ -17,7 +17,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSmartMoneyBuys } from '../../../../lib/indexer/smart-buys';
 import { getTokenMeta } from '../../../../lib/token-meta';
 
-export const dynamic = 'force-dynamic';
+export const revalidate = 60;
 
 function clampInt(raw: string | null, fallback: number, min: number, max: number): number {
   const v = parseInt(raw || '', 10);
@@ -56,6 +56,6 @@ export async function GET(request: NextRequest) {
   }
 
   return NextResponse.json({ ...result, count: tokens.length, tokens }, {
-    headers: { 'Cache-Control': 'public, max-age=60' },
+    headers: { 'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=300' },
   });
 }

@@ -37,7 +37,7 @@ export default function WatchlistView() {
     let active = true;
     (async () => {
       try {
-        const res = await fetch('/api/smart-money/list?limit=1000');
+        const res = await fetch('/api/smart-money/list?limit=1000&verified=0&gate=0');
         if (!res.ok) throw new Error('Failed to load wallet list');
         const json = (await res.json()) as ListResponse;
         if (active) setWallets(json.wallets ?? []);

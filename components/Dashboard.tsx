@@ -9,7 +9,7 @@ import {
 import * as f from '@/lib/format';
 import {
   TierBadge, Roi, Pnl, AddrChip, TokenMark, EmptyState, ErrorState,
-  SkLine, AreaChart, CHART_COLORS,
+  SkLine, CHART_COLORS,
 } from '@/components/ui';
 
 // ---- API shapes ----------------------------------------------------------
@@ -62,19 +62,18 @@ export default function Dashboard() {
   const router = useRouter();
   const status = useFetch<StatusResponse['totals']>('/api/status', (j) => (j as StatusResponse).totals);
   const top = useFetch<ListWallet[]>('/api/smart-money/list?sort=roi&limit=8', (j) => (j as { wallets: ListWallet[] }).wallets ?? []);
-  const buying = useFetch<BuyingToken[]>('/api/smart-money/buying?hours=24&limit=8', (j) => (j as { tokens: BuyingToken[] }).tokens ?? []);
+  const buying = useFetch<BuyingToken[]>('/api/smart-money/buying?hours=24&limit=50', (j) => (j as { tokens: BuyingToken[] }).tokens ?? []);
   const movers = useFetch<Mover[]>('/api/smart-money/movers?days=7&limit=6', (j) => (j as { movers: Mover[] }).movers ?? []);
 
   const buys24 = buying.data?.reduce((a, t) => a + (t.distinctSmartBuyers || 0), 0) ?? 0;
 
-  // cumulative buy-volume curve from the buying feed (prominent dashboard chart)
-  const flowVals = (() => {
-    const vols = (buying.data ?? []).map((t) => t.solVolume || 0);
-    if (vols.length < 2) return [] as number[];
-    let acc = 0;
-    return vols.slice().reverse().map((v) => (acc += v));
-  })();
-  const flowTotal = flowVals.length ? flowVals[flowVals.length - 1] : 0;
+  // honest "top tokens by smart-money SOL volume (24h)" ranking from the buying feed
+  const topByVol = (buying.data ?? [])
+    .slice()
+    .sort((a, b) => (b.solVolume || 0) - (a.solVolume || 0))
+    .slice(0, 6);
+  const volTotal = (buying.data ?? []).reduce((a, t) => a + (t.solVolume || 0), 0);
+  const volMax = topByVol.length ? (topByVol[0].solVolume || 0) : 0;
 
   return (
     <div className="view stack gap-14">
@@ -108,28 +107,47 @@ export default function Dashboard() {
       <div className="dash-grid">
         {/* left column */}
         <div className="stack gap-14">
-          {/* flow chart */}
+          {/* top tokens by smart-money SOL volume */}
           <div className="card">
-            <CardHead icon={Activity} title="Smart-money buy volume · 24h" note="cumulative SOL across tracked tokens" />
+            <CardHead icon={Activity} title="Top tokens by smart SOL volume · 24h" note="SOL bought by smart money" />
             <div className="card-pad">
               {buying.state === 'loading' ? (
                 <SkLine w="100%" h={168} />
               ) : buying.state === 'error' ? (
                 <ErrorState msg="Couldn’t compute buy volume." />
-              ) : flowVals.length < 2 ? (
+              ) : topByVol.length === 0 ? (
                 <EmptyState icon={Activity} title="Quiet right now" msg="No measurable smart-money buying in the last 24h." />
               ) : (
                 <>
-                  <div className="row between" style={{ marginBottom: 2 }}>
+                  <div className="row between" style={{ marginBottom: 12 }}>
                     <div className="stack">
                       <span className="faint" style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '.06em' }}>Total volume</span>
                       <span className="num pos" style={{ fontSize: 21, fontWeight: 660, marginTop: 3 }}>
-                        {f.sol(flowTotal)} <span className="faint" style={{ fontSize: 12, fontWeight: 500 }}>SOL</span>
+                        {f.sol(volTotal)} <span className="faint" style={{ fontSize: 12, fontWeight: 500 }}>SOL</span>
                       </span>
                     </div>
-                    <div className="chart-legend"><span className="lg"><span className="sw" style={{ background: CHART_COLORS.POS }} />cumulative</span></div>
                   </div>
-                  <AreaChart values={flowVals} height={158} color={CHART_COLORS.POS} fmtY={(v) => f.compact(Number(v))} />
+                  <div className="stack gap-10">
+                    {topByVol.map((t) => (
+                      <div
+                        key={t.mint}
+                        className="clickable"
+                        onClick={() => router.push(`/token/${t.mint}`)}
+                        style={{ cursor: 'pointer' }}
+                      >
+                        <div className="row between" style={{ marginBottom: 4 }}>
+                          <span className="row gap-8">
+                            <TokenMark symbol={t.symbol || t.mint} icon={t.icon} icons={t.icons} size={20} />
+                            <b style={{ fontSize: 12.5 }}>{t.symbol || f.short(t.mint, 4, 4)}</b>
+                          </span>
+                          <span className="num faint" style={{ fontSize: 12 }}>{f.sol(t.solVolume)} SOL</span>
+                        </div>
+                        <div style={{ height: 6, borderRadius: 3, background: 'var(--surface-2, rgba(255,255,255,.06))', overflow: 'hidden' }}>
+                          <div style={{ height: '100%', borderRadius: 3, background: CHART_COLORS.POS, width: `${volMax > 0 ? Math.max(3, ((t.solVolume || 0) / volMax) * 100) : 0}%` }} />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </>
               )}
             </div>
@@ -143,7 +161,12 @@ export default function Dashboard() {
             ) : top.state === 'error' ? (
               <ErrorState msg="The leaderboard service didn’t respond." />
             ) : !top.data || top.data.length === 0 ? (
-              <EmptyState title="No verified wallets yet" msg="Once the indexer deep-scans wallets, the highest all-time ROI traders surface here." />
+              <EmptyState
+                title={status.state === 'ok' && status.data?.walletsIndexed
+                  ? `Indexed ${f.num(status.data.walletsIndexed)} wallets · verifying…`
+                  : 'Verifying wallets…'}
+                msg="Once the indexer deep-scans wallets, the highest all-time ROI traders surface here."
+              />
             ) : (
               <div className="table-wrap">
                 <table className="dt compact">

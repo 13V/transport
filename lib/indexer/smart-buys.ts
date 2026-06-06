@@ -19,10 +19,23 @@
 import { getSupabase, isSupabaseConfigured } from '../supabase-client';
 import { fetchTokenPricesSol } from '../prices/price-oracle';
 import { getSmartCriteria, isSmartWallet } from './curation';
+import { buildClusters } from './clusters';
 
 export interface SmartBuyToken {
   mint: string;
+  /**
+   * Number of distinct smart-money ENTITIES that bought this token. Wallets that
+   * belong to the same funding cluster (lib/indexer/clusters.ts) collapse to a
+   * single entity, so 5 wallets behind 1 trader count as 1 — an honest measure
+   * of independent conviction. Falls back to the raw distinct-wallet count if
+   * cluster resolution is unavailable.
+   */
   distinctSmartBuyers: number;
+  /**
+   * Raw count of distinct buyer WALLET addresses (pre-cluster-dedup), so the UI
+   * can show "5 wallets · 2 entities". Optional/backward-compatible.
+   */
+  distinctSmartBuyerWallets?: number;
   buys: number;
   solVolume: number;
   firstBuy: string | null;
@@ -30,8 +43,14 @@ export interface SmartBuyToken {
   sampleBuyers: string[];
   /** Per-hour count of smart BUY trades across the window (oldest → newest). */
   momentum: number[];
-  /** Distinct smart wallets that SOLD this token in the same window. */
+  /**
+   * Distinct smart-money ENTITIES that SOLD this token in the same window
+   * (same cluster-collapse as distinctSmartBuyers). Falls back to raw distinct
+   * wallet count if cluster resolution is unavailable.
+   */
   sellers: number;
+  /** Raw count of distinct seller WALLET addresses (pre-cluster-dedup). Optional. */
+  sellerWallets?: number;
   /** SOL value of smart SELL trades in the window. */
   solSold: number;
   /** Net SOL flow from smart money: solVolume (buys) − solSold (sells). */
@@ -56,6 +75,62 @@ function chunk<T>(arr: T[], size: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
   return out;
+}
+
+/**
+ * Build a wallet -> entity-id map for the given wallet set, where wallets in the
+ * same funding cluster share an entity id (the cluster's representative member).
+ *
+ * Strategy / cost: we pull the `wallet_links` funding edges that touch the
+ * wallet set in a handful of batched .in() queries (NOT one BFS per wallet via
+ * getClusterFor — that would be N round-trips and risk the 60s budget), then run
+ * the pure, in-memory union-find from clusters.ts (buildClusters) over those
+ * edges. Wallets with no edges simply never appear in the map and are treated as
+ * their own entity by the caller.
+ *
+ * Degrades gracefully: any query/error (table missing, RLS, transient) returns
+ * an empty map, so distinct counts fall back to raw distinct-wallet counts and
+ * the feed keeps working.
+ */
+async function resolveEntityMap(
+  wallets: string[]
+): Promise<Map<string, string>> {
+  const entityMap = new Map<string, string>();
+  if (wallets.length === 0 || !isSupabaseConfigured()) return entityMap;
+
+  try {
+    const supabase = getSupabase();
+    const edges: { source: string; target: string }[] = [];
+
+    // Fetch edges where either endpoint is one of our smart wallets. Two batched
+    // queries per chunk (source.in / target.in) keep the .in() lists bounded.
+    for (const group of chunk(wallets, WALLET_CHUNK)) {
+      for (const col of ['source', 'target'] as const) {
+        const { data, error } = await supabase
+          .from('wallet_links')
+          .select('source, target')
+          .in(col, group);
+        if (error) return new Map(); // degrade to raw counts
+        for (const row of data ?? []) {
+          const src = (row as any).source as string;
+          const tgt = (row as any).target as string;
+          if (src && tgt) edges.push({ source: src, target: tgt });
+        }
+      }
+    }
+
+    if (edges.length === 0) return entityMap;
+
+    // Pure union-find: wallet -> sorted cluster member list. Use the first
+    // (sorted) member as the stable entity id for the whole cluster.
+    const clusters = buildClusters(edges);
+    for (const [wallet, members] of clusters) {
+      entityMap.set(wallet, members[0] ?? wallet);
+    }
+    return entityMap;
+  } catch {
+    return new Map(); // never fail the feed on cluster issues
+  }
 }
 
 export async function getSmartMoneyBuys(
@@ -108,6 +183,22 @@ export async function getSmartMoneyBuys(
 
     if (smartWallets.length === 0) return empty;
 
+    // 1b. Build a wallet -> entity-cluster map so wallets controlled by the same
+    // trader collapse into one "entity" when we count distinct buyers/sellers.
+    //
+    // Tradeoff: clusters.ts exposes getClusterFor(address), but that runs a
+    // bounded BFS per address — calling it once per smart wallet would be N
+    // round-trips and could blow the Vercel 60s budget. Instead we fetch the
+    // wallet_links funding edges that touch the smart-wallet set in a few batched
+    // .in() queries, then run the pure in-memory union-find (buildClusters) once.
+    // This captures direct edges among smart wallets (the case that actually
+    // inflates the signal) cheaply. We deliberately do NOT expand multi-hop
+    // through non-smart intermediaries here — that's the expensive BFS path and
+    // is overkill for honest buyer counting. On any failure we leave the map
+    // empty and every wallet stays its own entity (i.e. raw counts), so the feed
+    // never fails on cluster issues.
+    const walletToEntity = await resolveEntityMap(smartWallets);
+
     // 2. Pull recent BUY + SELL trades for those wallets, newest first, across
     // chunks. We need SELLs to compute net buy/sell pressure for each token.
     const sinceMs = now - hours * 3_600_000;
@@ -137,13 +228,15 @@ export async function getSmartMoneyBuys(
 
     interface Agg {
       mint: string;
-      buyers: Set<string>;
+      buyers: Set<string>; // raw distinct buyer wallet addresses
+      buyerEntities: Set<string>; // distinct entity (cluster) ids of buyers
       buys: number;
       solVolume: number;
       firstBuy: number | null;
       lastBuy: number | null;
       firstBuyPrice: number | null; // price (SOL) recorded at the firstBuy trade
-      sellers: Set<string>;
+      sellers: Set<string>; // raw distinct seller wallet addresses
+      sellerEntities: Set<string>; // distinct entity (cluster) ids of sellers
       solSold: number;
       momentum: number[]; // per-hour BUY counts, oldest → newest
       sampleBuyers: string[];
@@ -166,12 +259,14 @@ export async function getSmartMoneyBuys(
         agg = {
           mint,
           buyers: new Set(),
+          buyerEntities: new Set(),
           buys: 0,
           solVolume: 0,
           firstBuy: null,
           lastBuy: null,
           firstBuyPrice: null,
           sellers: new Set(),
+          sellerEntities: new Set(),
           solSold: 0,
           momentum: new Array(buckets).fill(0),
           sampleBuyers: [],
@@ -180,14 +275,20 @@ export async function getSmartMoneyBuys(
         byMint.set(mint, agg);
       }
 
+      // Collapse same-entity wallets: a wallet's entity id is its cluster, or
+      // itself when it has no funding edges in the smart set.
+      const entity = walletToEntity.get(wallet) ?? wallet;
+
       if (type === 'SELL') {
         agg.sellers.add(wallet);
+        agg.sellerEntities.add(entity);
         agg.solSold += sol;
         continue;
       }
 
       // BUY
       agg.buyers.add(wallet);
+      agg.buyerEntities.add(entity);
       agg.buys += 1;
       agg.solVolume += sol;
       if (Number.isFinite(ts)) {
@@ -213,7 +314,10 @@ export async function getSmartMoneyBuys(
     // the oracle over just the returned set.
     const ranked = Array.from(byMint.values())
       .filter((a) => a.buyers.size > 0)
-      .sort((a, b) => b.buyers.size - a.buyers.size || b.solVolume - a.solVolume)
+      .sort(
+        (a, b) =>
+          b.buyerEntities.size - a.buyerEntities.size || b.solVolume - a.solVolume
+      )
       .slice(0, limit);
 
     // 4. Resolve current SOL prices (one batched oracle call) so we can compute
@@ -243,14 +347,18 @@ export async function getSmartMoneyBuys(
       }
       return {
         mint: a.mint,
-        distinctSmartBuyers: a.buyers.size,
+        // Entity count is the honest primary signal; raw wallet count kept
+        // alongside for "N wallets · M entities" UI.
+        distinctSmartBuyers: a.buyerEntities.size,
+        distinctSmartBuyerWallets: a.buyers.size,
         buys: a.buys,
         solVolume,
         firstBuy: a.firstBuy == null ? null : new Date(a.firstBuy).toISOString(),
         lastBuy: a.lastBuy == null ? null : new Date(a.lastBuy).toISOString(),
         sampleBuyers: a.sampleBuyers,
         momentum: a.momentum,
-        sellers: a.sellers.size,
+        sellers: a.sellerEntities.size,
+        sellerWallets: a.sellers.size,
         solSold,
         netSolFlow: Math.round((solVolume - solSold) * 1e4) / 1e4,
         firstBuyPriceSol:
