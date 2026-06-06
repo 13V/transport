@@ -130,12 +130,14 @@ export async function getPumpFunCoins(opts?: {
   minMcUsd?: number; // default 100_000 — "ran up to 100k MC" filter
   maxCoins?: number; // default 400 — cap total returned
   pages?: number; // default 12 — pagination pages to walk
+  startPage?: number; // default 0 — first page to fetch (offset = startPage*limit)
   sort?: string; // default 'market_cap'
   order?: 'ASC' | 'DESC'; // default 'DESC'
 }): Promise<SourcedCoin[]> {
   const minMcUsd = opts?.minMcUsd ?? 100_000;
   const maxCoins = opts?.maxCoins ?? 400;
   const pages = opts?.pages ?? 12;
+  const startPage = Math.max(0, Math.trunc(opts?.startPage ?? 0));
   const sort = opts?.sort ?? 'market_cap';
   const order = opts?.order ?? 'DESC';
 
@@ -146,7 +148,7 @@ export async function getPumpFunCoins(opts?: {
     for (const base of BASE_URLS) {
       let baseFailed = false;
 
-      for (let page = 0; page < pages; page++) {
+      for (let page = startPage; page < startPage + pages; page++) {
         if (results.length >= maxCoins) break;
 
         const offset = page * PAGE_LIMIT;

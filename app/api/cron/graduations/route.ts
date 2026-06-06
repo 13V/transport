@@ -35,12 +35,21 @@ export async function GET(request: NextRequest) {
   // Per-call overrides so the cron driver can dial bulk-ingest volume.
   //   ?maxCoins=8   graduated coins to fully scan this call (1..40)
   //   ?maxTxs=3000  history depth per coin (500..5000)
+  //   ?shards=N     total parallel jobs (1..16); >1 partitions coins by mint-hash
+  //   ?shard=i      this job's shard index (0..shards-1)
   const sp = request.nextUrl.searchParams;
-  const opts: { maxCoins?: number; maxTxsPerCoin?: number } = {};
+  const opts: { maxCoins?: number; maxTxsPerCoin?: number; shard?: number; shards?: number } = {};
   const maxCoins = clampParam(sp.get('maxCoins'), 1, 40);
   const maxTxs = clampParam(sp.get('maxTxs'), 500, 5000);
   if (maxCoins !== undefined) opts.maxCoins = maxCoins;
   if (maxTxs !== undefined) opts.maxTxsPerCoin = maxTxs;
+
+  const shards = clampParam(sp.get('shards'), 1, 16);
+  if (shards !== undefined) {
+    opts.shards = shards;
+    const shard = clampParam(sp.get('shard'), 0, shards - 1);
+    if (shard !== undefined) opts.shard = shard;
+  }
 
   try {
     const result = await runGraduationScan(opts);

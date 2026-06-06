@@ -140,6 +140,12 @@ export async function getGraduatedCoins(limit = 12): Promise<GraduatedCoin[]> {
 // each hour bucket sees a distinct slice of the historical coin pool.
 const AGED_SORTS = ['market_cap', 'last_trade_timestamp', 'created_timestamp'] as const;
 
+// Deep-window rotation: each hour fetches a DIFFERENT slice of the historical
+// winner tail by advancing the pagination start. WINDOWS distinct slices, each
+// AGED_PAGES pages deep, so the window walks far past the static MC-desc head.
+const AGED_WINDOWS = 8;
+const AGED_PAGES = 8;
+
 export async function getAgedWinnerCoins(opts?: {
   minMcUsd?: number;
   maxCoins?: number;
@@ -154,10 +160,16 @@ export async function getAgedWinnerCoins(opts?: {
     // Flip order on alternating buckets to reach the opposite end of each sort
     // (e.g. lowest-qualifying MC, oldest creations) — more distinct coverage.
     const order: 'ASC' | 'DESC' = hourBucket % 2 === 0 ? 'DESC' : 'ASC';
+    // DEEP-WINDOW ROTATION: advance the pagination start each hour so successive
+    // runs mine a fresh slice of the historical winner tail instead of always
+    // re-pulling the same head. AGED_WINDOWS distinct slices, AGED_PAGES deep.
+    const startPage = (hourBucket % AGED_WINDOWS) * AGED_PAGES;
 
     const coins = await getPumpFunCoins({
       minMcUsd: opts?.minMcUsd ?? Number(process.env.AGED_MIN_MC_USD ?? 100000),
       maxCoins: opts?.maxCoins ?? Number(process.env.AGED_MAX_COINS ?? 600),
+      pages: AGED_PAGES,
+      startPage,
       sort,
       order,
     });

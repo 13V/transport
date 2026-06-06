@@ -37,6 +37,15 @@ export interface GraduationScanOptions {
   maxTxsPerCoin?: number; // depth of full history per coin
   rescanAfterHours?: number; // re-ingest a coin only if older than this
   timeBudgetMs?: number;
+  shard?: number; // this job's shard index (0..shards-1)
+  shards?: number; // total parallel jobs; >1 partitions the todo list
+}
+
+/** Stable shard for a mint so parallel scans cover disjoint coins. */
+function hashMint(mint: string): number {
+  let h = 0;
+  for (let i = 0; i < mint.length; i++) h = (Math.imul(31, h) + mint.charCodeAt(i)) | 0;
+  return h >>> 0;
 }
 
 export async function runGraduationScan(
@@ -101,7 +110,17 @@ export async function runGraduationScan(
       .map((r: any) => r.mint)
   );
 
-  const todo = candidates.filter((c) => !recentlyScanned.has(c.mint));
+  let todo = candidates.filter((c) => !recentlyScanned.has(c.mint));
+
+  // SHARDING: when multiple parallel jobs run, each keeps only the coins whose
+  // stable mint-hash maps to its shard, so the N jobs scan DISJOINT coins and
+  // never double-scan. Applied AFTER dedupe + recently-scanned skip and BEFORE
+  // the maxCoins/time-budget scan loop. Single-job (shards<=1) is a no-op.
+  const shards = opts.shards ?? 1;
+  const shard = opts.shard ?? 0;
+  if (shards > 1) {
+    todo = todo.filter((c) => hashMint(c.mint) % shards === shard);
+  }
 
   let coinsScanned = 0;
   let tradesIngested = 0;
