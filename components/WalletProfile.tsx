@@ -1,18 +1,25 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import Link from 'next/link';
-import { Loader, ExternalLink, CheckCircle2 } from 'lucide-react';
-import CopyButton from './CopyButton';
+import { useRouter } from 'next/navigation';
+import {
+  ChevronLeft, Clock, ExternalLink, CheckCircle, Star, Wallet,
+  TrendingUp, TrendingDown, List, GitBranch, Link as LinkIcon,
+} from 'lucide-react';
+import * as f from '@/lib/format';
+import {
+  TierBadge, Roi, Pnl, TokenMark, SourceBadge, EmptyState, ErrorState,
+  SkCard, CopyIconButton, WatchStar,
+} from '@/components/ui';
 import WalletHistoryChart from './WalletHistoryChart';
 
 /**
- * WALLET PROFILE (rich header view)
+ * WALLET PROFILE (premium-analytics view)
  *
- * Renders a single wallet's at-a-glance performance profile by stitching
- * together the /profile and /holdings APIs. Designed to sit above the existing
- * <WalletDetail> on the wallet page, so every section degrades gracefully when
- * a piece of data is missing or empty.
+ * Renders a single wallet's full performance profile by stitching together the
+ * /profile and /holdings APIs. Restyled to the deep-slate terminal design while
+ * preserving the original data fetching and shapes. Every field is guarded with
+ * optional chaining and renders an em dash when missing.
  */
 
 interface ProfileStats {
@@ -51,6 +58,7 @@ interface ClusterLink {
   amountSol: number;
   transfers: number;
   lastSeen: string;
+  roiPct?: number | null;
 }
 
 interface ProfileResponse {
@@ -80,54 +88,19 @@ interface WalletProfileProps {
   walletAddress: string;
 }
 
-// --- helpers ---------------------------------------------------------------
-
-const shortAddr = (addr: string): string =>
-  addr && addr.length > 10 ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : addr || '';
-
-const fmtSol = (n: number | null | undefined): string => {
-  if (n == null || !Number.isFinite(n)) return '—';
-  return n.toFixed(3);
+const toMs = (iso: string | null | undefined): number | null => {
+  if (!iso) return null;
+  const t = +new Date(iso);
+  return Number.isFinite(t) ? t : null;
 };
-
-const fmtPct = (n: number | null | undefined): string => {
-  if (n == null || !Number.isFinite(n)) return '—';
-  return `${n >= 0 ? '+' : ''}${n.toFixed(1)}%`;
-};
-
-const fmtSolSigned = (n: number | null | undefined): string => {
-  if (n == null || !Number.isFinite(n)) return '—';
-  return `${n >= 0 ? '+' : ''}${n.toFixed(3)}`;
-};
-
-const pnlColor = (n: number | null | undefined): string => {
-  if (n == null || !Number.isFinite(n)) return 'text-gray-400';
-  return n >= 0 ? 'text-green-400' : 'text-red-400';
-};
-
-const fmtTime = (iso: string | null | undefined): string => {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '—';
-  return d.toLocaleString();
-};
-
-// Rough tier derived from score, mirroring the leaderboard's banding.
-const tierFromScore = (score: number | null): { tier: string; classes: string } => {
-  const s = score ?? 0;
-  if (s >= 70) return { tier: 'S', classes: 'bg-amber-500/15 text-amber-400 ring-amber-500/30' };
-  if (s >= 50) return { tier: 'A', classes: 'bg-emerald-500/15 text-emerald-400 ring-emerald-500/30' };
-  if (s >= 30) return { tier: 'B', classes: 'bg-blue-500/15 text-blue-400 ring-blue-500/30' };
-  return { tier: 'C', classes: 'bg-gray-500/15 text-gray-400 ring-gray-500/30' };
-};
-
-// --- component -------------------------------------------------------------
 
 export default function WalletProfile({ walletAddress }: WalletProfileProps) {
+  const router = useRouter();
   const [profile, setProfile] = useState<ProfileResponse | null>(null);
   const [holdings, setHoldings] = useState<HoldingsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -164,23 +137,36 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
     return () => {
       cancelled = true;
     };
-  }, [walletAddress]);
+  }, [walletAddress, reloadKey]);
+
+  const backBtn = (
+    <button className="btn ghost sm" onClick={() => router.push('/smart-money')}>
+      <ChevronLeft size={15} /> Leaderboard
+    </button>
+  );
 
   if (loading) {
     return (
-      <div className="rounded-xl border border-gray-800 bg-gray-900/40 p-8">
-        <div className="text-center">
-          <Loader className="w-7 h-7 mx-auto animate-spin text-blue-400 mb-3" />
-          <p className="text-gray-400 text-sm">Loading wallet profile…</p>
-        </div>
+      <div className="view stack gap-20">
+        <div className="row">{backBtn}</div>
+        <SkCard h={150} />
+        <SkCard h={230} />
+        <div className="grid cols-2"><SkCard h={160} /><SkCard h={160} /></div>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="p-4 bg-red-900/20 border border-red-800 rounded-lg text-red-200 text-sm">
-        {error}
+      <div className="view stack gap-20">
+        <div className="row">{backBtn}</div>
+        <div className="card">
+          <ErrorState
+            title="Couldn’t load wallet"
+            msg="The profile service didn’t respond for this address."
+            onRetry={() => setReloadKey((k) => k + 1)}
+          />
+        </div>
       </div>
     );
   }
@@ -188,7 +174,8 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
   if (!profile) return null;
 
   const stats = profile.stats;
-  const { best = [], worst = [] } = profile.perToken ?? {};
+  const best = profile.perToken?.best ?? [];
+  const worst = profile.perToken?.worst ?? [];
   const recentTrades = profile.recentTrades ?? [];
   const cluster = profile.cluster ?? { funded: [], fundedBy: [] };
   const fundedBy = cluster.fundedBy ?? [];
@@ -196,119 +183,131 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
   const holdingList = holdings?.holdings ?? [];
   const unrealizedTotal = holdings?.totals?.unrealizedSol ?? null;
 
-  const { tier, classes: tierClasses } = tierFromScore(stats?.score ?? null);
+  // A valid-but-unscanned wallet: no stats row and nothing else to show.
+  const isEmpty =
+    !stats &&
+    holdingList.length === 0 &&
+    recentTrades.length === 0 &&
+    best.length === 0 &&
+    worst.length === 0;
+
+  if (isEmpty) {
+    return (
+      <div className="view stack gap-20">
+        <div className="row">{backBtn}</div>
+        <div className="card">
+          <EmptyState
+            icon={Wallet}
+            title="Wallet not deep-scanned yet"
+            msg="We don’t have an accurate ROI for this address. Queue it for a deep scan to populate its full profile."
+          />
+        </div>
+      </div>
+    );
+  }
+
+  const tier = f.tierFromScore(stats?.score ?? null);
   const recent = recentTrades.slice(0, 15);
+  const lastTradeMs = toMs(stats?.lastTradeAt);
 
   return (
-    <div className="space-y-6">
-      {/* Header card */}
-      <div className="rounded-xl border border-gray-800 bg-gray-900/40 p-6 space-y-5">
-        <div className="flex flex-wrap items-center gap-3">
-          <code className="text-sm bg-gray-800 px-3 py-1.5 rounded-lg text-gray-200 font-mono">
-            {shortAddr(profile.address)}
-          </code>
-          <CopyButton text={profile.address} label="wallet address" />
+    <div className="view stack gap-20">
+      {/* Top row */}
+      <div className="row between">
+        {backBtn}
+        <span className="badge ghost faint" style={{ fontSize: 11 }}>
+          <Clock size={12} /> Updated {f.ago(lastTradeMs)}
+        </span>
+      </div>
+
+      {/* Headline card */}
+      <div className="card card-pad stack gap-16">
+        <div className="row gap-12 wrap">
+          <TierBadge tier={tier} lg />
+          <code className="addr" style={{ height: 30, fontSize: 13 }}>{f.short(profile.address, 6, 6)}</code>
+          <CopyIconButton text={profile.address} />
+          <WatchStar address={profile.address} />
           {stats?.verified && (
-            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2.5 py-1 text-xs font-semibold text-emerald-400 ring-1 ring-emerald-500/30">
-              <CheckCircle2 className="w-3.5 h-3.5" />
-              Verified
-            </span>
+            <span className="badge accent"><CheckCircle size={12} /> Verified</span>
           )}
           {stats?.seeded && (
-            <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2.5 py-1 text-xs font-semibold text-amber-400 ring-1 ring-amber-500/30">
-              ⭐ Seeded
+            <span className="badge" style={{ color: 'var(--tier-s)', borderColor: 'var(--tier-s-ring)', background: 'var(--tier-s-soft)' }}>
+              <Star size={12} /> Seeded
             </span>
           )}
-          <span
-            className={`inline-flex items-center justify-center rounded-full px-2.5 py-1 text-xs font-bold ring-1 ${tierClasses}`}
-            title={`Tier ${tier} (derived from score)`}
-          >
-            Tier {tier}
-          </span>
-          <a
-            href={`https://solscan.io/address/${profile.address}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 transition-colors"
-          >
-            Solscan
-            <ExternalLink className="w-3.5 h-3.5" />
+          <span className="spacer" />
+          <a className="btn sm" href={`https://solscan.io/address/${profile.address}`} target="_blank" rel="noopener noreferrer">
+            Solscan <ExternalLink size={14} />
           </a>
         </div>
 
-        {/* Big headline stats */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <div className="rounded-lg bg-gray-800/50 p-4">
-            <p className="text-xs uppercase tracking-wide text-gray-500 mb-1">ROI (all-time)</p>
-            <p className={`text-2xl font-bold ${pnlColor(stats?.roiPct)}`}>
-              {fmtPct(stats?.roiPct)}
-            </p>
+        <div className="headline-grid">
+          <div className="headline">
+            <div className="hl-label">ROI · all-time</div>
+            <div className={`hl-val num ${(stats?.roiPct ?? 0) >= 0 ? 'pos' : 'neg'}`}>{f.pct(stats?.roiPct)}</div>
           </div>
-          <div className="rounded-lg bg-gray-800/50 p-4">
-            <p className="text-xs uppercase tracking-wide text-gray-500 mb-1">Realized PnL</p>
-            <p className={`text-2xl font-bold ${pnlColor(stats?.realizedPnl)}`}>
-              {fmtSolSigned(stats?.realizedPnl)}
-              <span className="text-sm font-normal text-gray-400 ml-1">SOL</span>
-            </p>
+          <div className="headline">
+            <div className="hl-label">Realized PnL</div>
+            <div className={`hl-val num ${(stats?.realizedPnl ?? 0) >= 0 ? 'pos' : 'neg'}`}>
+              {f.solSigned(stats?.realizedPnl)}<span className="unit">SOL</span>
+            </div>
           </div>
-          <div className="rounded-lg bg-gray-800/50 p-4">
-            <p className="text-xs uppercase tracking-wide text-gray-500 mb-1">Unrealized PnL</p>
-            <p className={`text-2xl font-bold ${pnlColor(unrealizedTotal)}`}>
-              {fmtSolSigned(unrealizedTotal)}
-              <span className="text-sm font-normal text-gray-400 ml-1">SOL</span>
-            </p>
+          <div className="headline">
+            <div className="hl-label">Unrealized PnL</div>
+            <div className={`hl-val num ${(unrealizedTotal ?? 0) >= 0 ? 'pos' : 'neg'}`}>
+              {f.solSigned(unrealizedTotal)}<span className="unit">SOL</span>
+            </div>
           </div>
-          <div className="rounded-lg bg-gray-800/50 p-4">
-            <p className="text-xs uppercase tracking-wide text-gray-500 mb-1">Score</p>
-            <p className="text-2xl font-bold text-gray-100">
-              {stats?.score != null ? stats.score.toFixed(1) : '—'}
-            </p>
+          <div className="headline">
+            <div className="hl-label">Score</div>
+            <div className="hl-val num">{stats?.score != null ? stats.score.toFixed(1) : '—'}</div>
           </div>
         </div>
 
-        {/* Stat grid */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-sm">
-          <Stat label="Win Rate" value={stats?.winRate != null ? `${(stats.winRate * 100).toFixed(1)}%` : '—'} />
-          <Stat label="Consistency" value={stats?.consistency != null ? `${stats.consistency.toFixed(0)}/100` : '—'} />
-          <Stat label="Total Trades" value={stats?.totalTrades != null ? String(stats.totalTrades) : '—'} />
-          <Stat label="Tokens Traded" value={stats?.tokensTraded != null ? String(stats.tokensTraded) : '—'} />
-          <Stat label="Invested" value={stats?.investedSol != null ? `${fmtSol(stats.investedSol)} SOL` : '—'} />
-          <Stat label="Last Trade" value={stats?.lastTradeAt ? new Date(stats.lastTradeAt).toLocaleDateString() : '—'} />
+        <div className="kv">
+          <div className="kv-item"><div className="k">Win rate</div><div className="v">{stats?.winRate != null ? `${Math.round(stats.winRate * 100)}%` : '—'}</div></div>
+          <div className="kv-item"><div className="k">Consistency</div><div className="v">{stats?.consistency != null ? `${stats.consistency}/100` : '—'}</div></div>
+          <div className="kv-item"><div className="k">Total trades</div><div className="v num">{f.num(stats?.totalTrades)}</div></div>
+          <div className="kv-item"><div className="k">Tokens traded</div><div className="v num">{f.num(stats?.tokensTraded)}</div></div>
+          <div className="kv-item"><div className="k">Invested</div><div className="v num">{f.sol(stats?.investedSol)} SOL</div></div>
+          <div className="kv-item"><div className="k">Last trade</div><div className="v" style={{ fontSize: 13 }}>{f.ago(lastTradeMs)}</div></div>
         </div>
       </div>
 
-      {/* ROI history */}
+      {/* Performance history */}
       <WalletHistoryChart walletAddress={walletAddress} />
 
       {/* Current holdings */}
-      <div className="rounded-xl border border-gray-800 bg-gray-900/40 p-6">
-        <h3 className="text-lg font-semibold mb-4">Current holdings</h3>
+      <div className="card">
+        <div className="card-head">
+          <h3><span className="ic"><Wallet size={16} /></span> Current holdings</h3>
+          {holdingList.length > 0 && (
+            <span className="faint" style={{ fontSize: 12.5 }}>
+              Value {f.sol(holdings?.totals?.currentValueSol)} SOL · Unreal <Pnl value={holdings?.totals?.unrealizedSol} unit={false} />
+            </span>
+          )}
+        </div>
         {holdingList.length === 0 ? (
-          <p className="text-sm text-gray-500">No open positions.</p>
+          <EmptyState icon={Wallet} title="No open positions" msg="This wallet has fully realized every position." />
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+          <div className="table-wrap">
+            <table className="dt compact">
               <thead>
-                <tr className="border-b border-gray-800 text-left text-gray-400">
-                  <th className="px-3 py-2 font-semibold">Token</th>
-                  <th className="px-3 py-2 font-semibold text-right">Tokens</th>
-                  <th className="px-3 py-2 font-semibold text-right">Value (SOL)</th>
-                  <th className="px-3 py-2 font-semibold text-right">Unrealized</th>
-                  <th className="px-3 py-2 font-semibold text-right">Avg Cost</th>
-                </tr>
+                <tr><th>Token</th><th className="r">Tokens</th><th className="r">Value (SOL)</th><th className="r">Unrealized</th><th className="r">Avg cost</th></tr>
               </thead>
               <tbody>
                 {holdingList.map((h) => (
-                  <tr key={h.mint} className="border-b border-gray-800/50 hover:bg-gray-800/30">
-                    <td className="px-3 py-2">
-                      <code className="text-xs font-mono text-gray-300">{shortAddr(h.mint)}</code>
+                  <tr key={h.mint}>
+                    <td>
+                      <span className="row gap-8">
+                        <TokenMark symbol={f.short(h.mint, 4, 4)} size={24} />
+                        <b style={{ fontSize: 12.5 }}>{f.short(h.mint, 4, 4)}</b>
+                      </span>
                     </td>
-                    <td className="px-3 py-2 text-right text-gray-300">{h.tokens.toLocaleString()}</td>
-                    <td className="px-3 py-2 text-right text-gray-200">{fmtSol(h.currentValueSol)}</td>
-                    <td className={`px-3 py-2 text-right font-semibold ${pnlColor(h.unrealizedSol)}`}>
-                      {fmtSolSigned(h.unrealizedSol)}
-                    </td>
-                    <td className="px-3 py-2 text-right text-gray-400">{fmtSol(h.avgCostSol)}</td>
+                    <td className="r num faint">{f.compact(h.tokens)}</td>
+                    <td className="r num">{f.sol(h.currentValueSol)}</td>
+                    <td className="r"><Pnl value={h.unrealizedSol} unit={false} /></td>
+                    <td className="r num faint">{h.avgCostSol != null ? h.avgCostSol.toFixed(6) : '—'}</td>
                   </tr>
                 ))}
               </tbody>
@@ -318,74 +317,50 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
       </div>
 
       {/* Best / worst tokens */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <TokenTable title="Best tokens" tone="best" rows={best} />
-        <TokenTable title="Worst tokens" tone="worst" rows={worst} />
+      <div className="grid cols-2">
+        <TokenTable title="Best tokens" icon={TrendingUp} tone="pos" rows={best} />
+        <TokenTable title="Worst tokens" icon={TrendingDown} tone="neg" rows={worst} />
       </div>
 
       {/* Recent trades */}
-      <div className="rounded-xl border border-gray-800 bg-gray-900/40 p-6">
-        <h3 className="text-lg font-semibold mb-4">Recent trades</h3>
-        {recent.length === 0 ? (
-          <p className="text-sm text-gray-500">No recent trades.</p>
-        ) : (
-          <ul className="space-y-2">
+      {recent.length > 0 && (
+        <div className="card">
+          <div className="card-head"><h3><span className="ic"><List size={16} /></span> Recent trades</h3></div>
+          <div className="card-pad stack gap-8">
             {recent.map((t, i) => {
-              const isSell = String(t.type).toUpperCase() === 'SELL';
+              const sell = String(t.type).toUpperCase() === 'SELL';
               return (
-                <li
-                  key={`${t.txHash}-${i}`}
-                  className="flex flex-wrap items-center gap-3 rounded-lg bg-gray-800/40 px-3 py-2 text-sm"
-                >
-                  <span
-                    className={`inline-flex items-center justify-center rounded px-2 py-0.5 text-xs font-bold ${
-                      isSell
-                        ? 'bg-red-500/15 text-red-400 ring-1 ring-red-500/30'
-                        : 'bg-green-500/15 text-green-400 ring-1 ring-green-500/30'
-                    }`}
-                  >
-                    {isSell ? 'SELL' : 'BUY'}
-                  </span>
-                  <code className="text-xs font-mono text-gray-300">{shortAddr(t.mint)}</code>
-                  <span className="text-gray-200">{fmtSol(t.amountSol)} SOL</span>
-                  {t.source && (
-                    <span className="text-xs text-gray-500">{t.source}</span>
-                  )}
-                  <span className="text-xs text-gray-500 ml-auto">{fmtTime(t.at)}</span>
+                <div className="trade" key={`${t.txHash}-${i}`}>
+                  <span className={`tradetype ${sell ? 'sell' : 'buy'}`}>{sell ? 'SELL' : 'BUY'}</span>
+                  <TokenMark symbol={f.short(t.mint, 4, 4)} size={22} />
+                  <b style={{ fontSize: 12.5 }}>{f.short(t.mint, 4, 4)}</b>
+                  <span className="num" style={{ fontSize: 12.5 }}>{f.sol(t.amountSol)} <span className="faint">SOL</span></span>
+                  {t.source && <SourceBadge source={t.source} />}
+                  <span className="spacer" />
+                  <span className="faint" style={{ fontSize: 12 }}>{f.ago(toMs(t.at))}</span>
                   {t.txHash && (
-                    <a
-                      href={`https://solscan.io/tx/${t.txHash}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center text-blue-400 hover:text-blue-300 transition-colors"
-                      title="View transaction on Solscan"
-                    >
-                      <ExternalLink className="w-3.5 h-3.5" />
+                    <a className="iconbtn" href={`https://solscan.io/tx/${t.txHash}`} target="_blank" rel="noopener noreferrer" title="Tx">
+                      <ExternalLink size={14} />
                     </a>
                   )}
-                </li>
+                </div>
               );
             })}
-          </ul>
-        )}
-      </div>
-
-      {/* Wallet cluster */}
-      {(fundedBy.length > 0 || funded.length > 0) && (
-        <div className="rounded-xl border border-gray-800 bg-gray-900/40 p-6 space-y-4">
-          <div>
-            <h3 className="text-lg font-semibold">Wallet cluster</h3>
-            <p className="text-xs text-gray-500 mt-1">
-              SOL funding links — these wallets are likely controlled by the same trader.
-            </p>
           </div>
+        </div>
+      )}
 
-          {fundedBy.length > 0 && (
-            <ClusterList title="Funded by" links={fundedBy} />
-          )}
-          {funded.length > 0 && (
-            <ClusterList title="Funded these wallets" links={funded} />
-          )}
+      {/* Funding cluster */}
+      {(fundedBy.length > 0 || funded.length > 0) && (
+        <div className="card">
+          <div className="card-head">
+            <h3><span className="ic"><GitBranch size={16} /></span> Funding cluster</h3>
+            <span className="faint" style={{ fontSize: 12 }}>Likely the same trader</span>
+          </div>
+          <div className="card-pad stack gap-16">
+            <ClusterSection title="Funded by" links={fundedBy} router={router} />
+            <ClusterSection title="Funded these wallets" links={funded} router={router} />
+          </div>
         </div>
       )}
     </div>
@@ -394,51 +369,39 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
 
 // --- subcomponents ---------------------------------------------------------
 
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-lg bg-gray-800/40 px-3 py-2">
-      <p className="text-[11px] uppercase tracking-wide text-gray-500">{label}</p>
-      <p className="font-semibold text-gray-200">{value}</p>
-    </div>
-  );
-}
-
 function TokenTable({
-  title,
-  tone,
-  rows,
+  title, icon: Icon, tone, rows,
 }: {
   title: string;
-  tone: 'best' | 'worst';
+  icon: React.ComponentType<{ size?: number }>;
+  tone: 'pos' | 'neg';
   rows: TokenPnl[];
 }) {
   return (
-    <div className="rounded-xl border border-gray-800 bg-gray-900/40 p-6">
-      <h3 className="text-lg font-semibold mb-4">{title}</h3>
-      {(!rows || rows.length === 0) ? (
-        <p className="text-sm text-gray-500">No data.</p>
+    <div className="card">
+      <div className="card-head">
+        <h3><span className="ic" style={{ color: tone === 'pos' ? 'var(--pos)' : 'var(--neg)' }}><Icon size={16} /></span> {title}</h3>
+      </div>
+      {!rows || rows.length === 0 ? (
+        <EmptyState title="No data" />
       ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
+        <div className="table-wrap">
+          <table className="dt compact">
             <thead>
-              <tr className="border-b border-gray-800 text-left text-gray-400">
-                <th className="px-3 py-2 font-semibold">Token</th>
-                <th className="px-3 py-2 font-semibold text-right">PnL (SOL)</th>
-                <th className="px-3 py-2 font-semibold text-right">ROI</th>
-                <th className="px-3 py-2 font-semibold text-right">Trades</th>
-              </tr>
+              <tr><th>Token</th><th className="r">PnL (SOL)</th><th className="r">ROI</th><th className="r">Trades</th></tr>
             </thead>
             <tbody>
               {rows.map((r) => (
-                <tr key={r.mint} className="border-b border-gray-800/50 hover:bg-gray-800/30">
-                  <td className="px-3 py-2">
-                    <code className="text-xs font-mono text-gray-300">{shortAddr(r.mint)}</code>
+                <tr key={r.mint}>
+                  <td>
+                    <span className="row gap-8">
+                      <TokenMark symbol={f.short(r.mint, 4, 4)} size={22} />
+                      <b style={{ fontSize: 12.5 }}>{f.short(r.mint, 4, 4)}</b>
+                    </span>
                   </td>
-                  <td className={`px-3 py-2 text-right font-semibold ${pnlColor(r.realizedPnlSol)}`}>
-                    {fmtSolSigned(r.realizedPnlSol)}
-                  </td>
-                  <td className={`px-3 py-2 text-right ${pnlColor(r.roiPct)}`}>{fmtPct(r.roiPct)}</td>
-                  <td className="px-3 py-2 text-right text-gray-400">{r.trades}</td>
+                  <td className="r"><Pnl value={r.realizedPnlSol} unit={false} /></td>
+                  <td className="r"><Roi value={r.roiPct} /></td>
+                  <td className="r num faint">{r.trades}</td>
                 </tr>
               ))}
             </tbody>
@@ -449,32 +412,34 @@ function TokenTable({
   );
 }
 
-function ClusterList({ title, links }: { title: string; links: ClusterLink[] }) {
+function ClusterSection({
+  title, links, router,
+}: {
+  title: string;
+  links: ClusterLink[];
+  router: ReturnType<typeof useRouter>;
+}) {
+  if (!links || links.length === 0) return null;
   return (
-    <div>
-      <p className="text-sm font-semibold text-gray-300 mb-2">{title}</p>
-      <ul className="space-y-2">
-        {links.map((l) => (
-          <li
-            key={l.wallet}
-            className="flex flex-wrap items-center gap-3 rounded-lg bg-gray-800/40 px-3 py-2 text-sm"
-          >
-            <Link
-              href={`/smart-money/${l.wallet}`}
-              className="inline-flex items-center gap-1 rounded bg-purple-500/15 px-2 py-0.5 text-xs font-mono font-semibold text-purple-300 ring-1 ring-purple-500/30 hover:bg-purple-500/25 transition-colors"
-            >
-              🔗 {shortAddr(l.wallet)}
-            </Link>
-            <span className="text-gray-200">{fmtSol(l.amountSol)} SOL</span>
-            <span className="text-xs text-gray-500">
-              {l.transfers} transfer{l.transfers === 1 ? '' : 's'}
-            </span>
-            {l.lastSeen && (
-              <span className="text-xs text-gray-500 ml-auto">{fmtTime(l.lastSeen)}</span>
-            )}
-          </li>
-        ))}
-      </ul>
+    <div className="stack gap-8">
+      <span className="faint" style={{ fontSize: 12, fontWeight: 600 }}>{title}</span>
+      {links.map((l) => (
+        <div
+          className="trade"
+          key={l.wallet}
+          style={{ cursor: 'pointer' }}
+          onClick={() => router.push(`/smart-money/${l.wallet}`)}
+        >
+          <span className="badge" style={{ color: 'var(--accent-hover)', borderColor: 'var(--accent-ring)', background: 'var(--accent-soft)' }}>
+            <LinkIcon size={11} /> {f.short(l.wallet, 4, 4)}
+          </span>
+          <span className="num" style={{ fontSize: 12.5 }}>{f.sol(l.amountSol)} <span className="faint">SOL</span></span>
+          <span className="faint" style={{ fontSize: 12 }}>{l.transfers} transfer{l.transfers === 1 ? '' : 's'}</span>
+          {l.roiPct != null && <span style={{ fontSize: 12 }}><Roi value={l.roiPct} /></span>}
+          <span className="spacer" />
+          <span className="faint" style={{ fontSize: 12 }}>{f.ago(toMs(l.lastSeen))}</span>
+        </div>
+      ))}
     </div>
   );
 }

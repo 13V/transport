@@ -1,9 +1,13 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import Link from 'next/link';
-import { Star, Copy, Check, Loader, ExternalLink } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { Star, Copy } from 'lucide-react';
 import { useWatchlist } from '@/lib/useWatchlist';
+import {
+  TierBadge, Roi, Pnl, WinBar, EmptyState, ErrorState, SkTable,
+  AddrChip, WatchStar, CopyIconButton,
+} from '@/components/ui';
 
 interface ListWallet {
   address: string;
@@ -20,25 +24,12 @@ interface ListResponse {
   wallets: ListWallet[];
 }
 
-function tierColor(tier?: string): string {
-  switch (tier) {
-    case 'S':
-      return 'bg-amber-500/15 text-amber-400 ring-amber-500/30';
-    case 'A':
-      return 'bg-emerald-500/15 text-emerald-400 ring-emerald-500/30';
-    case 'B':
-      return 'bg-blue-500/15 text-blue-400 ring-blue-500/30';
-    default:
-      return 'bg-gray-500/15 text-gray-400 ring-gray-500/30';
-  }
-}
-
 export default function WatchlistView() {
-  const { watchlist, isWatched, toggle } = useWatchlist();
+  const router = useRouter();
+  const { watchlist } = useWatchlist();
   const [wallets, setWallets] = useState<ListWallet[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
 
   // Fetch the curated list once; we filter it down to watched addresses below.
   useEffect(() => {
@@ -69,143 +60,102 @@ export default function WatchlistView() {
     );
   }, [watchlist, wallets]);
 
-  const copyAddresses = async () => {
-    try {
-      await navigator.clipboard.writeText(watchlist.join('\n'));
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // Clipboard unavailable — silently ignore.
-    }
+  const copyAddresses = () => {
+    navigator.clipboard?.writeText(watchlist.join('\n')).catch(() => {});
   };
+
+  const pageHead = (
+    <div className="page-head">
+      <div className="sub">
+        {watchlist.length} wallet{watchlist.length !== 1 ? 's' : ''} tracked
+      </div>
+      {watchlist.length > 0 && (
+        <div className="page-head-actions">
+          <button className="btn pos-soft sm" onClick={copyAddresses}>
+            <Copy size={15} /> Copy addresses
+          </button>
+        </div>
+      )}
+    </div>
+  );
+
+  if (loading) {
+    return (
+      <div className="view stack gap-24">
+        {pageHead}
+        <SkTable cols={5} rows={6} />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="view stack gap-24">
+        {pageHead}
+        <div className="card">
+          <ErrorState msg="Couldn’t load watchlist stats." />
+        </div>
+      </div>
+    );
+  }
 
   if (watchlist.length === 0) {
     return (
-      <div className="space-y-4">
-        <h2 className="text-3xl font-bold">Your Watchlist</h2>
-        <div className="rounded-xl border border-gray-800 bg-gray-900/40 p-10 text-center">
-          <Star className="mx-auto mb-4 h-10 w-10 text-gray-600" />
-          <p className="text-gray-300 font-medium">Your watchlist is empty.</p>
-          <p className="mt-1 text-sm text-gray-500">
-            Star wallets on the leaderboard to keep an eye on them here.
-          </p>
-          <Link
-            href="/smart-money"
-            className="mt-6 inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700"
-          >
-            Browse Smart Money
-          </Link>
+      <div className="view stack gap-24">
+        {pageHead}
+        <div className="card">
+          <EmptyState
+            icon={Star}
+            title="Your watchlist is empty"
+            msg="Star wallets on the leaderboard to keep an eye on their ROI, PnL, and new buys here."
+            action="Browse Smart Money"
+            actionHref="/smart-money"
+          />
         </div>
       </div>
     );
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="space-y-1">
-          <h2 className="text-3xl font-bold">Your Watchlist</h2>
-          <p className="text-gray-400">
-            {watchlist.length} wallet{watchlist.length !== 1 ? 's' : ''} you&apos;re tracking
-          </p>
-        </div>
-        <button
-          onClick={copyAddresses}
-          className="inline-flex items-center gap-1.5 self-start rounded-lg bg-emerald-500/10 px-3 py-1.5 text-sm font-medium text-emerald-400 ring-1 ring-emerald-500/30 transition-colors hover:bg-emerald-500/20"
-          title="Copy all watchlist addresses to the clipboard"
-        >
-          {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-          {copied ? 'Copied!' : 'Copy watchlist addresses'}
-        </button>
-      </div>
-
-      {error && (
-        <div className="rounded-lg border border-red-800 bg-red-900/20 p-4 text-red-200">
-          {error}
-        </div>
-      )}
-
-      {loading ? (
-        <div className="py-12 text-center">
-          <Loader className="mx-auto mb-4 h-8 w-8 animate-spin text-blue-400" />
-          <p className="text-gray-400">Loading watchlist stats...</p>
-        </div>
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
+    <div className="view stack gap-24">
+      {pageHead}
+      <div className="card" style={{ overflow: 'hidden' }}>
+        <div className="table-wrap">
+          <table className="dt">
             <thead>
-              <tr className="border-b border-gray-800 text-left text-gray-300">
-                <th className="px-4 py-3 font-semibold">Wallet Address</th>
-                <th className="px-4 py-3 font-semibold text-right">ROI</th>
-                <th className="px-4 py-3 font-semibold text-right">PnL</th>
-                <th className="px-4 py-3 font-semibold">Tier</th>
-                <th className="px-4 py-3 font-semibold text-right">Watch</th>
+              <tr>
+                <th>Wallet</th>
+                <th className="c">Tier</th>
+                <th className="r">ROI</th>
+                <th className="r">PnL</th>
+                <th className="r">Win rate</th>
+                <th className="r" style={{ width: 84 }}>Watch</th>
               </tr>
             </thead>
             <tbody>
-              {rows.map((wallet) => (
-                <tr key={wallet.address} className="border-b border-gray-800/60 hover:bg-gray-800/50">
-                  <td className="px-4 py-3">
-                    <Link
-                      href={`/smart-money/${wallet.address}`}
-                      className="inline-flex items-center gap-1.5 text-blue-400 hover:text-blue-300"
-                    >
-                      <code className="rounded bg-gray-800 px-2 py-1 font-mono text-xs text-gray-300">
-                        {wallet.address.slice(0, 8)}...{wallet.address.slice(-4)}
-                      </code>
-                      <ExternalLink className="h-3.5 w-3.5" />
-                    </Link>
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    {wallet.roiPct == null ? (
-                      <span className="text-gray-600">—</span>
-                    ) : (
-                      <span
-                        className={`font-bold ${wallet.roiPct >= 0 ? 'text-green-400' : 'text-red-400'}`}
-                      >
-                        {wallet.roiPct >= 0 ? '+' : ''}
-                        {wallet.roiPct.toFixed(1)}%
-                      </span>
-                    )}
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    <span className={wallet.pnl >= 0 ? 'font-semibold text-green-400' : 'text-red-400'}>
-                      {wallet.pnl >= 0 ? '+' : ''}
-                      {wallet.pnl.toFixed(2)} SOL
-                    </span>
-                  </td>
-                  <td className="px-4 py-3">
-                    {wallet.tier ? (
-                      <span
-                        className={`inline-flex items-center justify-center rounded-full px-2 py-0.5 text-[11px] font-bold ring-1 ${tierColor(
-                          wallet.tier
-                        )}`}
-                        title={`Tier ${wallet.tier}`}
-                      >
-                        {wallet.tier}
-                      </span>
-                    ) : (
-                      <span className="text-gray-600">—</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    <button
-                      onClick={() => toggle(wallet.address)}
-                      className={`rounded p-1 transition-colors hover:bg-gray-700 ${
-                        isWatched(wallet.address) ? 'text-amber-400' : 'text-gray-500'
-                      }`}
-                      title="Remove from watchlist"
-                      aria-label="Remove from watchlist"
-                    >
-                      <Star className="h-4 w-4" fill={isWatched(wallet.address) ? 'currentColor' : 'none'} />
-                    </button>
+              {rows.map((w) => (
+                <tr
+                  key={w.address}
+                  className="clickable"
+                  onClick={() => router.push(`/smart-money/${w.address}`)}
+                >
+                  <td><AddrChip address={w.address} copy={false} /></td>
+                  <td className="c"><TierBadge tier={w.tier} /></td>
+                  <td className="r"><Roi value={w.roiPct} /></td>
+                  <td className="r"><Pnl value={w.pnl} /></td>
+                  <td className="r"><WinBar value={w.winRate} /></td>
+                  <td className="r">
+                    <div className="row-actions" style={{ justifyContent: 'flex-end' }}>
+                      <CopyIconButton text={w.address} title="Copy address" />
+                      <WatchStar address={w.address} />
+                    </div>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-      )}
+      </div>
     </div>
   );
 }

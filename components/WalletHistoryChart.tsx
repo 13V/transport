@@ -1,25 +1,20 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Loader } from 'lucide-react';
+import { TrendingUp } from 'lucide-react';
+import * as f from '@/lib/format';
 import {
-  LineChart,
-  Line,
-  ResponsiveContainer,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-} from 'recharts';
+  AreaChart, CHART_COLORS, EmptyState, ErrorState, SkLine,
+} from '@/components/ui';
 
 /**
  * WALLET HISTORY CHART
  *
  * Fetches the wallet's daily leaderboard snapshots from
- * /api/wallet/{address}/history and charts ROI% (and realized PnL on a second
- * axis) over time. Degrades gracefully: while loading it shows a spinner, and
- * when fewer than two snapshots exist it shows a subtle "not enough history"
- * note rather than erroring.
+ * /api/wallet/{address}/history and charts ROI% (or realized PnL) over time
+ * inside the premium-analytics card shell. The metric (ROI/PnL) and range
+ * (30D/90D/All) toggles are local client state; the data fetch is preserved
+ * from the original implementation.
  */
 
 interface Snapshot {
@@ -39,17 +34,37 @@ interface WalletHistoryChartProps {
   walletAddress: string;
 }
 
-const Card = ({ children }: { children: React.ReactNode }) => (
-  <div className="rounded-xl border border-gray-800 bg-gray-900/40 p-6">
-    <h3 className="text-lg font-semibold mb-4">ROI history</h3>
-    {children}
-  </div>
-);
+type Metric = 'roiPct' | 'pnl';
+type Range = 30 | 90 | 9999;
+
+const RANGES: [Range, string][] = [
+  [30, '30D'],
+  [90, '90D'],
+  [9999, 'All'],
+];
+const METRICS: [Metric, string][] = [
+  ['roiPct', 'ROI %'],
+  ['pnl', 'PnL'],
+];
+
+function Shell({ children, controls }: { children: React.ReactNode; controls?: React.ReactNode }) {
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h3><span className="ic"><TrendingUp size={16} /></span> Performance history</h3>
+        {controls}
+      </div>
+      <div className="card-pad">{children}</div>
+    </div>
+  );
+}
 
 export default function WalletHistoryChart({ walletAddress }: WalletHistoryChartProps) {
   const [snapshots, setSnapshots] = useState<Snapshot[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [metric, setMetric] = useState<Metric>('roiPct');
+  const [range, setRange] = useState<Range>(90);
 
   useEffect(() => {
     let cancelled = false;
@@ -79,105 +94,83 @@ export default function WalletHistoryChart({ walletAddress }: WalletHistoryChart
     };
   }, [walletAddress]);
 
+  const controls = (
+    <div className="row gap-8">
+      <div className="seg">
+        {METRICS.map(([v, l]) => (
+          <button key={v} className={metric === v ? 'on' : ''} onClick={() => setMetric(v)}>{l}</button>
+        ))}
+      </div>
+      <div className="seg">
+        {RANGES.map(([v, l]) => (
+          <button key={v} className={range === v ? 'on' : ''} onClick={() => setRange(v)}>{l}</button>
+        ))}
+      </div>
+    </div>
+  );
+
   if (loading) {
-    return (
-      <Card>
-        <div className="flex items-center gap-2 text-sm text-gray-400">
-          <Loader className="w-4 h-4 animate-spin text-blue-400" />
-          Loading ROI history…
-        </div>
-      </Card>
-    );
+    return <Shell controls={controls}><SkLine w="100%" h={230} /></Shell>;
   }
 
   if (error) {
+    return <Shell controls={controls}><ErrorState msg={error} /></Shell>;
+  }
+
+  const all = snapshots ?? [];
+  // Range filter: keep the most recent `range` days (9999 = all).
+  const windowed = range >= 9999 ? all : all.slice(-range);
+
+  if (windowed.length < 2) {
     return (
-      <Card>
-        <p className="text-sm text-gray-500">{error}</p>
-      </Card>
+      <Shell controls={controls}>
+        <EmptyState
+          icon={TrendingUp}
+          title="Not enough history yet"
+          msg="Daily snapshots build this trajectory over time."
+        />
+      </Shell>
     );
   }
 
-  const data = snapshots ?? [];
+  // Map snapshots to the active metric, coercing nulls to 0 so the curve is continuous.
+  const vals = windowed.map((p) =>
+    metric === 'roiPct' ? (p.roiPct ?? 0) : (p.realizedPnl ?? 0)
+  );
 
-  if (data.length < 2) {
-    return (
-      <Card>
-        <p className="text-sm text-gray-500">
-          Not enough history yet — daily snapshots build this over time.
-        </p>
-      </Card>
-    );
-  }
+  // ~5 evenly-spaced date labels.
+  const step = Math.max(1, Math.ceil(windowed.length / 5));
+  const xLabels = windowed
+    .filter((_, i) => i % step === 0)
+    .map((p) => f.date(+new Date(p.day)));
+
+  const last = vals[vals.length - 1];
+  const first = vals[0];
+  const up = last >= first;
+  const color = up ? CHART_COLORS.POS : CHART_COLORS.NEG;
 
   return (
-    <Card>
-      <div className="h-[220px] w-full">
-        <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={data} margin={{ top: 5, right: 10, bottom: 0, left: -10 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-            <XAxis
-              dataKey="day"
-              stroke="#9ca3af"
-              style={{ fontSize: '12px' }}
-              tick={{ fill: '#9ca3af' }}
-            />
-            <YAxis
-              yAxisId="roi"
-              stroke="#9ca3af"
-              style={{ fontSize: '12px' }}
-              tick={{ fill: '#9ca3af' }}
-              tickFormatter={(v) => `${v}%`}
-            />
-            <YAxis
-              yAxisId="pnl"
-              orientation="right"
-              stroke="#9ca3af"
-              style={{ fontSize: '12px' }}
-              tick={{ fill: '#9ca3af' }}
-            />
-            <Tooltip
-              contentStyle={{
-                backgroundColor: '#1a1a1a',
-                border: '1px solid #1f2937',
-                borderRadius: '8px',
-              }}
-              labelStyle={{ color: '#9ca3af' }}
-              labelFormatter={(label) => `Day: ${label}`}
-              formatter={(value, name) => {
-                const num = typeof value === 'number' ? value : Number(value);
-                if (name === 'ROI%') {
-                  return [Number.isFinite(num) ? `${num.toFixed(1)}%` : '—', 'ROI'];
-                }
-                return [Number.isFinite(num) ? `${num.toFixed(3)} SOL` : '—', 'Realized PnL'];
-              }}
-            />
-            <Line
-              yAxisId="roi"
-              type="monotone"
-              dataKey="roiPct"
-              name="ROI%"
-              stroke="#10b981"
-              strokeWidth={2}
-              dot={false}
-              isAnimationActive={false}
-              connectNulls
-            />
-            <Line
-              yAxisId="pnl"
-              type="monotone"
-              dataKey="realizedPnl"
-              name="Realized PnL"
-              stroke="#3b82f6"
-              strokeWidth={1.5}
-              strokeDasharray="4 2"
-              dot={false}
-              isAnimationActive={false}
-              connectNulls
-            />
-          </LineChart>
-        </ResponsiveContainer>
+    <Shell controls={controls}>
+      <div className="row gap-16" style={{ marginBottom: 6 }}>
+        <div className="stack">
+          <span className="faint" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '.05em' }}>
+            Current {metric === 'roiPct' ? 'ROI' : 'PnL'}
+          </span>
+          <span className={`num ${up ? 'pos' : 'neg'}`} style={{ fontSize: 22, fontWeight: 660 }}>
+            {metric === 'roiPct' ? f.pct(last) : `${f.solSigned(last)} SOL`}
+          </span>
+        </div>
+        <div className="chart-legend" style={{ marginLeft: 'auto' }}>
+          <span className="lg"><span className="sw" style={{ background: color }} />{metric === 'roiPct' ? 'All-time ROI' : 'Realized PnL'}</span>
+        </div>
       </div>
-    </Card>
+      <AreaChart
+        values={vals}
+        height={230}
+        color={color}
+        xLabels={xLabels}
+        fmtY={(v) => (metric === 'roiPct' ? `${Math.round(Number(v))}%` : Math.round(Number(v)))}
+      />
+    </Shell>
   );
 }

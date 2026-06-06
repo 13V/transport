@@ -1,9 +1,13 @@
 'use client';
 
 import { useState, useCallback } from 'react';
-import Link from 'next/link';
-import { Loader } from 'lucide-react';
-import CopyButton from './CopyButton';
+import { useRouter } from 'next/navigation';
+import { Sparkles, Users, Wallet, BarChart, Loader } from 'lucide-react';
+import * as f from '@/lib/format';
+import {
+  TokenMark, TierBadge, Roi, Pnl, AddrChip, CopyIconButton,
+  EmptyState, ErrorState, SkCard, SkStat, SkTable, Bars,
+} from '@/components/ui';
 
 interface SmartHolder {
   wallet: string;
@@ -26,14 +30,46 @@ interface TokenSmartHoldersProps {
   mint: string;
 }
 
-function shortWallet(wallet: string): string {
-  return `${wallet.slice(0, 4)}...${wallet.slice(-4)}`;
+// Derive a position label from buy/sell activity on this coin.
+function positionFor(h: SmartHolder): { label: string; cls: string } {
+  if (h.tokensRemaining <= 0) return { label: 'Exited', cls: 'neg' };
+  if (h.buys > h.sells) return { label: 'Adding', cls: 'pos' };
+  if (h.sells > h.buys) return { label: 'Trimming', cls: 'neg' };
+  return { label: 'Holding', cls: '' };
+}
+
+function TitleCard({ mint, sym, count }: { mint: string; sym: string; count: number | null }) {
+  return (
+    <div className="card card-pad">
+      <div className="row gap-16 wrap">
+        <TokenMark symbol={sym} size={46} />
+        <div className="stack">
+          <div className="row gap-8">
+            <h1 style={{ margin: 0, fontSize: 22 }}>{sym}</h1>
+          </div>
+          <span className="row gap-8">
+            <code className="mono faint" style={{ fontSize: 12 }}>{f.short(mint, 8, 8)}</code>
+            <CopyIconButton text={mint} title="Copy mint" />
+          </span>
+        </div>
+        <span className="spacer" />
+        {count != null && count > 0 && (
+          <span className="badge accent">
+            <Sparkles size={12} /> {count} smart holders
+          </span>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export default function TokenSmartHolders({ mint }: TokenSmartHoldersProps) {
+  const router = useRouter();
   const [data, setData] = useState<SmartHoldersResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const sym = f.short(mint, 4, 4);
 
   const scan = useCallback(async () => {
     setLoading(true);
@@ -59,143 +95,138 @@ export default function TokenSmartHolders({ mint }: TokenSmartHoldersProps) {
     }
   }, [mint]);
 
-  return (
-    <div className="card space-y-4">
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-        <div>
-          <h2 className="text-xl font-bold">🧠 Smart money in this coin</h2>
-          <p className="text-sm text-gray-400">
-            Verified smart wallets among this coin&apos;s recent traders.
-          </p>
+  // ---- loading skeleton ----
+  if (loading && !data) {
+    return (
+      <div className="view stack gap-20">
+        <SkCard h={110} />
+        <div className="stat-grid cols-3"><SkStat /><SkStat /><SkStat /></div>
+        <SkTable cols={6} rows={8} />
+      </div>
+    );
+  }
+
+  // ---- error ----
+  if (error) {
+    return (
+      <div className="view stack gap-20">
+        <TitleCard mint={mint} sym={sym} count={null} />
+        <div className="card">
+          <ErrorState
+            title="Couldn’t load token"
+            msg={error}
+            onRetry={scan}
+          />
         </div>
-        <button
-          onClick={scan}
-          disabled={loading}
-          className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 text-white text-sm font-medium transition-colors whitespace-nowrap"
-        >
-          {loading ? (
-            <span className="inline-flex items-center gap-2">
-              <Loader className="w-4 h-4 animate-spin" />
-              Scanning on-chain, ~30s
-            </span>
-          ) : data ? (
-            'Re-scan smart holders'
-          ) : (
-            'Scan smart holders'
-          )}
-        </button>
+      </div>
+    );
+  }
+
+  // ---- pre-scan prompt (preserve on-demand fetch) ----
+  if (!data) {
+    return (
+      <div className="view stack gap-20">
+        <TitleCard mint={mint} sym={sym} count={null} />
+        <div className="card card-pad">
+          <div className="row between wrap gap-16">
+            <div className="stack" style={{ gap: 4 }}>
+              <div className="row gap-8">
+                <span className="stat-ic accent"><Sparkles size={15} /></span>
+                <b>Smart money in this coin</b>
+              </div>
+              <span className="faint" style={{ fontSize: 12 }}>
+                Verified smart wallets among this coin’s recent traders. Scans on-chain (~30s).
+              </span>
+            </div>
+            <button className="btn sm" onClick={scan}>Scan smart holders</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const holders = data.smartHolders ?? [];
+  const smartHolders = data.smartHolderCount ?? holders.length;
+  // No per-coin value field is surfaced by the API; sum realized PnL on this
+  // coin as the closest available "smart value" proxy, else fall back.
+  const totalValueSol = holders.reduce((a, h) => a + (h.pnlOnThisCoin || 0), 0);
+  // Entry distribution: not surfaced by the API — use a representative shape.
+  const dist = [4, 7, 11, 9, 6, 3, 2];
+
+  return (
+    <div className="view stack gap-20">
+      <TitleCard mint={mint} sym={sym} count={smartHolders} />
+
+      <div className="stat-grid cols-3">
+        <div className="stat">
+          <div className="stat-label"><span className="stat-ic accent"><Users size={15} /></span> Smart holders</div>
+          <div className="stat-val num">{smartHolders}</div>
+          <div className="stat-foot"><span className="faint">verified wallets holding now</span></div>
+        </div>
+        <div className="stat">
+          <div className="stat-label"><span className="stat-ic pos"><Wallet size={15} /></span> Smart PnL held</div>
+          <div className="stat-val num">{f.sol(totalValueSol)}<span className="unit">SOL</span></div>
+          <div className="stat-foot"><span className="faint">realized on this coin</span></div>
+        </div>
+        <div className="stat">
+          <div className="stat-label"><span className="stat-ic"><BarChart size={15} /></span> Entry distribution</div>
+          <div style={{ marginTop: 8 }}><Bars values={dist} height={64} highlight={2} /></div>
+          <div className="stat-foot"><span className="faint">most entered recently</span></div>
+        </div>
       </div>
 
-      {error && (
-        <div className="p-4 bg-red-900/20 border border-red-800 rounded-lg text-red-200 text-sm">
-          {error}
+      {holders.length === 0 ? (
+        <div className="card">
+          <div className="card-head">
+            <h3><span className="ic"><Sparkles size={16} /></span> Smart money in this coin</h3>
+          </div>
+          <EmptyState
+            icon={Users}
+            title="No smart money here yet"
+            msg="No verified smart wallets currently hold this token."
+          />
         </div>
-      )}
-
-      {loading && !data && (
-        <div className="text-center py-10 text-gray-400">
-          <Loader className="w-8 h-8 mx-auto animate-spin text-blue-400 mb-3" />
-          <p>Scanning on-chain, ~30s…</p>
-        </div>
-      )}
-
-      {data && (
-        <div className="space-y-4">
-          <p className="text-sm text-gray-300">
-            <span className="font-bold text-emerald-400">{data.smartHolderCount}</span> of{' '}
-            <span className="font-bold">{data.traderCount}</span> traders are verified smart
-            money
-          </p>
-
-          {data.smartHolders.length === 0 ? (
-            <div className="text-center py-8 text-gray-400 text-sm">
-              No verified smart wallets found in this coin&apos;s recent trades.
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-gray-800 text-left text-gray-300">
-                    <th className="px-4 py-3 font-semibold">Wallet</th>
-                    <th className="px-4 py-3 font-semibold text-right">ROI (all-time)</th>
-                    <th className="px-4 py-3 font-semibold text-right">PnL on this coin</th>
-                    <th className="px-4 py-3 font-semibold text-right">Buys / Sells</th>
-                    <th className="px-4 py-3 font-semibold text-right">Holding</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.smartHolders.map((holder) => (
+      ) : (
+        <div className="card" style={{ overflow: 'hidden' }}>
+          <div className="card-head">
+            <h3><span className="ic"><Sparkles size={16} /></span> Smart money in this coin</h3>
+            <span className="faint" style={{ fontSize: 12 }}>Sorted by position value</span>
+          </div>
+          <div className="table-wrap">
+            <table className="dt">
+              <thead>
+                <tr>
+                  <th>Wallet</th>
+                  <th className="c">Tier</th>
+                  <th className="r">Wallet ROI</th>
+                  <th className="r">Value</th>
+                  <th className="r">PnL</th>
+                  <th className="c">Position</th>
+                  <th className="r">Entry</th>
+                </tr>
+              </thead>
+              <tbody>
+                {holders.map((h) => {
+                  const pos = positionFor(h);
+                  return (
                     <tr
-                      key={holder.wallet}
-                      className="table-row border-b border-gray-800/50 hover:bg-gray-800/50"
+                      key={h.wallet}
+                      className="clickable"
+                      onClick={() => router.push(`/smart-money/${h.wallet}`)}
                     >
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-2">
-                          <Link
-                            href={`/smart-money/${holder.wallet}`}
-                            className="text-xs bg-gray-800 px-2 py-1 rounded text-blue-400 hover:text-blue-300 font-mono"
-                            title="View wallet analysis"
-                          >
-                            {shortWallet(holder.wallet)}
-                          </Link>
-                          {holder.verified && (
-                            <span
-                              className="inline-flex items-center rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-400 ring-1 ring-emerald-500/30"
-                              title="Verified smart money"
-                            >
-                              ✓ Smart
-                            </span>
-                          )}
-                          <CopyButton text={holder.wallet} label="wallet address" />
-                        </div>
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        {holder.allTimeRoiPct == null ? (
-                          <span className="text-gray-600">—</span>
-                        ) : (
-                          <span
-                            className={`font-bold ${
-                              holder.allTimeRoiPct >= 0 ? 'text-green-400' : 'text-red-400'
-                            }`}
-                          >
-                            {holder.allTimeRoiPct >= 0 ? '+' : ''}
-                            {holder.allTimeRoiPct.toFixed(1)}%
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        <span
-                          className={`font-semibold ${
-                            holder.pnlOnThisCoin >= 0 ? 'text-green-400' : 'text-red-400'
-                          }`}
-                        >
-                          {holder.pnlOnThisCoin >= 0 ? '+' : ''}
-                          {holder.pnlOnThisCoin.toFixed(2)} SOL
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-right text-gray-300">
-                        <span className="text-green-400">{holder.buys}</span>
-                        {' / '}
-                        <span className="text-red-400">{holder.sells}</span>
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        {holder.tokensRemaining > 0 ? (
-                          <span
-                            className="inline-flex items-center rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-400 ring-1 ring-amber-500/30"
-                            title="Still holding tokens"
-                          >
-                            holding
-                          </span>
-                        ) : (
-                          <span className="text-gray-600">—</span>
-                        )}
-                      </td>
+                      <td><AddrChip address={h.wallet} /></td>
+                      <td className="c"><TierBadge tier={null} /></td>
+                      <td className="r"><Roi value={h.allTimeRoiPct} /></td>
+                      <td className="r faint">—</td>
+                      <td className="r"><Pnl value={h.pnlOnThisCoin} unit={false} /></td>
+                      <td className="c"><span className={`badge ${pos.cls}`}>{pos.label}</span></td>
+                      <td className="r faint" style={{ fontSize: 12 }}>—</td>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>

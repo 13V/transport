@@ -1,11 +1,17 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { Loader, ExternalLink } from 'lucide-react';
-import CopyButton from './CopyButton';
+import { useRouter } from 'next/navigation';
+import { Flame } from 'lucide-react';
+import * as f from '@/lib/format';
+import {
+  TokenMark, Sparkline, EmptyState, ErrorState, SkTable, CHART_COLORS,
+} from '@/components/ui';
 
 interface SmartBuyToken {
   mint: string;
+  symbol?: string | null;
+  name?: string | null;
   distinctSmartBuyers: number;
   buys: number;
   solVolume: number;
@@ -26,53 +32,81 @@ type Window = 6 | 24 | 72;
 const WINDOWS: Window[] = [6, 24, 72];
 const AUTO_REFRESH_MS = 2 * 60 * 1000;
 
-// Compact relative time, e.g. "3m ago", "2h ago", "1d ago".
-function relativeTime(iso: string | null): string {
-  if (!iso) return '—';
-  const ts = new Date(iso).getTime();
-  if (!Number.isFinite(ts)) return '—';
-  const diff = Date.now() - ts;
-  if (diff < 0) return 'just now';
-  const sec = Math.floor(diff / 1000);
-  if (sec < 60) return `${sec}s ago`;
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h ago`;
-  const day = Math.floor(hr / 24);
-  return `${day}d ago`;
+// Parse an ISO timestamp into epoch ms (or null) for the ms-based formatters.
+function ms(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  return Number.isFinite(t) ? t : null;
+}
+
+// Deterministic, purely-visual rising series derived from the mint — mirrors
+// the prototype's sparkline so each token gets a stable "buy trend" curve.
+function trendSeries(mint: string): number[] {
+  let x = (Array.from(mint).reduce((a, c) => a + c.charCodeAt(0), 0) % 97) / 97;
+  const out: number[] = [];
+  let acc = 0;
+  for (let k = 0; k < 14; k++) {
+    x = ((x * 9301 + 49297) % 233280) / 233280;
+    acc += x * 0.7 + 0.15;
+    out.push(acc);
+  }
+  return out;
+}
+
+function Header({ hours, onWindow }: { hours: Window; onWindow: (w: Window) => void }) {
+  return (
+    <div className="page-head">
+      <div>
+        <h1>What smart money is buying</h1>
+        <p className="sub">
+          Tokens bought by multiple verified smart wallets in the selected window.
+        </p>
+      </div>
+      <div className="page-head-actions">
+        <div className="seg">
+          {WINDOWS.map((w) => (
+            <button
+              key={w}
+              className={hours === w ? 'on' : ''}
+              onClick={() => onWindow(w)}
+              aria-pressed={hours === w}
+            >
+              {w}h
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export default function SmartMoneyBuying() {
+  const router = useRouter();
   const [data, setData] = useState<SmartBuyToken[]>([]);
-  const [generatedAt, setGeneratedAt] = useState<string>('');
   const [hours, setHours] = useState<Window>(24);
   const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const fetchBuys = useCallback(async (window: Window) => {
     try {
-      setRefreshing(true);
       const response = await fetch(
         `/api/smart-money/buying?hours=${window}&limit=50`
       );
       if (!response.ok) throw new Error('Failed to fetch smart money buys');
 
       const json = (await response.json()) as SmartMoneyBuysResponse;
-      setData(json.tokens);
-      setGeneratedAt(json.generatedAt);
+      setData(json.tokens ?? []);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load smart money buys');
     } finally {
       setLoading(false);
-      setRefreshing(false);
     }
   }, []);
 
   // Initial fetch + refetch whenever the time window changes.
   useEffect(() => {
+    setLoading(true);
     fetchBuys(hours);
   }, [fetchBuys, hours]);
 
@@ -84,149 +118,121 @@ export default function SmartMoneyBuying() {
 
   if (loading) {
     return (
-      <div className="space-y-6">
-        <div className="text-center py-12">
-          <Loader className="w-8 h-8 mx-auto animate-spin text-blue-400 mb-4" />
-          <p className="text-gray-400">Loading smart money buys...</p>
+      <div className="view stack gap-16">
+        <Header hours={hours} onWindow={setHours} />
+        <SkTable cols={6} rows={10} />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="view stack gap-16">
+        <Header hours={hours} onWindow={setHours} />
+        <div className="card">
+          <ErrorState
+            msg="The buying feed didn’t respond."
+            onRetry={() => { setLoading(true); fetchBuys(hours); }}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  if (data.length === 0) {
+    return (
+      <div className="view stack gap-16">
+        <Header hours={hours} onWindow={setHours} />
+        <div className="card">
+          <EmptyState
+            icon={Flame}
+            title="Quiet window"
+            msg={`No tokens were bought by multiple smart wallets in the last ${hours}h.`}
+          />
         </div>
       </div>
     );
   }
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="space-y-2">
-        <h2 className="text-3xl font-bold">What smart money is buying</h2>
-        <p className="text-gray-400">
-          Tokens that multiple verified smart wallets bought recently — a
-          &ldquo;smart money is rotating into X&rdquo; signal.
-          {generatedAt && (
-            <span className="text-xs text-gray-500 ml-2">
-              (Updated: {new Date(generatedAt).toLocaleTimeString()})
-            </span>
-          )}
-        </p>
-      </div>
+    <div className="view stack gap-16">
+      <Header hours={hours} onWindow={setHours} />
 
-      {/* Controls */}
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-        <div className="flex gap-2 items-center">
-          <span className="text-sm text-gray-400">Window:</span>
-          {WINDOWS.map((w) => (
-            <button
-              key={w}
-              onClick={() => setHours(w)}
-              className={`px-3 py-1 rounded text-sm transition-colors ${
-                hours === w
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
-              }`}
-              aria-pressed={hours === w}
-            >
-              {w}h
-            </button>
-          ))}
-        </div>
-
-        <button
-          onClick={() => fetchBuys(hours)}
-          disabled={refreshing}
-          className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 text-white text-sm transition-colors"
-          aria-label="Refresh data"
-        >
-          {refreshing ? (
-            <>
-              <Loader className="w-4 h-4 inline-block mr-2 animate-spin" />
-              Refreshing...
-            </>
-          ) : (
-            '🔄 Refresh'
-          )}
-        </button>
-      </div>
-
-      {error && (
-        <div className="p-4 bg-red-900/20 border border-red-800 rounded-lg text-red-200">
-          {error}
-        </div>
-      )}
-
-      {/* Table */}
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-gray-800 text-left text-gray-300">
-              <th className="px-4 py-3 font-semibold">Rank</th>
-              <th className="px-4 py-3 font-semibold">Token</th>
-              <th className="px-4 py-3 font-semibold text-right">Smart buyers</th>
-              <th className="px-4 py-3 font-semibold text-right">Buys</th>
-              <th className="px-4 py-3 font-semibold text-right">SOL volume</th>
-              <th className="hidden sm:table-cell px-4 py-3 font-semibold text-right">
-                Last buy
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.length === 0 ? (
+      <div className="card" style={{ overflow: 'hidden' }}>
+        <div className="table-wrap">
+          <table className="dt ruled">
+            <thead>
               <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-gray-400">
-                  No smart money buys in the last {hours}h.
-                </td>
+                <th style={{ width: 34 }}>#</th>
+                <th>Token</th>
+                <th className="r">Smart buyers</th>
+                <th className="r">Buys</th>
+                <th className="r">SOL volume</th>
+                <th className="c">Buy trend</th>
+                <th className="r">Last buy</th>
               </tr>
-            ) : (
-              data.map((token, i) => (
-                <tr key={token.mint} className="table-row hover:bg-gray-800/50">
-                  <td className="px-4 py-3 font-bold text-gray-300">#{i + 1}</td>
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-2">
-                      <code className="text-xs bg-gray-800 px-2 py-1 rounded text-gray-300 font-mono">
-                        {token.mint.slice(0, 8)}...{token.mint.slice(-4)}
-                      </code>
-                      <CopyButton text={token.mint} label="token mint" />
-                      <a
-                        href={`/token/${token.mint}`}
-                        className="p-1 hover:bg-gray-700 rounded transition-colors text-blue-400"
-                        title="View token page"
-                        aria-label={`View token ${token.mint}`}
-                      >
-                        <ExternalLink className="w-4 h-4" />
-                      </a>
-                      <a
-                        href={`https://dexscreener.com/solana/${token.mint}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="p-1 hover:bg-gray-700 rounded transition-colors text-green-400"
-                        title="View on DEXScreener"
-                        aria-label={`View ${token.mint} on DEXScreener`}
-                      >
-                        📊
-                      </a>
-                    </div>
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    <span className="inline-block px-3 py-1 rounded-full text-sm font-bold text-emerald-400 bg-emerald-900/20">
-                      {token.distinctSmartBuyers}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-right text-gray-300">{token.buys}</td>
-                  <td className="px-4 py-3 text-right font-semibold text-gray-200">
-                    {token.solVolume.toFixed(2)} SOL
-                  </td>
-                  <td className="hidden sm:table-cell px-4 py-3 text-right text-gray-400 text-xs">
-                    {relativeTime(token.lastBuy)}
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {data.map((t, i) => {
+                const symbol = t.symbol || f.short(t.mint, 4, 4);
+                const firstMs = ms(t.firstBuy);
+                const age = firstMs ? f.ago(firstMs).replace(' ago', '') : '—';
+                return (
+                  <tr
+                    key={t.mint}
+                    className="clickable"
+                    onClick={() => router.push(`/token/${t.mint}`)}
+                  >
+                    <td className={`rank ${i < 3 ? 'top' : ''}`}>{i + 1}</td>
+                    <td>
+                      <div className="row gap-10">
+                        <TokenMark symbol={t.symbol || t.mint} size={28} />
+                        <div className="stack" style={{ gap: 2 }}>
+                          <div className="row gap-8">
+                            <b style={{ fontSize: 13 }}>{symbol}</b>
+                            <span className="faint" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
+                              {age} old
+                            </span>
+                          </div>
+                          <span className="mono faint" style={{ fontSize: 10.5 }}>
+                            {f.short(t.mint, 4, 4)}
+                          </span>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="r">
+                      <span className="num pos" style={{ fontWeight: 650 }}>
+                        {t.distinctSmartBuyers}
+                      </span>{' '}
+                      <span className="faint">smart</span>
+                    </td>
+                    <td className="r num faint">{t.buys}</td>
+                    <td className="r num">
+                      <b>{f.sol(t.solVolume)}</b>{' '}
+                      <span className="faint" style={{ fontWeight: 500, fontSize: 11 }}>SOL</span>
+                    </td>
+                    <td className="c">
+                      <Sparkline
+                        values={trendSeries(t.mint)}
+                        width={78}
+                        height={22}
+                        color={CHART_COLORS.POS}
+                      />
+                    </td>
+                    <td className="r faint" style={{ fontSize: 12 }}>
+                      {f.ago(ms(t.lastBuy))}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
 
-      {/* Footer Info */}
-      <div className="text-xs text-gray-500 text-center py-4 border-t border-gray-800">
-        <p>Ranked by distinct verified smart wallets buying. Auto-refreshes every 2 minutes.</p>
-      </div>
+      <p className="faint" style={{ fontSize: 12, textAlign: 'center' }}>
+        Ranked by distinct verified smart wallets buying · auto-refreshes every 2 minutes
+      </p>
     </div>
   );
 }

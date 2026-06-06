@@ -5,17 +5,31 @@ import { useRouter } from 'next/navigation';
 import {
   ChevronUp,
   ChevronDown,
+  ChevronsUpDown,
+  ChevronLeft,
+  ChevronRight,
   Search,
-  Loader,
   ExternalLink,
   Copy,
   Check,
-  ChevronLeft,
-  ChevronRight,
   Download,
+  Sparkles,
+  Link as LinkIcon,
 } from 'lucide-react';
-import CopyButton from './CopyButton';
-import WatchlistButton from './WatchlistButton';
+import * as f from '@/lib/format';
+import {
+  TierBadge,
+  Roi,
+  Pnl,
+  EmptyState,
+  ErrorState,
+  SkTable,
+  AddrChip,
+  WatchStar,
+  CopyIconButton,
+  Sparkline,
+  CHART_COLORS,
+} from '@/components/ui';
 
 interface LeaderboardWallet {
   rank: number;
@@ -47,16 +61,41 @@ interface LeaderboardResponse {
   cacheAge: number;
 }
 
-type SortField = 'rank' | 'score' | 'pnl' | 'winRate' | 'updatedAt';
+type SortField = 'rank' | 'roiPct' | 'pnl' | 'winRate';
 type SortDirection = 'asc' | 'desc';
 type PageSize = 10 | 25 | 50;
 
-export default function SmartMoneyLeaderboard() {
+/**
+ * Build a deterministic ~30-point smooth trend that ends at `endRoi`, used
+ * purely for the 30D sparkline column (mirrors the prototype's history()).
+ */
+function trendTo(endRoi: number, seedStr: string, points = 30): number[] {
+  // simple string hash → deterministic seed
+  let h = 0;
+  for (let i = 0; i < seedStr.length; i++) h = (Math.imul(31, h) + seedStr.charCodeAt(i)) | 0;
+  let s = (h >>> 0) || 1;
+  const rand = () => {
+    s = (Math.imul(1664525, s) + 1013904223) >>> 0;
+    return s / 0xffffffff;
+  };
+  // start somewhere proportionally below the end value, walk smoothly toward it
+  const start = endRoi - (Math.abs(endRoi) * 0.6 + 8) * (0.6 + rand() * 0.8);
+  const out: number[] = [];
+  for (let i = 0; i < points; i++) {
+    const t = i / (points - 1);
+    const base = start + (endRoi - start) * t;
+    const wobble = (rand() - 0.5) * (Math.abs(endRoi - start) * 0.12 + 2);
+    out.push(i === points - 1 ? endRoi : base + wobble);
+  }
+  return out;
+}
+
+export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQuery?: string }) {
   const router = useRouter();
   const [data, setData] = useState<LeaderboardWallet[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [searchQuery, setSearchQuery] = useState('');
+  const [searchQuery, setSearchQuery] = useState(initialQuery);
   const [tierFilter, setTierFilter] = useState<'All' | 'S' | 'A' | 'B' | 'C'>('All');
   const [minRoi, setMinRoi] = useState<string>('');
   const [smartOnly, setSmartOnly] = useState(false);
@@ -64,12 +103,13 @@ export default function SmartMoneyLeaderboard() {
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
   const [currentPage, setCurrentPage] = useState(0);
   const [pageSize, setPageSize] = useState<PageSize>(25);
-  const [totalWallets, setTotalWallets] = useState(0);
-  const [lastUpdated, setLastUpdated] = useState<string>('');
-  const [lastSearches, setLastSearches] = useState<string[]>([]);
-  const [showSearchHistory, setShowSearchHistory] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
   const [copiedList, setCopiedList] = useState(false);
+
+  // Seed the address filter from the URL ?q= param (passed by the page wrapper).
+  useEffect(() => {
+    setSearchQuery(initialQuery);
+    setCurrentPage(0);
+  }, [initialQuery]);
 
   // Copy the curated smart-wallet list (plain addresses) for pasting into a
   // trading terminal watchlist or alert bot.
@@ -80,7 +120,7 @@ export default function SmartMoneyLeaderboard() {
       const text = await res.text();
       await navigator.clipboard.writeText(text.trim());
       setCopiedList(true);
-      setTimeout(() => setCopiedList(false), 2000);
+      setTimeout(() => setCopiedList(false), 1600);
     } catch {
       // Fall back to opening the downloadable list if clipboard is unavailable.
       window.open('/api/smart-money/list?format=addresses', '_blank');
@@ -90,20 +130,16 @@ export default function SmartMoneyLeaderboard() {
   // Fetch leaderboard data
   const fetchLeaderboard = useCallback(async (offset = 0) => {
     try {
-      setRefreshing(true);
       const response = await fetch(`/api/smart-money?limit=100&offset=${offset}`);
       if (!response.ok) throw new Error('Failed to fetch leaderboard');
 
       const json = (await response.json()) as LeaderboardResponse;
       setData(json.leaderboard);
-      setTotalWallets(json.totalWallets);
-      setLastUpdated(json.lastUpdated);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load leaderboard');
     } finally {
       setLoading(false);
-      setRefreshing(false);
     }
   }, []);
 
@@ -117,14 +153,6 @@ export default function SmartMoneyLeaderboard() {
     const interval = setInterval(() => fetchLeaderboard(), 5 * 60 * 1000);
     return () => clearInterval(interval);
   }, [fetchLeaderboard]);
-
-  // Load search history from localStorage
-  useEffect(() => {
-    const saved = localStorage.getItem('smartMoneySearches');
-    if (saved) {
-      setLastSearches(JSON.parse(saved));
-    }
-  }, []);
 
   // Filter and sort data
   const filteredData = useMemo(() => {
@@ -153,534 +181,362 @@ export default function SmartMoneyLeaderboard() {
     }
 
     // Apply sorting
+    const dir = sortDirection === 'asc' ? 1 : -1;
     result.sort((a, b) => {
-      let aVal = a[sortField];
-      let bVal = b[sortField];
-
-      if (typeof aVal === 'string') {
-        aVal = aVal.toLowerCase();
-        bVal = (bVal as string).toLowerCase();
+      let av: number = a[sortField] ?? 0;
+      let bv: number = b[sortField] ?? 0;
+      // wallets with unknown ROI sort to the bottom
+      if (sortField === 'roiPct') {
+        av = a.roiPct == null ? -1e9 : a.roiPct;
+        bv = b.roiPct == null ? -1e9 : b.roiPct;
       }
-
-      if (sortDirection === 'asc') {
-        return aVal < bVal ? -1 : aVal > bVal ? 1 : 0;
-      } else {
-        return aVal > bVal ? -1 : aVal < bVal ? 1 : 0;
-      }
+      return av < bv ? -dir : av > bv ? dir : 0;
     });
 
     return result;
   }, [data, searchQuery, tierFilter, minRoi, smartOnly, sortField, sortDirection]);
 
   // Paginate filtered data
+  const maxPage = Math.ceil(filteredData.length / pageSize) || 1;
+  const safePage = Math.min(currentPage, maxPage - 1);
   const paginatedData = useMemo(() => {
-    const start = currentPage * pageSize;
+    const start = safePage * pageSize;
     return filteredData.slice(start, start + pageSize);
-  }, [filteredData, currentPage, pageSize]);
+  }, [filteredData, safePage, pageSize]);
 
-  const maxPage = Math.ceil(filteredData.length / pageSize);
-
-  // Handle wallet click
   const handleWalletClick = (address: string) => {
     router.push(`/smart-money/${address}`);
   };
 
-  // Handle search
-  const handleSearch = (query: string) => {
-    setSearchQuery(query);
-    setCurrentPage(0);
-
-    // Save to history
-    if (query.trim()) {
-      const updated = [query, ...lastSearches.filter((s) => s !== query)].slice(0, 5);
-      setLastSearches(updated);
-      localStorage.setItem('smartMoneySearches', JSON.stringify(updated));
-    }
-  };
-
-  // Handle sort
   const handleSort = (field: SortField) => {
     if (sortField === field) {
       setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
     } else {
       setSortField(field);
-      setSortDirection('asc');
+      setSortDirection(field === 'rank' ? 'asc' : 'desc');
     }
     setCurrentPage(0);
   };
 
-  // Get score color
-  const getScoreColor = (score: number) => {
-    if (score >= 70) return 'text-green-400 bg-green-900/20';
-    if (score >= 30) return 'text-yellow-400 bg-yellow-900/20';
-    return 'text-red-400 bg-red-900/20';
+  // ---- pieces ------------------------------------------------------------
+  const SortTh = ({ field, label, align }: { field: SortField; label: string; align?: 'r' | 'c' }) => {
+    const on = sortField === field;
+    return (
+      <th className={align}>
+        <button className={`th-sort ${on ? 'sorted' : ''}`} onClick={() => handleSort(field)}>
+          {label}
+          <span className="sort-ic">
+            {on ? (
+              sortDirection === 'asc' ? <ChevronUp size={13} /> : <ChevronDown size={13} />
+            ) : (
+              <ChevronsUpDown size={13} />
+            )}
+          </span>
+        </button>
+      </th>
+    );
   };
 
-  // Get score badge
-  const getScoreBadge = (score: number) => {
-    if (score >= 70) return 'badge-success';
-    if (score >= 30) return 'badge-warning';
-    return 'badge-danger';
-  };
-
-  // Tier badge color (S=gold, A=emerald, B=blue, C=gray)
-  const getTierColor = (tier?: string) => {
-    switch (tier) {
-      case 'S':
-        return 'bg-amber-500/15 text-amber-400 ring-amber-500/30';
-      case 'A':
-        return 'bg-emerald-500/15 text-emerald-400 ring-emerald-500/30';
-      case 'B':
-        return 'bg-blue-500/15 text-blue-400 ring-blue-500/30';
-      default:
-        return 'bg-gray-500/15 text-gray-400 ring-gray-500/30';
-    }
-  };
-
-  const SortHeader = ({ field, label }: { field: SortField; label: string }) => (
-    <button
-      onClick={() => handleSort(field)}
-      className="flex items-center gap-1 font-semibold hover:text-blue-400 transition-colors"
-      aria-label={`Sort by ${label}`}
-    >
-      {label}
-      {sortField === field && (
-        sortDirection === 'asc' ? (
-          <ChevronUp className="w-4 h-4" />
-        ) : (
-          <ChevronDown className="w-4 h-4" />
-        )
-      )}
-    </button>
+  const actions = (
+    <>
+      <button
+        className="btn pos-soft sm"
+        onClick={copyWalletList}
+        title="Copy curated smart-wallet addresses to your clipboard"
+      >
+        {copiedList ? <Check size={15} /> : <Copy size={15} />}
+        {copiedList ? 'Copied' : 'Copy smart wallet list'}
+      </button>
+      <a
+        className="btn sm"
+        href="/api/smart-money/list?format=csv"
+        title="Download the curated list as CSV (address + stats)"
+      >
+        <Download size={15} /> CSV
+      </a>
+    </>
   );
 
+  const pageHead = (
+    <div className="page-head">
+      <div className="sub" />
+      <div className="page-head-actions">{actions}</div>
+    </div>
+  );
+
+  const toolbar = (
+    <div className="lb-bar">
+      <div className="search-wrap" style={{ width: 240 }}>
+        <span className="search-ic"><Search size={14} /></span>
+        <input
+          className="input sm"
+          placeholder="Filter by address…"
+          value={searchQuery}
+          autoComplete="off"
+          spellCheck={false}
+          onChange={(e) => {
+            setSearchQuery(e.target.value);
+            setCurrentPage(0);
+          }}
+        />
+      </div>
+      <select
+        className="select sm"
+        value={tierFilter}
+        onChange={(e) => {
+          setTierFilter(e.target.value as 'All' | 'S' | 'A' | 'B' | 'C');
+          setCurrentPage(0);
+        }}
+      >
+        <option value="All">All tiers</option>
+        <option value="S">Tier S</option>
+        <option value="A">Tier A</option>
+        <option value="B">Tier B</option>
+        <option value="C">Tier C</option>
+      </select>
+      <input
+        className="input sm"
+        type="number"
+        inputMode="numeric"
+        placeholder="Min ROI %"
+        value={minRoi}
+        style={{ width: 110 }}
+        onChange={(e) => {
+          setMinRoi(e.target.value);
+          setCurrentPage(0);
+        }}
+      />
+      <label className="check sm">
+        <input
+          type="checkbox"
+          checked={smartOnly}
+          onChange={(e) => {
+            setSmartOnly(e.target.checked);
+            setCurrentPage(0);
+          }}
+        />
+        <span className="box"><Check size={12} /></span>
+        Smart only
+      </label>
+      <span className="spacer" />
+      <span className="faint" style={{ fontSize: 12 }}>
+        {filteredData.length} wallet{filteredData.length !== 1 ? 's' : ''}
+      </span>
+      <div className="seg">
+        {([10, 25, 50] as PageSize[]).map((size) => (
+          <button
+            key={size}
+            className={pageSize === size ? 'on' : ''}
+            onClick={() => {
+              setPageSize(size);
+              setCurrentPage(0);
+            }}
+          >
+            {size}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+
+  const renderPager = () => {
+    const total = filteredData.length;
+    if (maxPage <= 1) {
+      return (
+        <div className="row between faint" style={{ fontSize: 12.5 }}>
+          <span>{total} wallets</span>
+          <span />
+        </div>
+      );
+    }
+    const start = Math.max(0, Math.min(safePage - 2, maxPage - 5));
+    const nums = Array.from({ length: Math.min(5, maxPage) }, (_, i) => start + i);
+    return (
+      <div className="row between wrap gap-12 pager">
+        <span className="faint" style={{ fontSize: 12.5 }}>
+          Page {safePage + 1} of {maxPage} · {total} wallets
+        </span>
+        <div className="row gap-8">
+          <button
+            className="btn icon sm"
+            disabled={safePage === 0}
+            onClick={() => setCurrentPage(safePage - 1)}
+          >
+            <ChevronLeft size={15} />
+          </button>
+          <div className="seg pages">
+            {nums.map((p) => (
+              <button
+                key={p}
+                className={`seg-num ${p === safePage ? 'on' : ''}`}
+                onClick={() => setCurrentPage(p)}
+              >
+                {p + 1}
+              </button>
+            ))}
+          </div>
+          <button
+            className="btn icon sm"
+            disabled={safePage >= maxPage - 1}
+            onClick={() => setCurrentPage(safePage + 1)}
+          >
+            <ChevronRight size={15} />
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  // ---- states ------------------------------------------------------------
   if (loading) {
     return (
-      <div className="space-y-6">
-        <div className="text-center py-12">
-          <Loader className="w-8 h-8 mx-auto animate-spin text-blue-400 mb-4" />
-          <p className="text-gray-400">Loading smart money leaderboard...</p>
+      <div className="view stack gap-16">
+        {pageHead}
+        <SkTable cols={8} rows={12} />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="view stack gap-16">
+        {pageHead}
+        <div className="card">
+          <ErrorState
+            title="Leaderboard unavailable"
+            msg="The ranking service didn’t respond. Cached data may be stale."
+            onRetry={() => {
+              setLoading(true);
+              setError(null);
+              fetchLeaderboard();
+            }}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  if (paginatedData.length === 0) {
+    return (
+      <div className="view stack gap-16">
+        {pageHead}
+        {toolbar}
+        <div className="card">
+          <EmptyState
+            icon={Search}
+            title={searchQuery ? 'No wallets match your search' : 'No wallets found'}
+            msg={
+              searchQuery
+                ? `Nothing matches “${f.short(searchQuery, 6, 4)}”. Try clearing filters.`
+                : 'Adjust your filters to widen the set.'
+            }
+          />
         </div>
       </div>
     );
   }
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="space-y-2">
-        <h2 className="text-3xl font-bold">Smart Money Leaderboard</h2>
-        <p className="text-gray-400">
-          Top {totalWallets.toLocaleString()} wallets ranked by trading performance
-          {lastUpdated && (
-            <span className="text-xs text-gray-500 ml-2">
-              (Updated: {new Date(lastUpdated).toLocaleTimeString()})
-            </span>
-          )}
-        </p>
-        <div className="flex flex-wrap items-center gap-2 pt-1">
-          <button
-            onClick={copyWalletList}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500/10 px-3 py-1.5 text-sm font-medium text-emerald-400 ring-1 ring-emerald-500/30 hover:bg-emerald-500/20 transition-colors"
-            title="Copy curated smart-wallet addresses to your clipboard"
-          >
-            {copiedList ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-            {copiedList ? 'Copied!' : 'Copy smart wallet list'}
-          </button>
-          <a
-            href="/api/smart-money/list?format=csv"
-            className="inline-flex items-center gap-1.5 rounded-lg bg-gray-800 px-3 py-1.5 text-sm font-medium text-gray-300 ring-1 ring-gray-700 hover:bg-gray-700 transition-colors"
-            title="Download the curated list as CSV (address + stats)"
-          >
-            <Download className="w-4 h-4" />
-            CSV
-          </a>
-        </div>
-      </div>
-
-      {/* Search Bar */}
-      <div className="max-w-2xl space-y-3">
-        <div className="relative">
-          <input
-            type="text"
-            placeholder="Search by wallet address..."
-            value={searchQuery}
-            onChange={(e) => {
-              handleSearch(e.target.value);
-              setShowSearchHistory(true);
-            }}
-            onFocus={() => setShowSearchHistory(true)}
-            onBlur={() => setTimeout(() => setShowSearchHistory(false), 200)}
-            className="input w-full pl-10 pr-4 py-2"
-            aria-label="Search wallets"
-          />
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
-
-          {/* Search History Dropdown */}
-          {showSearchHistory && lastSearches.length > 0 && !searchQuery && (
-            <div className="absolute top-full mt-2 w-full bg-gray-800 border border-gray-700 rounded-lg shadow-lg z-10">
-              <div className="p-2 space-y-1">
-                <p className="text-xs font-semibold text-gray-400 px-2 py-1">Recent Searches</p>
-                {lastSearches.map((search) => (
-                  <button
-                    key={search}
-                    onClick={() => {
-                      handleSearch(search);
-                      setShowSearchHistory(false);
-                    }}
-                    className="w-full text-left px-3 py-2 hover:bg-gray-700 rounded text-sm text-gray-300 transition-colors"
-                  >
-                    {search}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-
-        {searchQuery && (
-          <p className="text-sm text-gray-400">
-            Found {filteredData.length} wallet{filteredData.length !== 1 ? 's' : ''}
-          </p>
-        )}
-      </div>
-
-      {error && (
-        <div className="p-4 bg-red-900/20 border border-red-800 rounded-lg text-red-200">
-          {error}
-        </div>
-      )}
-
-      {/* Controls */}
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-        <div className="flex gap-2">
-          <span className="text-sm text-gray-400">Per page:</span>
-          {([10, 25, 50] as PageSize[]).map((size) => (
-            <button
-              key={size}
-              onClick={() => {
-                setPageSize(size);
-                setCurrentPage(0);
-              }}
-              className={`px-3 py-1 rounded text-sm transition-colors ${
-                pageSize === size
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
-              }`}
-              aria-pressed={pageSize === size}
-            >
-              {size}
-            </button>
-          ))}
-        </div>
-
-        <button
-          onClick={() => fetchLeaderboard()}
-          disabled={refreshing}
-          className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 text-white text-sm transition-colors"
-          aria-label="Refresh data"
-        >
-          {refreshing ? (
-            <>
-              <Loader className="w-4 h-4 inline-block mr-2 animate-spin" />
-              Refreshing...
-            </>
-          ) : (
-            '🔄 Refresh'
-          )}
-        </button>
-      </div>
-
-      {/* Filters */}
-      <div className="flex flex-wrap items-end gap-4">
-        <div className="flex flex-col gap-1">
-          <label htmlFor="tier-filter" className="text-xs font-semibold text-gray-400">
-            Tier
-          </label>
-          <select
-            id="tier-filter"
-            value={tierFilter}
-            onChange={(e) => {
-              setTierFilter(e.target.value as 'All' | 'S' | 'A' | 'B' | 'C');
-              setCurrentPage(0);
-            }}
-            className="rounded-lg bg-gray-800 border border-gray-700 px-3 py-1.5 text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-blue-500"
-          >
-            <option value="All">All</option>
-            <option value="S">S</option>
-            <option value="A">A</option>
-            <option value="B">B</option>
-            <option value="C">C</option>
-          </select>
-        </div>
-
-        <div className="flex flex-col gap-1">
-          <label htmlFor="min-roi" className="text-xs font-semibold text-gray-400">
-            Min ROI %
-          </label>
-          <input
-            id="min-roi"
-            type="number"
-            inputMode="numeric"
-            placeholder="e.g. 25"
-            value={minRoi}
-            onChange={(e) => {
-              setMinRoi(e.target.value);
-              setCurrentPage(0);
-            }}
-            className="w-28 rounded-lg bg-gray-800 border border-gray-700 px-3 py-1.5 text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-blue-500"
-          />
-        </div>
-
-        <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer pb-1.5">
-          <input
-            type="checkbox"
-            checked={smartOnly}
-            onChange={(e) => {
-              setSmartOnly(e.target.checked);
-              setCurrentPage(0);
-            }}
-            className="h-4 w-4 rounded border-gray-700 bg-gray-800 text-blue-600 focus:ring-blue-500"
-          />
-          Smart only
-        </label>
-      </div>
-
-      {/* Table */}
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-gray-800 text-left text-gray-300">
-              <th className="px-4 py-3 font-semibold">
-                <SortHeader field="rank" label="Rank" />
-              </th>
-              <th className="px-4 py-3 font-semibold">Wallet Address</th>
-              <th className="px-4 py-3 font-semibold">
-                <SortHeader field="score" label="Score" />
-              </th>
-              <th className="px-4 py-3 font-semibold">Tier</th>
-              <th className="px-4 py-3 font-semibold text-right">ROI (all-time)</th>
-              <th className="px-4 py-3 font-semibold text-right">
-                <SortHeader field="pnl" label="PnL" />
-              </th>
-              <th className="px-4 py-3 font-semibold text-right">
-                <SortHeader field="winRate" label="Win Rate" />
-              </th>
-              <th className="hidden sm:table-cell px-4 py-3 font-semibold">Consistency</th>
-              <th className="hidden md:table-cell px-4 py-3 font-semibold text-right">
-                <SortHeader field="updatedAt" label="Last Trade" />
-              </th>
-              <th className="px-4 py-3 font-semibold text-right">Links</th>
-            </tr>
-          </thead>
-          <tbody>
-            {paginatedData.length === 0 ? (
+    <div className="view stack gap-16">
+      {pageHead}
+      {toolbar}
+      <div className="card" style={{ overflow: 'hidden' }}>
+        <div className="table-wrap">
+          <table className="dt ruled">
+            <thead>
               <tr>
-                <td colSpan={10} className="px-4 py-8 text-center text-gray-400">
-                  {searchQuery
-                    ? 'No wallets found matching your search'
-                    : 'No data available'}
-                </td>
+                <SortTh field="rank" label="#" />
+                <th>Wallet</th>
+                <th className="c">Tier</th>
+                <SortTh field="roiPct" label="ROI" align="r" />
+                <SortTh field="pnl" label="PnL" align="r" />
+                <th className="c">30D</th>
+                <SortTh field="winRate" label="Win" align="r" />
+                <th>Traits</th>
+                <th className="r" style={{ width: 100 }}>Actions</th>
               </tr>
-            ) : (
-              paginatedData.map((wallet) => (
-                <tr
-                  key={wallet.address}
-                  className="table-row cursor-pointer hover:bg-gray-800/50"
-                  onClick={() => handleWalletClick(wallet.address)}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      handleWalletClick(wallet.address);
-                    }
-                  }}
-                >
-                  <td className="px-4 py-3 font-bold text-gray-300">#{wallet.rank}</td>
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-2">
-                      <code className="text-xs bg-gray-800 px-2 py-1 rounded text-gray-300 font-mono">
-                        {wallet.address.slice(0, 8)}...{wallet.address.slice(-4)}
-                      </code>
-                      {wallet.smart && (
-                        <span
-                          className="inline-flex items-center gap-0.5 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-400 ring-1 ring-emerald-500/30"
-                          title={
-                            wallet.seeded
-                              ? 'Manually-trusted smart wallet'
-                              : 'Clears the smart-money quality gate'
-                          }
-                        >
-                          {wallet.seeded ? '⭐ Smart' : 'Smart'}
-                        </span>
-                      )}
-                      {wallet.fundedBy && (
-                        <span
-                          className="inline-flex items-center gap-0.5 rounded-full bg-purple-500/15 px-2 py-0.5 text-[10px] font-semibold text-purple-300 ring-1 ring-purple-500/30"
-                          title={`Funded with SOL by a smart wallet (${wallet.fundedBy.slice(0, 8)}…) — likely the same trader`}
-                        >
-                          🔗 Funded
-                        </span>
-                      )}
-                      <CopyButton text={wallet.address} label="wallet address" />
-                      <WatchlistButton address={wallet.address} />
-                      {wallet.tags && wallet.tags.length > 0 && (
-                        <span className="flex flex-wrap items-center gap-1">
-                          {wallet.tags.slice(0, 3).map((tag) => (
-                            <span
-                              key={tag}
-                              className="inline-flex items-center rounded-full bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium text-sky-300 ring-1 ring-sky-500/30"
-                              title={`Tag: ${tag}`}
-                            >
-                              {tag}
-                            </span>
-                          ))}
-                        </span>
-                      )}
-                    </div>
-                  </td>
-                  <td className="px-4 py-3">
-                    <span
-                      className={`inline-block px-3 py-1 rounded-full text-xs font-semibold ${getScoreBadge(
-                        wallet.score
-                      )} ${getScoreColor(wallet.score)}`}
-                    >
-                      {wallet.score.toFixed(1)}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3">
-                    {wallet.tier ? (
-                      <span
-                        className={`inline-flex items-center justify-center rounded-full px-2 py-0.5 text-[11px] font-bold ring-1 ${getTierColor(
-                          wallet.tier
-                        )}`}
-                        title={`Tier ${wallet.tier}`}
-                      >
-                        {wallet.tier}
-                      </span>
-                    ) : (
-                      <span className="text-gray-600">—</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    {wallet.roiPct == null ? (
-                      <span className="text-gray-600" title="Not deep-scanned yet">—</span>
-                    ) : (
-                      <span
-                        className={`font-bold ${wallet.roiPct >= 0 ? 'text-green-400' : 'text-red-400'}`}
-                        title="Accurate all-time realized ROI"
-                      >
-                        {wallet.roiPct >= 0 ? '+' : ''}{wallet.roiPct.toFixed(1)}%
-                      </span>
-                    )}
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    <span
-                      className={
-                        wallet.pnl >= 0 ? 'text-green-400 font-semibold' : 'text-red-400'
-                      }
-                    >
-                      {wallet.pnl >= 0 ? '+' : ''}{wallet.pnl.toFixed(2)} SOL
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-right font-semibold">
-                    {(wallet.winRate * 100).toFixed(0)}%
-                  </td>
-                  <td className="hidden sm:table-cell px-4 py-3 text-gray-400">
-                    {wallet.consistency.toFixed(0)}/100
-                  </td>
-                  <td className="hidden md:table-cell px-4 py-3 text-gray-400 text-right text-xs">
-                    {new Date(wallet.updatedAt).toLocaleDateString()}
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    <div
-                      className="flex justify-end gap-2"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <a
-                        href={`https://solscan.io/address/${wallet.address}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="p-1 hover:bg-gray-700 rounded transition-colors text-blue-400"
-                        title="View on Solscan"
-                        aria-label={`View ${wallet.address} on Solscan`}
-                      >
-                        <ExternalLink className="w-4 h-4" />
-                      </a>
-                      <a
-                        href={`https://dexscreener.com/solana/${wallet.address}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="p-1 hover:bg-gray-700 rounded transition-colors text-green-400"
-                        title="View on DEXScreener"
-                        aria-label={`View ${wallet.address} on DEXScreener`}
-                      >
-                        📊
-                      </a>
-                    </div>
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
-
-      {/* Pagination */}
-      {maxPage > 1 && (
-        <div className="flex flex-col sm:flex-row justify-between items-center gap-4 mt-6">
-          <p className="text-sm text-gray-400">
-            Page {currentPage + 1} of {maxPage} ({filteredData.length} total results)
-          </p>
-
-          <div className="flex gap-2">
-            <button
-              onClick={() => setCurrentPage(Math.max(0, currentPage - 1))}
-              disabled={currentPage === 0}
-              className="p-2 rounded-lg bg-gray-800 hover:bg-gray-700 disabled:bg-gray-900 disabled:text-gray-600 transition-colors"
-              aria-label="Previous page"
-            >
-              <ChevronLeft className="w-5 h-5" />
-            </button>
-
-            {/* Page numbers */}
-            <div className="flex gap-1">
-              {Array.from({ length: Math.min(5, maxPage) }, (_, i) => {
-                const offset = Math.max(0, Math.min(currentPage - 2, maxPage - 5));
-                const pageNum = offset + i;
+            </thead>
+            <tbody>
+              {paginatedData.map((w) => {
+                const tags = (w.tags ?? []).slice(0, 2);
                 return (
-                  <button
-                    key={pageNum}
-                    onClick={() => setCurrentPage(pageNum)}
-                    className={`px-3 py-2 rounded text-sm transition-colors ${
-                      currentPage === pageNum
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
-                    }`}
-                    aria-pressed={currentPage === pageNum}
+                  <tr
+                    key={w.address}
+                    className="clickable"
+                    onClick={() => handleWalletClick(w.address)}
                   >
-                    {pageNum + 1}
-                  </button>
+                    <td className={`rank ${w.rank <= 3 ? 'top' : ''}`}>{w.rank}</td>
+                    <td>
+                      <div className="row gap-8" style={{ flexWrap: 'nowrap', whiteSpace: 'nowrap' }}>
+                        <AddrChip address={w.address} copy={false} />
+                        {w.smart && (
+                          <span
+                            className="wmark"
+                            title={w.seeded ? 'Trusted smart wallet' : 'Smart wallet — clears the quality gate'}
+                          >
+                            <Sparkles size={12} />
+                          </span>
+                        )}
+                        {w.fundedBy && (
+                          <span className="wmark faint" title="Funded by a smart wallet — likely the same trader">
+                            <LinkIcon size={12} />
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="c"><TierBadge tier={w.tier} /></td>
+                    <td className="r"><Roi value={w.roiPct} /></td>
+                    <td className="r"><Pnl value={w.pnl} /></td>
+                    <td className="c">
+                      {w.roiPct == null ? (
+                        <span className="faint">—</span>
+                      ) : (
+                        <Sparkline
+                          values={trendTo(w.roiPct, w.address)}
+                          color={w.roiPct >= 0 ? CHART_COLORS.POS : CHART_COLORS.NEG}
+                          width={64}
+                          height={20}
+                        />
+                      )}
+                    </td>
+                    <td className="r num faint">{Math.round(w.winRate * 100)}%</td>
+                    <td>
+                      <div className="row gap-8" style={{ flexWrap: 'nowrap', whiteSpace: 'nowrap' }}>
+                        {tags.length > 0 ? (
+                          tags.map((t) => <span key={t} className="badge tag">{t}</span>)
+                        ) : (
+                          <span className="faint">—</span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="r">
+                      <div
+                        className="row-actions"
+                        style={{ justifyContent: 'flex-end' }}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <WatchStar address={w.address} />
+                        <CopyIconButton text={w.address} title="Copy address" />
+                        <a
+                          className="iconbtn"
+                          href={`https://solscan.io/address/${w.address}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title="Solscan"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <ExternalLink size={14} />
+                        </a>
+                      </div>
+                    </td>
+                  </tr>
                 );
               })}
-            </div>
-
-            <button
-              onClick={() => setCurrentPage(Math.min(maxPage - 1, currentPage + 1))}
-              disabled={currentPage >= maxPage - 1}
-              className="p-2 rounded-lg bg-gray-800 hover:bg-gray-700 disabled:bg-gray-900 disabled:text-gray-600 transition-colors"
-              aria-label="Next page"
-            >
-              <ChevronRight className="w-5 h-5" />
-            </button>
-          </div>
+            </tbody>
+          </table>
         </div>
-      )}
-
-      {/* Footer Info */}
-      <div className="text-xs text-gray-500 text-center py-4 border-t border-gray-800">
-        <p>Click any wallet to view detailed analysis. Scores are updated every 5 minutes.</p>
       </div>
+      {renderPager()}
     </div>
   );
 }

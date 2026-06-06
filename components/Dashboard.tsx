@@ -1,360 +1,234 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import Link from 'next/link';
-import { Loader } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import {
+  Crown, Flame, Activity, ArrowRight, ArrowUp, ArrowDown,
+  Layers, ShieldCheck, Sparkles,
+} from 'lucide-react';
+import * as f from '@/lib/format';
+import {
+  TierBadge, Roi, Pnl, AddrChip, TokenMark, EmptyState, ErrorState,
+  SkLine, AreaChart, CHART_COLORS,
+} from '@/components/ui';
 
-// ---- API response shapes -------------------------------------------------
+// ---- API shapes ----------------------------------------------------------
+interface StatusResponse { totals: { walletsIndexed: number; verifiedWallets: number; smartWallets: number } }
+interface ListWallet { address: string; roiPct: number | null; pnl: number; winRate: number; verified: boolean; tier?: string }
+interface BuyingToken { mint: string; symbol?: string; distinctSmartBuyers: number; solVolume: number }
+interface Mover { wallet: string; rankDelta: number | null; latestRoi: number | null; latestRank: number | null }
 
-interface StatusResponse {
-  totals: {
-    walletsIndexed: number;
-    verifiedWallets: number;
-    smartWallets: number;
-  };
-  migrationApplied?: boolean;
-}
+type Load<T> = { state: 'loading' | 'ok' | 'error'; data: T | null };
 
-interface ListWallet {
-  address: string;
-  roiPct: number | null;
-  pnl: number;
-  winRate: number;
-  verified: boolean;
-  tier?: string;
-}
-
-interface ListResponse {
-  wallets: ListWallet[];
-}
-
-interface BuyingToken {
-  mint: string;
-  distinctSmartBuyers: number;
-  solVolume: number;
-}
-
-interface BuyingResponse {
-  tokens: BuyingToken[];
-}
-
-// ---- Formatting helpers --------------------------------------------------
-
-function shortAddr(addr: string): string {
-  if (!addr) return '';
-  if (addr.length <= 12) return addr;
-  return `${addr.slice(0, 4)}…${addr.slice(-4)}`;
-}
-
-function formatNumber(n: number | null | undefined): string {
-  if (n == null || Number.isNaN(n)) return '—';
-  return n.toLocaleString('en-US');
-}
-
-function formatSol(n: number | null | undefined): string {
-  if (n == null || Number.isNaN(n)) return '—';
-  const abs = Math.abs(n);
-  const sign = n < 0 ? '-' : '';
-  if (abs >= 1000) return `${sign}${(abs / 1000).toFixed(1)}k`;
-  if (abs >= 1) return `${sign}${abs.toFixed(2)}`;
-  return `${sign}${abs.toFixed(3)}`;
-}
-
-function tierColor(tier?: string): string {
-  switch (tier) {
-    case 'S':
-      return 'bg-amber-500/15 text-amber-400 ring-amber-500/30';
-    case 'A':
-      return 'bg-emerald-500/15 text-emerald-400 ring-emerald-500/30';
-    case 'B':
-      return 'bg-blue-500/15 text-blue-400 ring-blue-500/30';
-    default:
-      return 'bg-gray-500/15 text-gray-400 ring-gray-500/30';
-  }
-}
-
-// ---- Small building blocks -----------------------------------------------
-
-function StatCard({
-  label,
-  value,
-  hint,
-  loading,
-}: {
-  label: string;
-  value: number | null;
-  hint: string;
-  loading: boolean;
-}) {
-  return (
-    <div className="card space-y-1">
-      <p className="text-sm text-gray-400">{label}</p>
-      {loading ? (
-        <div className="h-8 w-24 animate-pulse rounded bg-gray-800" />
-      ) : (
-        <p className="text-3xl font-bold text-gray-100">{formatNumber(value)}</p>
-      )}
-      <p className="text-xs text-gray-500">{hint}</p>
-    </div>
-  );
-}
-
-function PanelLoading() {
-  return (
-    <div className="py-10 text-center">
-      <Loader className="mx-auto mb-3 h-6 w-6 animate-spin text-blue-400" />
-      <p className="text-sm text-gray-400">Loading…</p>
-    </div>
-  );
-}
-
-function PanelEmpty({ message }: { message: string }) {
-  return (
-    <div className="py-10 text-center text-sm text-gray-500">{message}</div>
-  );
-}
-
-// ---- Main component ------------------------------------------------------
-
-export default function Dashboard() {
-  const [status, setStatus] = useState<StatusResponse | null>(null);
-  const [statusLoading, setStatusLoading] = useState(true);
-
-  const [topWallets, setTopWallets] = useState<ListWallet[] | null>(null);
-  const [topLoading, setTopLoading] = useState(true);
-
-  const [buying, setBuying] = useState<BuyingToken[] | null>(null);
-  const [buyingLoading, setBuyingLoading] = useState(true);
-
+function useFetch<T>(url: string, pick: (json: unknown) => T): Load<T> {
+  const [res, setRes] = useState<Load<T>>({ state: 'loading', data: null });
   useEffect(() => {
     let cancelled = false;
-
-    async function loadStatus() {
+    (async () => {
       try {
-        const res = await fetch('/api/status');
-        if (!res.ok) throw new Error('status');
-        const json = (await res.json()) as StatusResponse;
-        if (!cancelled) setStatus(json);
+        const r = await fetch(url);
+        if (!r.ok) throw new Error('fetch');
+        const json = await r.json();
+        if (!cancelled) setRes({ state: 'ok', data: pick(json) });
       } catch {
-        if (!cancelled) setStatus(null);
-      } finally {
-        if (!cancelled) setStatusLoading(false);
+        if (!cancelled) setRes({ state: 'error', data: null });
       }
-    }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [url]);
+  return res;
+}
 
-    async function loadTop() {
-      try {
-        const res = await fetch('/api/smart-money/list?sort=roi&limit=10');
-        if (!res.ok) throw new Error('list');
-        const json = (await res.json()) as ListResponse;
-        if (!cancelled) setTopWallets(json.wallets ?? []);
-      } catch {
-        if (!cancelled) setTopWallets([]);
-      } finally {
-        if (!cancelled) setTopLoading(false);
-      }
-    }
+function CardHead({ icon: Icon, title, link, linkLabel, note }: {
+  icon: React.ComponentType<{ size?: number }>; title: string;
+  link?: string; linkLabel?: string; note?: string;
+}) {
+  const router = useRouter();
+  return (
+    <div className="card-head">
+      <h3><span className="ic"><Icon size={16} /></span> {title}</h3>
+      {link && (
+        <button className="card-link" onClick={() => router.push(link)}>
+          {linkLabel} <ArrowRight size={13} />
+        </button>
+      )}
+      {note && <span className="faint" style={{ fontSize: 11.5 }}>{note}</span>}
+    </div>
+  );
+}
 
-    async function loadBuying() {
-      try {
-        const res = await fetch('/api/smart-money/buying?hours=24&limit=10');
-        if (!res.ok) throw new Error('buying');
-        const json = (await res.json()) as BuyingResponse;
-        if (!cancelled) setBuying(json.tokens ?? []);
-      } catch {
-        if (!cancelled) setBuying([]);
-      } finally {
-        if (!cancelled) setBuyingLoading(false);
-      }
-    }
+export default function Dashboard() {
+  const router = useRouter();
+  const status = useFetch<StatusResponse['totals']>('/api/status', (j) => (j as StatusResponse).totals);
+  const top = useFetch<ListWallet[]>('/api/smart-money/list?sort=roi&limit=8', (j) => (j as { wallets: ListWallet[] }).wallets ?? []);
+  const buying = useFetch<BuyingToken[]>('/api/smart-money/buying?hours=24&limit=8', (j) => (j as { tokens: BuyingToken[] }).tokens ?? []);
+  const movers = useFetch<Mover[]>('/api/smart-money/movers?days=7&limit=6', (j) => (j as { movers: Mover[] }).movers ?? []);
 
-    loadStatus();
-    loadTop();
-    loadBuying();
+  const buys24 = buying.data?.reduce((a, t) => a + (t.distinctSmartBuyers || 0), 0) ?? 0;
 
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  // cumulative buy-volume curve from the buying feed (prominent dashboard chart)
+  const flowVals = (() => {
+    const vols = (buying.data ?? []).map((t) => t.solVolume || 0);
+    if (vols.length < 2) return [] as number[];
+    let acc = 0;
+    return vols.slice().reverse().map((v) => (acc += v));
+  })();
+  const flowTotal = flowVals.length ? flowVals[flowVals.length - 1] : 0;
 
   return (
-    <div className="space-y-10">
-      {/* Hero */}
-      <div className="space-y-3 text-center">
-        <h2 className="bg-gradient-to-r from-emerald-400 to-cyan-400 bg-clip-text text-4xl font-bold text-transparent">
-          Solana Smart Money
-        </h2>
-        <p className="mx-auto max-w-2xl text-lg text-gray-400">
-          Accurate, all-time-ROI-verified wallets to track and follow.
-        </p>
-      </div>
+    <div className="view stack gap-14">
+      {/* metric strip */}
+      {status.state === 'error' ? (
+        <div className="card"><ErrorState title="Index status unavailable" msg="Couldn’t fetch wallet counts from the indexer." /></div>
+      ) : (
+        <div className="metricbar">
+          {[
+            { k: 'Wallets indexed', icon: Layers, v: status.data?.walletsIndexed, sub: 'across the funding graph' },
+            { k: 'Verified', icon: ShieldCheck, v: status.data?.verifiedWallets, sub: 'accurate all-time ROI' },
+            { k: 'Smart', icon: Sparkles, v: status.data?.smartWallets, sub: 'clear the quality gate' },
+            { k: 'Smart buys · 24h', icon: Flame, v: buying.state === 'ok' ? buys24 : undefined, sub: 'across tracked tokens' },
+          ].map((m) => {
+            const Icon = m.icon;
+            return (
+              <div className="mseg" key={m.k}>
+                <div className="k"><Icon size={13} /> {m.k}</div>
+                {status.state === 'loading' || m.v == null ? (
+                  <div style={{ marginTop: 10 }}><SkLine w="90px" h={20} /></div>
+                ) : (
+                  <div className="v num">{f.num(m.v)}</div>
+                )}
+                <div className="sub">{m.sub}</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
-      {/* Stat cards */}
-      <div className="grid grid-cols-1 gap-6 sm:grid-cols-3">
-        <StatCard
-          label="Wallets indexed"
-          value={status?.totals.walletsIndexed ?? null}
-          hint="Total wallets in the index"
-          loading={statusLoading}
-        />
-        <StatCard
-          label="Verified"
-          value={status?.totals.verifiedWallets ?? null}
-          hint="Accurate all-time ROI"
-          loading={statusLoading}
-        />
-        <StatCard
-          label="Smart"
-          value={status?.totals.smartWallets ?? null}
-          hint="Curated smart money"
-          loading={statusLoading}
-        />
-      </div>
-
-      {/* Side-by-side panels */}
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        {/* Top smart money by ROI */}
-        <div className="card space-y-4">
-          <div className="flex items-center justify-between">
-            <h3 className="text-lg font-semibold text-gray-100">
-              🏆 Top smart money by ROI
-            </h3>
-            <Link
-              href="/smart-money"
-              className="text-sm text-blue-400 hover:text-blue-300 transition-colors"
-            >
-              View full leaderboard →
-            </Link>
+      <div className="dash-grid">
+        {/* left column */}
+        <div className="stack gap-14">
+          {/* flow chart */}
+          <div className="card">
+            <CardHead icon={Activity} title="Smart-money buy volume · 24h" note="cumulative SOL across tracked tokens" />
+            <div className="card-pad">
+              {buying.state === 'loading' ? (
+                <SkLine w="100%" h={168} />
+              ) : buying.state === 'error' ? (
+                <ErrorState msg="Couldn’t compute buy volume." />
+              ) : flowVals.length < 2 ? (
+                <EmptyState icon={Activity} title="Quiet right now" msg="No measurable smart-money buying in the last 24h." />
+              ) : (
+                <>
+                  <div className="row between" style={{ marginBottom: 2 }}>
+                    <div className="stack">
+                      <span className="faint" style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '.06em' }}>Total volume</span>
+                      <span className="num pos" style={{ fontSize: 21, fontWeight: 660, marginTop: 3 }}>
+                        {f.sol(flowTotal)} <span className="faint" style={{ fontSize: 12, fontWeight: 500 }}>SOL</span>
+                      </span>
+                    </div>
+                    <div className="chart-legend"><span className="lg"><span className="sw" style={{ background: CHART_COLORS.POS }} />cumulative</span></div>
+                  </div>
+                  <AreaChart values={flowVals} height={158} color={CHART_COLORS.POS} fmtY={(v) => f.compact(Number(v))} />
+                </>
+              )}
+            </div>
           </div>
 
-          {topLoading ? (
-            <PanelLoading />
-          ) : !topWallets || topWallets.length === 0 ? (
-            <PanelEmpty message="No verified wallets yet." />
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-gray-800 text-left text-xs text-gray-400">
-                    <th className="px-2 py-2 font-semibold">Wallet</th>
-                    <th className="px-2 py-2 font-semibold">Tier</th>
-                    <th className="px-2 py-2 text-right font-semibold">ROI</th>
-                    <th className="px-2 py-2 text-right font-semibold">PnL</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {topWallets.map((w) => (
-                    <tr
-                      key={w.address}
-                      className="border-b border-gray-800/60 last:border-0 hover:bg-gray-800/40 transition-colors"
-                    >
-                      <td className="px-2 py-2">
-                        <Link
-                          href={`/smart-money/${w.address}`}
-                          className="font-mono text-xs text-gray-200 hover:text-blue-400 transition-colors"
-                        >
-                          {shortAddr(w.address)}
-                        </Link>
-                      </td>
-                      <td className="px-2 py-2">
-                        {w.tier ? (
-                          <span
-                            className={`inline-flex items-center justify-center rounded-full px-2 py-0.5 text-[11px] font-bold ring-1 ${tierColor(
-                              w.tier
-                            )}`}
-                          >
-                            {w.tier}
-                          </span>
-                        ) : (
-                          <span className="text-gray-600">—</span>
-                        )}
-                      </td>
-                      <td className="px-2 py-2 text-right">
-                        {w.roiPct == null ? (
-                          <span className="text-gray-600">—</span>
-                        ) : (
-                          <span
-                            className={`font-bold ${
-                              w.roiPct >= 0 ? 'text-green-400' : 'text-red-400'
-                            }`}
-                          >
-                            {w.roiPct >= 0 ? '+' : ''}
-                            {w.roiPct.toFixed(1)}%
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-2 py-2 text-right">
-                        <span
-                          className={
-                            w.pnl >= 0 ? 'text-gray-300' : 'text-red-400'
-                          }
-                        >
-                          {w.pnl >= 0 ? '+' : '-'}
-                          {formatSol(w.pnl)} SOL
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+          {/* top by ROI */}
+          <div className="card span-main">
+            <CardHead icon={Crown} title="Top smart money by ROI" link="/smart-money" linkLabel="View all" />
+            {top.state === 'loading' ? (
+              <div className="card-pad"><SkLine w="100%" h={160} /></div>
+            ) : top.state === 'error' ? (
+              <ErrorState msg="The leaderboard service didn’t respond." />
+            ) : !top.data || top.data.length === 0 ? (
+              <EmptyState title="No verified wallets yet" msg="Once the indexer deep-scans wallets, the highest all-time ROI traders surface here." />
+            ) : (
+              <div className="table-wrap">
+                <table className="dt compact">
+                  <thead><tr><th style={{ width: 36 }}>#</th><th>Wallet</th><th className="c">Tier</th><th className="r">ROI</th><th className="r">PnL</th></tr></thead>
+                  <tbody>
+                    {top.data.map((w, i) => (
+                      <tr key={w.address} className="clickable" onClick={() => router.push(`/smart-money/${w.address}`)}>
+                        <td className={`rank ${i < 3 ? 'top' : ''}`}>{i + 1}</td>
+                        <td><AddrChip address={w.address} copy={false} /></td>
+                        <td className="c"><TierBadge tier={w.tier} /></td>
+                        <td className="r"><Roi value={w.roiPct} /></td>
+                        <td className="r"><Pnl value={w.pnl} unit={false} /></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         </div>
 
-        {/* Smart money buying now */}
-        <div className="card space-y-4">
-          <div className="flex items-center justify-between">
-            <h3 className="text-lg font-semibold text-gray-100">
-              📈 Smart money buying now
-            </h3>
-            <Link
-              href="/smart-money/buying"
-              className="text-sm text-blue-400 hover:text-blue-300 transition-colors"
-            >
-              See all →
-            </Link>
+        {/* right column */}
+        <div className="stack gap-14">
+          {/* buying now */}
+          <div className="card">
+            <CardHead icon={Flame} title="Smart money buying now" link="/smart-money/buying" linkLabel="See all" />
+            {buying.state === 'loading' ? (
+              <div className="card-pad stack gap-12">{[0, 1, 2, 3].map((i) => <SkLine key={i} w="100%" h={22} />)}</div>
+            ) : buying.state === 'error' ? (
+              <ErrorState msg="Couldn’t load the buying feed." />
+            ) : !buying.data || buying.data.length === 0 ? (
+              <EmptyState icon={Flame} title="Quiet right now" msg="No tokens bought by multiple smart wallets in the last 24h." />
+            ) : (
+              <div className="table-wrap">
+                <table className="dt compact">
+                  <thead><tr><th>Token</th><th className="r">Buyers</th><th className="r">SOL vol</th></tr></thead>
+                  <tbody>
+                    {buying.data.slice(0, 6).map((t) => (
+                      <tr key={t.mint} className="clickable" onClick={() => router.push(`/token/${t.mint}`)}>
+                        <td>
+                          <span className="row gap-8">
+                            <TokenMark symbol={t.symbol || t.mint} size={24} />
+                            <span className="stack">
+                              <b style={{ fontSize: 12.5 }}>{t.symbol || f.short(t.mint, 4, 4)}</b>
+                              <span className="mono faint" style={{ fontSize: 11 }}>{f.short(t.mint, 4, 4)}</span>
+                            </span>
+                          </span>
+                        </td>
+                        <td className="r"><span className="badge pos">{t.distinctSmartBuyers}</span></td>
+                        <td className="r num faint">{f.sol(t.solVolume)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
 
-          {buyingLoading ? (
-            <PanelLoading />
-          ) : !buying || buying.length === 0 ? (
-            <PanelEmpty message="No smart money buys in the last 24h." />
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-gray-800 text-left text-xs text-gray-400">
-                    <th className="px-2 py-2 font-semibold">Token</th>
-                    <th className="px-2 py-2 text-right font-semibold">Buyers</th>
-                    <th className="px-2 py-2 text-right font-semibold">SOL vol</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {buying.map((t) => (
-                    <tr
-                      key={t.mint}
-                      className="border-b border-gray-800/60 last:border-0 hover:bg-gray-800/40 transition-colors"
-                    >
-                      <td className="px-2 py-2">
-                        <Link
-                          href={`/token/${t.mint}`}
-                          className="font-mono text-xs text-gray-200 hover:text-blue-400 transition-colors"
-                        >
-                          {shortAddr(t.mint)}
-                        </Link>
-                      </td>
-                      <td className="px-2 py-2 text-right font-semibold text-emerald-400">
-                        {formatNumber(t.distinctSmartBuyers)}
-                      </td>
-                      <td className="px-2 py-2 text-right text-gray-300">
-                        {formatSol(t.solVolume)} SOL
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+          {/* recent movers */}
+          <div className="card">
+            <CardHead icon={Activity} title="Recent movers" note="7d rank Δ" />
+            {movers.state === 'loading' ? (
+              <div className="card-pad stack gap-12">{[0, 1, 2].map((i) => <SkLine key={i} w="100%" h={20} />)}</div>
+            ) : movers.state === 'error' ? (
+              <ErrorState msg="Couldn’t compute movers." />
+            ) : !movers.data || movers.data.length === 0 ? (
+              <EmptyState icon={Activity} title="No movement" msg="Rankings are stable over the last 7 days." />
+            ) : (
+              <div className="card-pad stack gap-8">
+                {movers.data.map((m) => {
+                  const up = (m.rankDelta ?? 0) >= 0;
+                  return (
+                    <div key={m.wallet} className="trade" style={{ cursor: 'pointer' }} onClick={() => router.push(`/smart-money/${m.wallet}`)}>
+                      <code className="mono" style={{ fontSize: 12 }}>{f.short(m.wallet, 4, 4)}</code>
+                      <span className="spacer" />
+                      <span style={{ fontSize: 12 }}><Roi value={m.latestRoi} /></span>
+                      <span className={`badge ${up ? 'pos' : 'neg'}`} style={{ minWidth: 52, justifyContent: 'center' }}>
+                        {up ? <ArrowUp size={12} /> : <ArrowDown size={12} />} {Math.abs(m.rankDelta ?? 0)}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>
