@@ -57,7 +57,15 @@ function pairWeight(pair: any): number {
 
 function metaFromPair(pair: any): TokenMeta {
   const base = pair?.baseToken ?? {};
-  const icon = pair?.info?.imageUrl || base?.icon || undefined;
+  const addr = typeof base?.address === 'string' ? base.address : undefined;
+  // Prefer the explicit profile image; otherwise fall back to DexScreener's
+  // canonical token image CDN, which exists for most tokens DexScreener knows
+  // (these tokens do — their name/symbol resolved). This is a fast, reliable
+  // https URL, unlike the IPFS/arweave links Helius returns for fresh coins.
+  const icon =
+    pair?.info?.imageUrl ||
+    base?.icon ||
+    (addr ? `https://dd.dexscreener.com/ds-data/tokens/solana/${addr}.png` : undefined);
   return {
     symbol: base?.symbol || undefined,
     name: base?.name || undefined,
