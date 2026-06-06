@@ -41,7 +41,10 @@ interface CacheEntry {
 }
 
 const CACHE = new Map<string, CacheEntry>();
-const TTL_MS = 10 * 60 * 1000;
+// 2-min cache: fresh enough for a volatile pumping token's price/market-cap on
+// the token page, while still sparing DexScreener from per-request calls when the
+// buying feed enriches many mints at once.
+const TTL_MS = 2 * 60 * 1000;
 const DS_BATCH = 30;
 const HELIUS_BATCH = 100;
 const REQUEST_TIMEOUT_MS = 6000;
@@ -125,7 +128,11 @@ async function fetchDexScreener(mints: string[], acc: Map<string, Acc>): Promise
         // last write wins — i.e. these are the busiest pool's live stats.
         entry.pairAddress = pair?.pairAddress || entry.pairAddress;
         entry.priceUsd = numOrU(pair?.priceUsd) ?? entry.priceUsd;
-        entry.marketCapUsd = numOrU(pair?.marketCap) ?? numOrU(pair?.fdv) ?? entry.marketCapUsd;
+        // "Market cap" in memecoin land = FDV (price × total supply) — that's what
+        // Axiom / GMGN / BullX / pump.fun all display. DexScreener's `marketCap`
+        // field is circulating-supply based and reads ~half for many pump tokens,
+        // so prefer fdv and only fall back to marketCap when fdv is absent.
+        entry.marketCapUsd = numOrU(pair?.fdv) ?? numOrU(pair?.marketCap) ?? entry.marketCapUsd;
         entry.liquidityUsd = numOrU(pair?.liquidity?.usd) ?? entry.liquidityUsd;
         entry.volume24hUsd = numOrU(pair?.volume?.h24) ?? entry.volume24hUsd;
         entry.priceChange24h = numOrU(pair?.priceChange?.h24) ?? entry.priceChange24h;
