@@ -937,6 +937,133 @@ pre.code .c { color: var(--text-4); }
   .bf-right-top { justify-content: flex-start; }
 }
 
+/* =========================================================================
+   LIVE FEED — Wave 3: sparkline + % since first buy, hot strip, grouping,
+   keyboard selection ring, mobile ape bar. Same deep-slate .bf-* system.
+   ========================================================================= */
+
+/* --- Inline price sparkline + "% since first buy" (in the identity line) --- */
+.bf-spark {
+  display: flex; flex-direction: column; align-items: flex-end; gap: 2px;
+  margin-left: auto; flex-shrink: 0;
+}
+.bf-spark .spark { display: block; }
+.bf-since {
+  font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+  font-size: 10px; font-weight: 700; white-space: nowrap;
+}
+.bf-since.pos { color: var(--pos); }
+.bf-since.neg { color: var(--neg); }
+
+/* --- HOTTEST-TOKENS STRIP --- */
+.bf-hotstrip {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--r);
+  background: var(--surface);
+}
+.bf-hotstrip-tag {
+  font-size: 9.5px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
+  color: var(--text-4); white-space: nowrap; flex-shrink: 0;
+}
+.bf-hotstrip-scroll {
+  display: flex; align-items: center; gap: 7px;
+  overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch;
+  min-width: 0;
+}
+.bf-hotstrip-scroll::-webkit-scrollbar { display: none; }
+.bf-hotpill {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 26px; padding: 0 10px; border-radius: var(--r-pill);
+  border: 1px solid var(--border); background: var(--surface-3);
+  cursor: pointer; white-space: nowrap; flex-shrink: 0;
+  transition: border-color .14s ease, background .14s ease, transform .1s ease;
+}
+.bf-hotpill:hover { transform: translateY(-1px); border-color: var(--border-strong); }
+.bf-hotpill .t {
+  font-size: 12px; font-weight: 700; letter-spacing: -0.01em; color: var(--text);
+}
+.bf-hotpill .m {
+  font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+  font-size: 10.5px; font-weight: 650; color: var(--text-3);
+}
+/* Momentum bands. */
+.bf-hotpill.hot  { background: var(--neg-soft); border-color: var(--neg-ring); }
+.bf-hotpill.hot .t { color: var(--neg); }
+.bf-hotpill.warm { background: var(--bf-amber-soft); border-color: var(--bf-amber-ring); }
+.bf-hotpill.warm .t { color: var(--bf-amber); }
+.bf-hotpill.cool { background: var(--surface-3); border-color: var(--border); }
+
+/* --- "+N earlier" group affordance --- */
+.bf-more {
+  align-self: flex-start;
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 22px; padding: 0 10px; border-radius: var(--r-pill);
+  border: 1px dashed var(--border-strong); background: transparent;
+  color: var(--text-3); font-size: 11px; font-weight: 600; cursor: pointer;
+  transition: color .14s ease, border-color .14s ease, background .14s ease;
+}
+.bf-more:hover { color: var(--text); border-color: var(--accent-line); background: var(--surface-2); }
+
+/* Child (expanded earlier) rows: indented + subdued so the primary stays hero. */
+.bf-row-child {
+  margin-left: 18px; background: var(--surface-2);
+  box-shadow: inset 2px 0 0 var(--border-strong);
+}
+
+/* --- Keyboard selection ring --- */
+.bf-row.is-selected {
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 1px var(--accent-ring), inset 2px 0 0 var(--accent);
+}
+
+/* --- Keyboard-shortcut hint (desktop only) --- */
+.bf-kbd-hint {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  font-size: 11px; color: var(--text-4); padding: 2px 2px;
+}
+.bf-kbd {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 16px; height: 16px; padding: 0 4px;
+  border: 1px solid var(--border-strong); border-radius: 4px;
+  background: var(--surface-3); color: var(--text-3);
+  font-family: var(--font-mono); font-size: 10px; font-weight: 700;
+}
+
+/* --- MOBILE STICKY APE BAR --- */
+.bf-apebar { display: none; }
+@media (max-width: 640px) {
+  .bf-apebar {
+    display: flex; align-items: center; gap: 10px;
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 60;
+    padding: 10px 14px;
+    padding-bottom: calc(10px + env(safe-area-inset-bottom));
+    background: var(--surface-4);
+    border-top: 1px solid var(--border-strong);
+    box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.4);
+  }
+  .bf-apebar-id { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
+  .bf-apebar-tk { font-size: 14px; font-weight: 700; color: var(--text); }
+  .bf-apebar-sub { font-size: 10.5px; color: var(--text-3); }
+  .bf-apebar-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    height: 44px; padding: 0 20px; border-radius: var(--r);
+    background: var(--accent); color: #fff; font-size: 15px; font-weight: 700;
+    text-decoration: none; white-space: nowrap;
+  }
+  .bf-apebar-btn:active { background: var(--accent-press); }
+  .bf-apebar-close {
+    width: 40px; height: 40px; flex-shrink: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: 1px solid var(--border); border-radius: var(--r-sm);
+    background: var(--surface-3); color: var(--text-3); font-size: 14px; cursor: pointer;
+  }
+  /* The bar floats over content; keep it from hiding the keyboard hint. */
+  .bf-kbd-hint { display: none; }
+  /* Sparkline stacks under the identity on phones to keep the row tidy. */
+  .bf-spark { margin-left: 0; align-items: flex-start; }
+  .bf-row-child { margin-left: 8px; }
+}
+
 .toast {
   position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(8px);
   z-index: 70; background: var(--surface-4); border: 1px solid var(--border-strong);
