@@ -27,12 +27,13 @@ const BASE_URL = (process.env.BASE_URL || 'https://transport-topaz-eight.vercel.
 const DRY_RUN = process.argv.includes('--dry-run');
 
 if (!API_KEY) {
-  console.error('✖ Missing CRONJOB_API_KEY (cron-job.org → Settings → API → create API key).');
+  console.error('✖ Missing CRONJOB_API_KEY (cron-job.org → Settings → API → "Display API key").');
   process.exit(1);
 }
 if (!CRON_SECRET) {
-  console.error('✖ Missing CRON_SECRET (the Bearer token your /api/cron/* routes check).');
-  process.exit(1);
+  console.warn('! CRON_SECRET is empty — jobs will be created WITHOUT an Authorization header.');
+  console.warn('  That only works if your /api/cron/* endpoints are open (no CRON_SECRET set in');
+  console.warn('  Vercel). If they ARE protected, the jobs will get 401s. Set CRON_SECRET to be safe.\n');
 }
 
 /** Build a "minutes" array for "every N minutes" (cron-job.org uses explicit lists). */
@@ -108,7 +109,9 @@ function buildPayload(j) {
         wdays: EVERY,
       },
       extendedData: {
-        headers: { Authorization: `Bearer ${CRON_SECRET}` },
+        // Only attach the bearer header when a secret is provided; if the
+        // endpoints are open, an empty header would be pointless.
+        headers: CRON_SECRET ? { Authorization: `Bearer ${CRON_SECRET}` } : {},
       },
     },
   };
