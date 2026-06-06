@@ -8,13 +8,38 @@
  *
  * If CRON_SECRET is set, requests must include `Authorization: Bearer <secret>`
  * (Vercel Cron sends this automatically when the env var is configured).
+ *
+ * Per-call tuning (query overrides, clamped to safe ranges):
+ *   ?maxWallets=30      wallets to deep-scan this call (1..60)
+ *   ?maxTxs=500         max swap txs fetched per wallet (50..1000)
+ *   ?timeBudgetMs=50000 wall-clock budget for the run (5000..58000)
+ * These let the cron DRIVER dial throughput without touching Vercel env vars.
+ * Omitting a param keeps the existing code/env default in runSeedIndexer.
+ *
+ * The JSON response is the SeedIndexerResult; `walletsProcessed` lets the driver
+ * detect an empty backlog (value 0) and stop looping early.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { runSeedIndexer } from '../../../../lib/indexer/run-seed-indexer';
+import {
+  runSeedIndexer,
+  type SeedIndexerOptions,
+} from '../../../../lib/indexer/run-seed-indexer';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60; // allow up to 60s for a seed run
+
+/** Parse + clamp an optional integer query param; undefined if absent/invalid. */
+function clampParam(
+  raw: string | null,
+  min: number,
+  max: number
+): number | undefined {
+  if (raw === null) return undefined;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return undefined;
+  return Math.min(max, Math.max(min, Math.trunc(n)));
+}
 
 export async function GET(request: NextRequest) {
   const secret = process.env.CRON_SECRET;
@@ -25,8 +50,19 @@ export async function GET(request: NextRequest) {
     }
   }
 
+  // Optional per-call overrides, clamped so a bad/hostile value can't blow the
+  // Helius budget or exceed the 60s Vercel function ceiling.
+  const sp = request.nextUrl.searchParams;
+  const opts: SeedIndexerOptions = {};
+  const maxWallets = clampParam(sp.get('maxWallets'), 1, 60);
+  const maxTxs = clampParam(sp.get('maxTxs'), 50, 1000);
+  const timeBudgetMs = clampParam(sp.get('timeBudgetMs'), 5_000, 58_000);
+  if (maxWallets !== undefined) opts.maxWallets = maxWallets;
+  if (maxTxs !== undefined) opts.maxTxsPerWallet = maxTxs;
+  if (timeBudgetMs !== undefined) opts.timeBudgetMs = timeBudgetMs;
+
   try {
-    const result = await runSeedIndexer();
+    const result = await runSeedIndexer(opts);
     return NextResponse.json(result, {
       status: result.ok ? 200 : 500,
       headers: { 'Cache-Control': 'no-store' },

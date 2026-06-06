@@ -14,6 +14,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getSmartMoneyBuys } from '../../../../lib/indexer/smart-buys';
+import { getTokenMeta } from '../../../../lib/token-meta';
 
 export const dynamic = 'force-dynamic';
 
@@ -30,7 +31,21 @@ export async function GET(request: NextRequest) {
 
   const result = await getSmartMoneyBuys({ hours, limit });
 
-  return NextResponse.json(result, {
+  // Enrich tokens with real symbol/name/icon from DexScreener. A metadata
+  // failure must never break the feed, so getTokenMeta is resilient and we
+  // additionally guard here.
+  let tokens: unknown[] = result.tokens;
+  try {
+    const meta = await getTokenMeta(result.tokens.map((t) => t.mint));
+    tokens = result.tokens.map((t) => {
+      const m = meta.get(t.mint);
+      return m ? { ...t, symbol: m.symbol, name: m.name, icon: m.icon } : t;
+    });
+  } catch {
+    // ignore — return the un-enriched feed
+  }
+
+  return NextResponse.json({ ...result, tokens }, {
     headers: { 'Cache-Control': 'public, max-age=60' },
   });
 }

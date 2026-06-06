@@ -51,17 +51,30 @@ export function WinBar({ value }: { value?: number | null }) {
 }
 
 const TOKEN_HUES = [248, 161, 14, 286, 200, 36, 330, 96, 268, 178];
-export function TokenMark({ symbol, size = 26 }: { symbol?: string; size?: number }) {
+export function TokenMark({ symbol, size = 26, icon }: { symbol?: string; size?: number; icon?: string }) {
   const s = symbol || '?';
   const h = TOKEN_HUES[(s.charCodeAt(0) || 0) % TOKEN_HUES.length];
   const r = Math.round(size * 0.3);
+  const hasIcon = typeof icon === 'string' && icon.length > 0;
+  // When an icon is present we overlay it via backgroundImage on the existing
+  // letter avatar. A broken icon URL then gracefully degrades to the colored
+  // square underneath. This keeps the component server-safe (no client hooks).
   return (
     <span
       style={{
         display: 'inline-grid', placeItems: 'center', width: size, height: size,
-        borderRadius: r, background: `hsl(${h} 32% 17%)`, color: `hsl(${h} 64% 66%)`,
+        borderRadius: r, background: `hsl(${h} 32% 17%)`,
+        color: hasIcon ? 'transparent' : `hsl(${h} 64% 66%)`,
         border: `1px solid hsl(${h} 34% 28%)`, fontSize: Math.round(size * 0.42),
         fontWeight: 700, flexShrink: 0, fontFamily: 'var(--font-mono)',
+        ...(hasIcon
+          ? {
+              backgroundImage: `url(${JSON.stringify(icon)})`,
+              backgroundSize: 'cover',
+              backgroundPosition: 'center',
+              backgroundRepeat: 'no-repeat',
+            }
+          : {}),
       }}
     >
       {s.slice(0, 1).toUpperCase()}

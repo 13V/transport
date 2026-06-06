@@ -13,8 +13,8 @@ name: Indexer cron
 on:
   schedule:
     - cron: '*/15 * * * *' # every 15m -> fire alerts (smart buys / new fundings)
-    - cron: '0 */2 * * *' # every 2h  -> token-first index
-    - cron: '30 */1 * * *' # hourly   -> drain deep-scan backlog (verify wallets)
+    - cron: '0 */1 * * *' # hourly   -> token-first index (feed the backlog)
+    - cron: '30 */1 * * *' # hourly   -> DRAIN deep-scan backlog (~1000 wallets/hr)
     - cron: '15 */3 * * *' # every 3h -> capture graduated coins (every wallet)
     - cron: '45 */6 * * *' # every 6h -> chain discovery (follow proven winners)
     - cron: '30 */6 * * *' # every 6h -> link tracking (follow SOL out of winners)
@@ -26,7 +26,20 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # MUST point at the LIVE production deployment. If this is stale (preview URL,
+  # old project, paused deployment) NOTHING runs and the backlog never drains.
   BASE_URL: https://transport-topaz-eight.vercel.app
+  # Deep-scan drain knobs (override per-run via the workflow_dispatch UI is not
+  # wired, but these are the single place to tune throughput):
+  #   REFINE_ITERATIONS x REFINE_MAX_WALLETS  ~=  wallets scanned per hour.
+  # 40 iterations x 30 wallets = ~1200/hr nominal; with pacing + 60s calls the
+  # realistic sustained rate is ~1000/hr. Lower these to cut Helius spend.
+  REFINE_ITERATIONS: '40'
+  REFINE_MAX_WALLETS: '30'
+  REFINE_SLEEP_SECONDS: '3'
+  # Token-first index drain knobs (feeds NEW unverified wallets into the backlog).
+  INDEX_ITERATIONS: '4'
+  INDEX_MAX_TOKENS: '20'
 
 jobs:
   alerts:
@@ -41,26 +54,102 @@ jobs:
           echo
 
   index:
-    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 */2 * * *'
+    # Feed the backlog: loop the token-first indexer a few times per hour so a
+    # steady stream of NEW unverified wallets exists for the drain job to scan.
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 */1 * * *'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - name: Trigger token-first indexer
+      - name: Trigger token-first indexer (looped)
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
         run: |
-          curl -fsS --max-time 120 \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            "$BASE_URL/api/cron/index" | head -c 2000
-          echo
+          set -u
+          ITER="${INDEX_ITERATIONS:-4}"
+          TOK="${INDEX_MAX_TOKENS:-20}"
+          echo "Token-first index: $ITER iterations x $TOK tokens"
+          for i in $(seq 1 "$ITER"); do
+            echo "--- index iteration $i/$ITER ---"
+            # --max-time 70: each Vercel function is capped at 60s (Hobby); give
+            # curl a little headroom over that. || true so one failure (e.g. a
+            # cold-start timeout) doesn't abort the whole loop.
+            curl -fsS --max-time 70 \
+              -H "Authorization: Bearer ${CRON_SECRET}" \
+              "$BASE_URL/api/cron/index?maxTokens=${TOK}" | head -c 2000 || true
+            echo
+            sleep 3
+          done
 
   refine:
+    # DRAIN THE DEEP-SCAN BACKLOG at ~1000 wallet scans/hr.
+    #
+    # Throughput math:
+    #   Each call = one ~60s Vercel function deep-scanning up to REFINE_MAX_WALLETS
+    #   (default 30) wallets. Vercel Hobby caps a function at 60s, so ~30
+    #   wallets/call is the per-call ceiling.
+    #     wallets/hr  ~=  iterations  x  wallets/call
+    #     40 iters    x   30 wallets  =  ~1200/hr nominal -> ~1000/hr sustained
+    #   To tune: change REFINE_ITERATIONS / REFINE_MAX_WALLETS in the env block.
+    #   (Vercel PRO allows maxDuration up to 300s -> fewer, fatter calls also work,
+    #   but the route still clamps timeBudgetMs to <=58000 and the function
+    #   maxDuration is 60, so raise those first if you upgrade.)
+    #
+    # Helius spend warning: ~1000 scans/hr, each paginating a wallet's full swap
+    # history (several Helius requests per wallet), is REAL credit spend. The
+    # REFINE_SLEEP_SECONDS pause between calls paces that load; raise it to slow
+    # the burn. Lower REFINE_ITERATIONS to cap total scans/hr.
+    #
+    # Early stop: if a call reports walletsProcessed == 0 the backlog is drained,
+    # so we stop looping (no point re-hitting Helius for nothing).
     if: github.event_name == 'workflow_dispatch' || github.event.schedule == '30 */1 * * *'
     runs-on: ubuntu-latest
+    # Hard ceiling so the job can never overrun the hour and collide with the next
+    # scheduled run (concurrency cancel-in-progress is false).
+    timeout-minutes: 55
     steps:
-      - name: Drain deep-scan backlog (verify wallets)
+      - name: Drain deep-scan backlog (verify wallets, ~1000/hr)
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
         run: |
-          curl -fsS --max-time 120 \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            "$BASE_URL/api/cron/seed-wallets" | head -c 2000
-          echo
+          set -u
+          ITER="${REFINE_ITERATIONS:-40}"
+          MAXW="${REFINE_MAX_WALLETS:-30}"
+          SLEEP="${REFINE_SLEEP_SECONDS:-3}"
+          echo "Drain loop: up to $ITER iterations x $MAXW wallets (~$((ITER * MAXW))/hr nominal)"
+          total=0
+          for i in $(seq 1 "$ITER"); do
+            echo "--- refine iteration $i/$ITER ---"
+            # --max-time 70: Vercel Hobby caps the function at 60s; give curl
+            # slight headroom. Capture the body so we can read walletsProcessed.
+            body="$(curl -sS --max-time 70 \
+              -H "Authorization: Bearer ${CRON_SECRET}" \
+              "$BASE_URL/api/cron/seed-wallets?maxWallets=${MAXW}")" || body=''
+            echo "$body" | head -c 2000
+            echo
+
+            # Parse walletsProcessed (prefer jq; fall back to grep). Default to a
+            # non-zero sentinel when unparseable so a transient error/timeout does
+            # NOT look like an empty backlog and prematurely stop the drain.
+            if command -v jq >/dev/null 2>&1; then
+              processed="$(echo "$body" | jq -r '.walletsProcessed // empty' 2>/dev/null)"
+            else
+              processed="$(echo "$body" | grep -o '"walletsProcessed":[0-9]*' | grep -o '[0-9]*' | head -n1)"
+            fi
+            [ -z "$processed" ] && processed='-1'
+
+            if [ "$processed" -ge 0 ] 2>/dev/null; then
+              total=$((total + processed))
+            fi
+            echo "iteration processed=$processed running_total=$total"
+
+            # Backlog drained -> stop early (avoid pointless Helius calls).
+            if [ "$processed" = "0" ]; then
+              echo "Backlog empty (walletsProcessed=0) — stopping after $i iterations."
+              break
+            fi
+            sleep "$SLEEP"
+          done
+          echo "Drain complete: ~$total wallets processed this run."
 
   graduations:
     if: github.event_name == 'workflow_dispatch' || github.event.schedule == '15 */3 * * *'

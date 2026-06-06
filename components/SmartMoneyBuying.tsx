@@ -12,6 +12,7 @@ interface SmartBuyToken {
   mint: string;
   symbol?: string | null;
   name?: string | null;
+  icon?: string | null;
   distinctSmartBuyers: number;
   buys: number;
   solVolume: number;
@@ -184,10 +185,15 @@ export default function SmartMoneyBuying() {
                     <td className={`rank ${i < 3 ? 'top' : ''}`}>{i + 1}</td>
                     <td>
                       <div className="row gap-10">
-                        <TokenMark symbol={t.symbol || t.mint} size={28} />
+                        <TokenMark symbol={t.symbol || t.mint} icon={t.icon ?? undefined} size={28} />
                         <div className="stack" style={{ gap: 2 }}>
                           <div className="row gap-8">
                             <b style={{ fontSize: 13 }}>{symbol}</b>
+                            {t.name && (
+                              <span className="faint" style={{ fontSize: 11, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {t.name}
+                              </span>
+                            )}
                             <span className="faint" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
                               {age}
                             </span>

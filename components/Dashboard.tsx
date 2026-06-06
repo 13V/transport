@@ -15,7 +15,7 @@ import {
 // ---- API shapes ----------------------------------------------------------
 interface StatusResponse { totals: { walletsIndexed: number; verifiedWallets: number; smartWallets: number } }
 interface ListWallet { address: string; roiPct: number | null; pnl: number; winRate: number; verified: boolean; tier?: string }
-interface BuyingToken { mint: string; symbol?: string; distinctSmartBuyers: number; solVolume: number }
+interface BuyingToken { mint: string; symbol?: string; name?: string; icon?: string; distinctSmartBuyers: number; solVolume: number }
 interface Mover { wallet: string; rankDelta: number | null; latestRoi: number | null; latestRank: number | null }
 
 type Load<T> = { state: 'loading' | 'ok' | 'error'; data: T | null };
@@ -185,10 +185,14 @@ export default function Dashboard() {
                       <tr key={t.mint} className="clickable" onClick={() => router.push(`/token/${t.mint}`)}>
                         <td>
                           <span className="row gap-8">
-                            <TokenMark symbol={t.symbol || t.mint} size={24} />
+                            <TokenMark symbol={t.symbol || t.mint} icon={t.icon} size={24} />
                             <span className="stack">
                               <b style={{ fontSize: 12.5 }}>{t.symbol || f.short(t.mint, 4, 4)}</b>
-                              <span className="mono faint" style={{ fontSize: 11 }}>{f.short(t.mint, 4, 4)}</span>
+                              {t.name ? (
+                                <span className="faint" style={{ fontSize: 11, maxWidth: 130, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.name}</span>
+                              ) : (
+                                <span className="mono faint" style={{ fontSize: 11 }}>{f.short(t.mint, 4, 4)}</span>
+                              )}
                             </span>
                           </span>
                         </td>

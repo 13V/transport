@@ -32,9 +32,14 @@ export interface UniverseToken {
  * focus of the smart-money leaderboard.
  */
 export async function getTokenUniverse(limit = 30): Promise<UniverseToken[]> {
+  // Pull from several DexScreener endpoints so a high-volume backlog-feeding run
+  // sees a WIDER, fresher universe instead of re-deduping the same ~30 trending
+  // coins every time. `token-profiles/latest` surfaces newly-listed coins, which
+  // is exactly where fresh unverified wallets come from.
   const endpoints = [
     `${DEXSCREENER_BASE}/token-boosts/top/v1`,
     `${DEXSCREENER_BASE}/token-boosts/latest/v1`,
+    `${DEXSCREENER_BASE}/token-profiles/latest/v1`,
   ];
 
   const seen = new Set<string>();
