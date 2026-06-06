@@ -54,10 +54,12 @@ interface Candle {
  * (`price_at_burst`) stamped ONCE from real spot price.
  *
  * The growing fields (buyers / buyer_wallets / sol_total / window_end / tiers /
- * sample_buyers / symbol) are always overwritten with the latest values via the
- * upsert. `price_at_burst` and `first_seen` are NOT in the update payload, so an
- * upsert that hits an existing row leaves the original baseline/first-seen
- * intact — only the very first insert sets them.
+ * sample_buyers / all_buyers / symbol) are always overwritten with the latest
+ * values via the upsert. `price_at_burst` and `first_seen` are NOT in the update
+ * payload, so an upsert that hits an existing row leaves the original
+ * baseline/first-seen intact — only the very first insert sets them. Likewise
+ * `posted_call`/`posted_result` are never written here (they default false and
+ * are flipped solely by the auto-post agent), so this cron can't un-post a call.
  *
  * Resilient: returns { persisted: 0 } on any unconfigured/missing-table/error.
  */
@@ -122,6 +124,12 @@ export async function persistBursts(): Promise<{ persisted: number }> {
         sol_total: b.solTotal,
         sample_buyers: b.sampleBuyers ?? [],
         tiers: (b.tiers ?? []).map((t) => t ?? ''),
+        // Growing field: refresh the full (capped) distinct buyer set as the
+        // burst accumulates, for per-wallet attribution. NOTE: posted_call /
+        // posted_result are intentionally NOT written here — they default false
+        // on insert and are owned by the auto-post agent, so this growth upsert
+        // never clobbers them.
+        all_buyers: b.allBuyers ?? [],
       };
       if (!existing.has(b.id)) {
         base.price_at_burst = baselineFor(b);

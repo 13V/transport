@@ -54,6 +54,13 @@ export interface LiveBurst {
    * Used for per-user watchlist matching; `sampleBuyers` stays the 5-cap UI set.
    */
   wallets: string[];
+  /**
+   * DISTINCT buyer wallet addresses over the whole streak (pre-cluster-dedup),
+   * capped at MAX_ALL_BUYERS. Persisted to live_bursts.all_buyers and used for
+   * per-wallet attribution (track records, backtester). Most bursts are well
+   * under the cap; `wallets` is the uncapped in-memory set for watchlist matching.
+   */
+  allBuyers?: string[];
   /** Which side of the trade this burst represents. Defaults to 'buy'. */
   side: 'buy' | 'sell';
   /**
@@ -143,6 +150,10 @@ const MAX_TRADE_ROWS = 3000; // hard cap on rows pulled across all chunks
 
 // Tier weights for the "quality" composite ranking.
 const TIER_WEIGHT: Record<string, number> = { S: 3, A: 2, B: 1, C: 0.5 };
+
+// Cap on the distinct buyer wallet list retained for per-wallet attribution
+// (live_bursts.all_buyers). Most bursts hold far fewer; this bounds the array.
+const MAX_ALL_BUYERS = 60;
 
 function chunk<T>(arr: T[], size: number): T[][] {
   const out: T[][] = [];
@@ -432,6 +443,9 @@ function detectBurstsForRows(
       windowEnd: new Date(s.endMs).toISOString(),
       sampleBuyers: s.sampleBuyers,
       wallets: Array.from(s.wallets),
+      // Distinct buyer wallets for per-wallet attribution, capped (insertion
+      // order is encounter order since s.wallets is a Set).
+      allBuyers: Array.from(s.wallets).slice(0, MAX_ALL_BUYERS),
       side,
       tiers,
       buyerStats,
