@@ -22,6 +22,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSupabase, isSupabaseConfigured } from '../../../../lib/supabase-client';
 import { getSmartCriteria, isSmartWallet } from '../../../../lib/indexer/curation';
 import { tierFromScore } from '../../../../lib/format';
+import { fetchAllRows } from '../../../../lib/db-paginate';
 
 export const revalidate = 60;
 
@@ -113,49 +114,54 @@ export async function GET(request: NextRequest) {
   const baseCols =
     'wallet, score, realized_pnl, win_rate, consistency, total_trades, tokens_traded, last_trade_at';
   const extCols = `${baseCols}, seeded, roi_pct, invested_sol, verified`;
-  let extQuery = supabase.from('wallet_stats').select(extCols);
-  // Optional refinements — applied independently of the smart-money gate so the
+  // Build a FRESH query per page (Supabase builders are single-use). Optional
+  // refinements are applied independently of the smart-money gate so the
   // leaderboard's search / min-PnL / active-within filters work across the full
   // set rather than only the first client-side page.
-  if (q) {
-    extQuery = extQuery.ilike('wallet', `${q}%`);
-  }
-  if (minPnl != null && Number.isFinite(minPnl)) {
-    extQuery = extQuery.gte('realized_pnl', minPnl);
-  }
-  if (minRoi != null && Number.isFinite(minRoi)) {
-    extQuery = extQuery.gte('roi_pct', minRoi);
-  }
-  if (activeDays != null && Number.isFinite(activeDays) && activeDays > 0) {
-    const cutoff = new Date(now - activeDays * 86_400_000).toISOString();
-    extQuery = extQuery.gte('last_trade_at', cutoff);
-  }
-  if (applyGate) {
-    extQuery = extQuery
-      .not('roi_pct', 'is', null)
-      .gte('roi_pct', criteria.minRoiPct)
-      .gte('realized_pnl', criteria.minPnlSol)
-      .gte('total_trades', criteria.minTrades)
-      .gte('tokens_traded', criteria.minTokens);
-    if (criteria.minInvestedSol > 0) {
-      extQuery = extQuery.gte('invested_sol', criteria.minInvestedSol);
+  const buildExt = () => {
+    let qb = supabase.from('wallet_stats').select(extCols);
+    if (q) {
+      qb = qb.ilike('wallet', `${q}%`);
     }
-    if (criteria.maxIdleDays > 0) {
-      const cutoff = new Date(now - criteria.maxIdleDays * 86_400_000).toISOString();
-      extQuery = extQuery.gte('last_trade_at', cutoff);
+    if (minPnl != null && Number.isFinite(minPnl)) {
+      qb = qb.gte('realized_pnl', minPnl);
     }
-  }
-  const extRead = await extQuery.order('score', { ascending: false }).limit(20000);
+    if (minRoi != null && Number.isFinite(minRoi)) {
+      qb = qb.gte('roi_pct', minRoi);
+    }
+    if (activeDays != null && Number.isFinite(activeDays) && activeDays > 0) {
+      const cutoff = new Date(now - activeDays * 86_400_000).toISOString();
+      qb = qb.gte('last_trade_at', cutoff);
+    }
+    if (applyGate) {
+      qb = qb
+        .not('roi_pct', 'is', null)
+        .gte('roi_pct', criteria.minRoiPct)
+        .gte('realized_pnl', criteria.minPnlSol)
+        .gte('total_trades', criteria.minTrades)
+        .gte('tokens_traded', criteria.minTokens);
+      if (criteria.minInvestedSol > 0) {
+        qb = qb.gte('invested_sol', criteria.minInvestedSol);
+      }
+      if (criteria.maxIdleDays > 0) {
+        const cutoff = new Date(now - criteria.maxIdleDays * 86_400_000).toISOString();
+        qb = qb.gte('last_trade_at', cutoff);
+      }
+    }
+    return qb.order('score', { ascending: false });
+  };
+  // PostgREST caps a single response at ~1000 rows (so .limit(20000) silently
+  // clamps and the leaderboard/total pin at 1000). Page through with .range() to
+  // get the TRUE full filtered set before we sort + slice the requested page.
+  const extRead = await fetchAllRows(buildExt);
 
   // Degraded / pre-migration fallback: if the accurate columns (or gate filters)
-  // aren't available, fall back to the original top-N fetch over base columns.
+  // aren't available, fall back to a base-column fetch (paged the same way).
   const { data, error }: { data: any[] | null; error: { message: string } | null } =
     extRead.error
-      ? await supabase
-          .from('wallet_stats')
-          .select(baseCols)
-          .order('score', { ascending: false })
-          .limit(2000)
+      ? await fetchAllRows(() =>
+          supabase.from('wallet_stats').select(baseCols).order('score', { ascending: false })
+        )
       : extRead;
 
   if (error) {

@@ -12,6 +12,7 @@
 import { NextResponse } from 'next/server';
 import { getSupabase, isSupabaseConfigured } from '../../../lib/supabase-client';
 import { getSmartCriteria, isSmartWallet } from '../../../lib/indexer/curation';
+import { fetchAllRows } from '../../../lib/db-paginate';
 
 export const dynamic = 'force-dynamic';
 
@@ -53,28 +54,35 @@ export async function GET() {
   // below so the final set is byte-identical to the gate.
   const cols =
     'wallet, score, realized_pnl, win_rate, consistency, total_trades, tokens_traded, last_trade_at';
-  let extQuery = supabase
-    .from('wallet_stats')
-    .select(`${cols}, seeded, roi_pct, invested_sol, verified`)
-    .not('roi_pct', 'is', null)
-    .gte('roi_pct', criteria.minRoiPct)
-    .gte('realized_pnl', criteria.minPnlSol)
-    .gte('total_trades', criteria.minTrades)
-    .gte('tokens_traded', criteria.minTokens);
-  if (criteria.minInvestedSol > 0) {
-    extQuery = extQuery.gte('invested_sol', criteria.minInvestedSol);
-  }
-  if (criteria.maxIdleDays > 0) {
-    const cutoff = new Date(now - criteria.maxIdleDays * 86_400_000).toISOString();
-    extQuery = extQuery.gte('last_trade_at', cutoff);
-  }
-  const extRead = await extQuery.order('score', { ascending: false }).limit(20000);
+  // Build a FRESH gate query per page (Supabase builders are single-use).
+  const buildGate = () => {
+    let qb = supabase
+      .from('wallet_stats')
+      .select(`${cols}, seeded, roi_pct, invested_sol, verified`)
+      .not('roi_pct', 'is', null)
+      .gte('roi_pct', criteria.minRoiPct)
+      .gte('realized_pnl', criteria.minPnlSol)
+      .gte('total_trades', criteria.minTrades)
+      .gte('tokens_traded', criteria.minTokens);
+    if (criteria.minInvestedSol > 0) {
+      qb = qb.gte('invested_sol', criteria.minInvestedSol);
+    }
+    if (criteria.maxIdleDays > 0) {
+      const cutoff = new Date(now - criteria.maxIdleDays * 86_400_000).toISOString();
+      qb = qb.gte('last_trade_at', cutoff);
+    }
+    return qb.order('score', { ascending: false });
+  };
+  // PostgREST caps a single response at ~1000 rows, so .limit(20000) silently
+  // clamps and the smart count pins at 1000 once it grows past that. Page through
+  // with .range() to get the TRUE full gate-passing set.
+  const extRead = await fetchAllRows(buildGate);
 
   // Degraded / pre-migration fallback: if the roi_pct/verified columns (or the
   // gate filters above) aren't available, fall back to the original top-N + JS.
-  const { data: rows }: { data: any[] | null } = extRead.error
-    ? await supabase.from('wallet_stats').select(cols).order('score', { ascending: false }).limit(1000)
-    : extRead;
+  const rows: any[] | null = extRead.error
+    ? (await supabase.from('wallet_stats').select(cols).order('score', { ascending: false }).range(0, 999)).data
+    : extRead.data;
 
   const smart = (rows ?? []).filter((r: any) =>
     isSmartWallet(
