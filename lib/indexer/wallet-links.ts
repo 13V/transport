@@ -12,6 +12,7 @@
  */
 
 import axios from 'axios';
+import { guardHeliusPage, recordSpend } from './helius-budget';
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
 
@@ -63,6 +64,10 @@ export async function fetchSolDistributions(
   let fetched = 0;
 
   while (fetched < maxTxs) {
+    // Hard cost ceiling: stop paginating once the daily Helius credit cap is
+    // reached, returning whatever we've gathered so far.
+    if (!(await guardHeliusPage(100))) break;
+
     const limit = Math.min(100, maxTxs - fetched);
     let txs: any[];
     try {
@@ -76,6 +81,7 @@ export async function fetchSolDistributions(
         timeout: 20000,
       });
       txs = Array.isArray(data) ? data : [];
+      await recordSpend(100); // page succeeded -> 100 credits spent
     } catch (err) {
       const status = (err as any)?.response?.status;
       if (status === 401 || status === 403) {

@@ -14,6 +14,7 @@
 
 import axios from 'axios';
 import { parseWalletTradesFromTx } from './swap-fetcher';
+import { guardHeliusPage, recordSpend } from './helius-budget';
 import type { Trade } from '../pnl-engine';
 
 const HELIUS_PAGE_SIZE = 100; // Helius caps enhanced-tx pages at 100.
@@ -30,7 +31,7 @@ function heliusBase(): string | null {
  */
 export async function fetchWalletSwapHistory(
   wallet: string,
-  maxTxs = 500
+  maxTxs = 250
 ): Promise<Trade[]> {
   const base = heliusBase();
   if (!base) {
@@ -44,6 +45,10 @@ export async function fetchWalletSwapHistory(
   let fetched = 0;
 
   while (fetched < maxTxs) {
+    // Hard cost ceiling: stop paginating once the daily Helius credit cap is
+    // reached, returning whatever we've gathered so far.
+    if (!(await guardHeliusPage(100))) break;
+
     const limit = Math.min(HELIUS_PAGE_SIZE, maxTxs - fetched);
 
     let txs: any[];
@@ -58,6 +63,7 @@ export async function fetchWalletSwapHistory(
         timeout: 20000,
       });
       txs = Array.isArray(data) ? data : [];
+      await recordSpend(100); // page succeeded -> 100 credits spent
     } catch (err) {
       const status = (err as any)?.response?.status;
       // An auth failure affects every wallet — surface it loudly instead of

@@ -28,6 +28,7 @@
  */
 
 import axios from 'axios';
+import { guardHeliusPage, recordSpend } from './helius-budget';
 import type { Trade } from '../pnl-engine';
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
@@ -205,11 +206,14 @@ async function fetchSwapTxs(mint: string, limit: number): Promise<any[]> {
   }
 
   const url = `${base}/addresses/${mint}/transactions`;
+  // Hard cost ceiling: skip the request entirely when over the daily cap.
+  if (!(await guardHeliusPage(100))) return [];
   try {
     const { data } = await axios.get(url, {
       params: { 'api-key': process.env.HELIUS_API_KEY, type: 'SWAP', limit },
       timeout: 20000,
     });
+    await recordSpend(100); // page succeeded -> 100 credits spent
     return Array.isArray(data) ? data : [];
   } catch (err) {
     const status = (err as any)?.response?.status;
@@ -277,6 +281,10 @@ export async function fetchAllWalletTradesForToken(
   let fetched = 0;
 
   while (fetched < maxTxs) {
+    // Hard cost ceiling: stop paginating once the daily Helius credit cap is
+    // reached, returning whatever we've gathered so far.
+    if (!(await guardHeliusPage(100))) break;
+
     const limit = Math.min(100, maxTxs - fetched);
 
     let txs: any[];
@@ -291,6 +299,7 @@ export async function fetchAllWalletTradesForToken(
         timeout: 20000,
       });
       txs = Array.isArray(data) ? data : [];
+      await recordSpend(100); // page succeeded -> 100 credits spent
     } catch (err) {
       const status = (err as any)?.response?.status;
       if (status === 401 || status === 403) {
