@@ -20,8 +20,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getLiveBursts, qualityScore, type LiveBurst } from '../../../../lib/indexer/live-bursts';
-import { getTokenMeta } from '../../../../lib/token-meta';
+import { buildLiveFeed } from '../../../../lib/indexer/live-feed';
 
 export const dynamic = 'force-dynamic';
 
@@ -56,77 +55,20 @@ export async function GET(request: NextRequest) {
   const minSol = clampFloat(searchParams.get('minSol'), 0, 0, Number.MAX_SAFE_INTEGER);
   const sinceMs = parseSince(searchParams.get('since'));
 
-  // Pull more than `limit` so post-filtering (minSol/since) + re-ranking still
-  // has a full pool to cap from; the underlying limit is clamped to 200.
-  const result = await getLiveBursts({ windowSec, minBuyers, hours, limit: 200 });
-
-  // Apply caller filters, then rank, then cap to the requested limit.
-  let bursts: LiveBurst[] = result.bursts.filter((b) => {
-    if (b.solTotal < minSol) return false;
-    if (sinceMs != null && new Date(b.windowEnd).getTime() <= sinceMs) return false;
-    return true;
+  // All filter/sort/cap/enrich logic now lives in buildLiveFeed, served from a
+  // short result cache shared with the SSE stream route. Same shape as before.
+  const result = await buildLiveFeed({
+    windowSec,
+    minBuyers,
+    hours,
+    limit,
+    sort,
+    minSol,
+    sinceMs,
   });
-
-  bursts.sort((a, b) => {
-    if (sort === 'recent') {
-      return new Date(b.windowEnd).getTime() - new Date(a.windowEnd).getTime();
-    }
-    // quality: composite desc, recency as tiebreak.
-    const q = qualityScore(b) - qualityScore(a);
-    if (q !== 0) return q;
-    return new Date(b.windowEnd).getTime() - new Date(a.windowEnd).getTime();
-  });
-
-  bursts = bursts.slice(0, limit);
-
-  // Cursor for bot polling: the newest windowEnd across the (pre-limit) filtered
-  // set, so a follower can pass it back as ?since= and only get newer bursts.
-  let nextCursor: string | null = null;
-  for (const b of result.bursts) {
-    if (b.solTotal < minSol) continue;
-    if (!nextCursor || new Date(b.windowEnd).getTime() > new Date(nextCursor).getTime()) {
-      nextCursor = b.windowEnd;
-    }
-  }
-
-  // Enrich bursts with real symbol/name/icon + live market stats from
-  // DexScreener/Helius. A metadata failure must never break the feed, so
-  // getTokenMeta is resilient and we additionally guard here.
-  try {
-    const meta = await getTokenMeta(bursts.map((b) => b.mint));
-    bursts = bursts.map((b) => {
-      const m = meta.get(b.mint);
-      if (!m) return b;
-      // Read newer TokenMeta fields loosely: another agent is adding these to
-      // TokenMeta in parallel, so access them off a loose alias with optional
-      // chaining. Safe (undefined) even before the fields land on the type.
-      const mx = m as Record<string, unknown>;
-      return {
-        ...b,
-        symbol: m.symbol,
-        name: m.name,
-        icon: m.icon,
-        icons: m.icons,
-        marketCapUsd: m.marketCapUsd,
-        liquidityUsd: m.liquidityUsd,
-        priceChange24h: m.priceChange24h,
-        priceUsd: m.priceUsd,
-        pairAddress: m.pairAddress,
-        mintRenounced: mx?.mintRenounced as boolean | undefined,
-        freezeRenounced: mx?.freezeRenounced as boolean | undefined,
-        pairCreatedAt: mx?.pairCreatedAt as number | undefined,
-        buys24h: mx?.buys24h as number | undefined,
-        sells24h: mx?.sells24h as number | undefined,
-        volume24hUsd: mx?.volume24hUsd as number | undefined,
-        topHolderPct: mx?.topHolderPct as number | undefined,
-      };
-    });
-  } catch {
-    // ignore — return the un-enriched feed
-  }
 
   return NextResponse.json(
-    { ...result, count: bursts.length, nextCursor, bursts },
+    result,
     {
       headers: {
         // Short s-maxage so the feed is near-real-time; the CDN still coalesces

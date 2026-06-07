@@ -238,6 +238,13 @@ const WINDOW_SEC: number[] = [15, 30, 60];
 const MIN_SOL: number[] = [0, 1, 5, 10];
 const POLL_MS = 3 * 1000;
 
+// --- SSE (near-instant burst stream) ---
+// The browser EventSource auto-reconnects on its own using the server's `retry`
+// hint, so we don't manage reconnection backoff ourselves. We DO run a connect
+// watchdog: if no `snapshot` arrives within this window after (re)opening, we
+// treat the stream as unhealthy and fall back to polling until it recovers.
+const SSE_WATCHDOG_MS = 8_000;
+
 // Liquidity below this (USD) is a cheap rug proxy — flag it (flat fallback).
 const LOW_LIQ_USD = 5_000;
 // liq/MC ratio below this → "THIN LIQ" (supersedes the flat guard when MC known).
@@ -813,6 +820,20 @@ export default function LiveFeed() {
   // Realtime: when connected, the browser is pushed every new trade INSERT and we
   // refetch instantly (no poll lag). null until we know; true once subscribed.
   const [realtimeOk, setRealtimeOk] = useState(false);
+
+  // SSE: the held event-stream is the PRIMARY update path. `sseOk` is true while
+  // a stream is connected AND has delivered at least one snapshot recently (the
+  // watchdog clears it on connect failure / silence). Polling only runs while
+  // this is false, so the two never race for long.
+  const [sseOk, setSseOk] = useState(false);
+  const esRef = useRef<EventSource | null>(null);
+  // Watchdog timer: if no snapshot lands within SSE_WATCHDOG_MS of (re)connect we
+  // declare the stream unhealthy and let polling take over.
+  const sseWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Mirror sseOk into a ref so the realtime-INSERT handler can suppress its
+  // refetch while SSE is the healthy primary path (without re-subscribing).
+  const sseOkRef = useRef(false);
+  sseOkRef.current = sseOk;
   // Current controls mirrored into refs so the realtime handler refetches with
   // the live filter values without re-subscribing on every control change.
   const ctrlRef = useRef({ min: minBuyers, win: windowSec, sol: minSol, sort });
@@ -856,6 +877,56 @@ export default function LiveFeed() {
     }
   }, []);
 
+  // Highlight diff: flag genuinely new ids (not seen before) for the new-card
+  // animation, then fold them into the seen set. On the very first delivery every
+  // id is "new", so we suppress the highlight and just seed the set. Shared by the
+  // poll path AND both SSE paths (snapshot + delta) so highlighting is identical.
+  const flagNewIds = useCallback((incoming: Burst[]) => {
+    if (firstLoadRef.current) {
+      firstLoadRef.current = false;
+      setNewIds(new Set());
+    } else {
+      const fresh = new Set<string>();
+      for (const b of incoming) {
+        if (!seenRef.current.has(b.id)) fresh.add(b.id);
+      }
+      setNewIds(fresh);
+    }
+    for (const b of incoming) seenRef.current.add(b.id);
+  }, []);
+
+  // SNAPSHOT path — REPLACE the burst set with the authoritative current window.
+  // Used by the poll fetch and by the SSE `snapshot` event. Self-heals aged-out
+  // bursts because anything no longer present is dropped.
+  const applySnapshot = useCallback((next: Burst[], genAt?: string | null) => {
+    flagNewIds(next);
+    setBursts(next);
+    setGeneratedAt(genAt ?? new Date().toISOString());
+    setLastOkAt(Date.now());
+    setError(null);
+  }, [flagNewIds]);
+
+  // DELTA path — UPSERT new-or-changed bursts by id into the current set, keeping
+  // the incoming (freshest) fields. Order of existing rows is preserved; brand-new
+  // ids are appended (client-side sort/group re-rank them on render). Used by the
+  // SSE `bursts` event. Never blanks the feed.
+  const upsertBursts = useCallback((delta: Burst[], genAt?: string | null) => {
+    if (!delta.length) {
+      setGeneratedAt(genAt ?? new Date().toISOString());
+      setLastOkAt(Date.now());
+      return;
+    }
+    flagNewIds(delta);
+    setBursts((prev) => {
+      const byId = new Map(prev.map((b) => [b.id, b] as const));
+      for (const b of delta) byId.set(b.id, { ...byId.get(b.id), ...b });
+      return Array.from(byId.values());
+    });
+    setGeneratedAt(genAt ?? new Date().toISOString());
+    setLastOkAt(Date.now());
+    setError(null);
+  }, [flagNewIds]);
+
   const fetchLive = useCallback(async (min: number, win: number, sol: number, srt: 'quality' | 'recent') => {
     try {
       const res = await fetch(
@@ -864,34 +935,14 @@ export default function LiveFeed() {
       if (!res.ok) throw new Error('Failed to fetch live feed');
       const json = (await res.json()) as LiveResponse;
       if (!mountedRef.current) return;
-
-      const next = json.bursts ?? [];
-
-      // Diff against ids we've already shown. On the very first load every id is
-      // "new", so we suppress the highlight and just seed the seen set.
-      if (firstLoadRef.current) {
-        firstLoadRef.current = false;
-        setNewIds(new Set());
-      } else {
-        const fresh = new Set<string>();
-        for (const b of next) {
-          if (!seenRef.current.has(b.id)) fresh.add(b.id);
-        }
-        setNewIds(fresh);
-      }
-      for (const b of next) seenRef.current.add(b.id);
-
-      setBursts(next);
-      setGeneratedAt(json.generatedAt ?? new Date().toISOString());
-      setLastOkAt(Date.now());
-      setError(null);
+      applySnapshot(json.bursts ?? [], json.generatedAt);
     } catch (err) {
       if (!mountedRef.current) return;
       setError(err instanceof Error ? err.message : 'Failed to load live feed');
     } finally {
       if (mountedRef.current) setLoading(false);
     }
-  }, []);
+  }, [applySnapshot]);
 
   // Proof-header stats fetch (once on mount + periodic refresh).
   const fetchStats = useCallback(async () => {
@@ -943,6 +994,9 @@ export default function LiveFeed() {
             // Hard min-interval floor: ignore realtime triggers that arrive
             // within REALTIME_MIN_INTERVAL_MS of the last one so a swap flood
             // can't out-poll the safety poller.
+            // While SSE is the healthy primary path it already pushes burst
+            // deltas, so skip the realtime-triggered poll to avoid running both.
+            if (sseOkRef.current) return;
             const now = Date.now();
             if (now - lastRealtimeFetchRef.current < REALTIME_MIN_INTERVAL_MS) return;
             lastRealtimeFetchRef.current = now;
@@ -959,14 +1013,105 @@ export default function LiveFeed() {
     };
   }, [fetchLive]);
 
-  // Poll for the current controls. When Realtime is pushing, this drops to a slow
-  // safety net (catches missed events / dropped sockets); otherwise it's the
-  // primary 3s refresh.
+  // SSE PRIMARY PATH — hold one EventSource against the stream built from the
+  // CURRENT filter params. The connection is rebuilt (old one closed, new one
+  // opened) whenever a filter changes, mirroring the poll URL exactly. The
+  // browser auto-reconnects after the server's ~50s close (via its `retry` hint)
+  // and re-sends a fresh `snapshot`, which self-heals aged-out bursts.
+  //
+  // LIFECYCLE: open → arm watchdog → on `snapshot` REPLACE + clear watchdog +
+  // mark sseOk → on `bursts` UPSERT by id → on `error` (or watchdog timeout)
+  // mark !sseOk so polling takes over; the browser keeps retrying underneath and
+  // the next snapshot flips sseOk back on (stopping the poll again). Teardown on
+  // unmount / filter change closes the EventSource and clears the watchdog.
   useEffect(() => {
+    // SSR / unsupported-browser guard → leave sseOk false so polling is primary.
+    if (typeof window === 'undefined' || typeof EventSource === 'undefined') {
+      setSseOk(false);
+      return;
+    }
+
+    const clearWatchdog = () => {
+      if (sseWatchdogRef.current) {
+        clearTimeout(sseWatchdogRef.current);
+        sseWatchdogRef.current = null;
+      }
+    };
+    const armWatchdog = () => {
+      clearWatchdog();
+      sseWatchdogRef.current = setTimeout(() => {
+        // No snapshot within the window → treat as unhealthy, fall back to poll.
+        if (mountedRef.current) setSseOk(false);
+      }, SSE_WATCHDOG_MS);
+    };
+
+    // Public browser SSE (snapshot + deltas). The API-key-gated bot stream lives
+    // separately at /api/smart-money/live/stream — don't point the UI at it.
+    const url =
+      `/api/smart-money/live/ui-stream?windowSec=${windowSec}&minBuyers=${minBuyers}` +
+      `&minSol=${minSol}&hours=6&limit=50&sort=${sort}`;
+
+    let es: EventSource;
+    try {
+      es = new EventSource(url);
+    } catch {
+      setSseOk(false);
+      return;
+    }
+    esRef.current = es;
+    armWatchdog();
+
+    es.addEventListener('snapshot', (ev: MessageEvent) => {
+      if (!mountedRef.current) return;
+      try {
+        const json = JSON.parse(ev.data) as LiveResponse;
+        applySnapshot(json.bursts ?? [], json.generatedAt);
+        clearWatchdog();
+        setSseOk(true);
+        setLoading(false);
+      } catch {
+        /* malformed frame — ignore, keep last set */
+      }
+    });
+
+    es.addEventListener('bursts', (ev: MessageEvent) => {
+      if (!mountedRef.current) return;
+      try {
+        const json = JSON.parse(ev.data) as { bursts?: Burst[]; generatedAt?: string };
+        upsertBursts(json.bursts ?? [], json.generatedAt);
+        // A delta proves the stream is alive even if the watchdog hasn't seen a
+        // snapshot yet (shouldn't happen, but keeps us healthy & re-arms).
+        clearWatchdog();
+        setSseOk(true);
+      } catch {
+        /* ignore */
+      }
+    });
+
+    es.onerror = () => {
+      // EventSource auto-reconnects on its own; we just drop to polling meanwhile.
+      // Never blank the feed — the last burst set stays on screen.
+      if (mountedRef.current) setSseOk(false);
+      // Re-arm so a stalled-but-not-closed socket still trips the fallback.
+      armWatchdog();
+    };
+
+    return () => {
+      clearWatchdog();
+      es.close();
+      if (esRef.current === es) esRef.current = null;
+    };
+  }, [applySnapshot, upsertBursts, minBuyers, windowSec, minSol, sort]);
+
+  // Poll for the current controls — FALLBACK only. Skipped entirely while SSE is
+  // the healthy primary path (sseOk). When SSE is down: if Realtime is pushing
+  // this drops to a slow safety net; otherwise it's the primary 3s refresh.
+  useEffect(() => {
+    if (sseOk) return; // SSE is primary — don't run both at once.
     const pollMs = realtimeOk ? 30_000 : POLL_MS;
     const interval = setInterval(() => fetchLive(minBuyers, windowSec, minSol, sort), pollMs);
     return () => clearInterval(interval);
-  }, [fetchLive, minBuyers, windowSec, minSol, sort, realtimeOk]);
+  }, [fetchLive, minBuyers, windowSec, minSol, sort, realtimeOk, sseOk]);
 
   // Keep relative ages ticking between polls (every 5s is plenty).
   useEffect(() => {
@@ -1190,17 +1335,19 @@ export default function LiveFeed() {
   }
 
   // HONEST FRESHNESS — color the live dot by actual state instead of a
-  // hardcoded green. Green only when realtime is connected AND the last good
-  // fetch is recent; amber when realtime dropped (polling fallback) or the
-  // last fetch went stale; grey before the first successful fetch.
+  // hardcoded green. Driven by the last received event (snapshot/delta/poll via
+  // lastOkAt). Green when a live push channel (SSE stream, else Realtime) is
+  // connected AND the last event is recent; amber when we've dropped to polling
+  // or the last event went stale; grey before the first successful event.
   const sinceOk = lastOkAt == null ? Infinity : Date.now() - lastOkAt;
   const stale = sinceOk > STALE_MS;
+  const livePush = sseOk || realtimeOk;
   const freshness =
     lastOkAt == null
       ? { color: DOT_NEUTRAL, label: 'connecting…' }
-      : realtimeOk && !stale
-      ? { color: CHART_COLORS.POS, label: 'live — updates instantly' }
-      : !realtimeOk
+      : livePush && !stale
+      ? { color: CHART_COLORS.POS, label: sseOk ? 'live — streaming updates' : 'live — updates instantly' }
+      : !livePush
       ? { color: DOT_WARN, label: 'reconnecting… — polling every 3s' }
       : { color: DOT_WARN, label: 'stale — retrying…' };
 
