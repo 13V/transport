@@ -263,7 +263,7 @@ export async function runSeedIndexer(opts: SeedIndexerOptions = {}): Promise<See
     };
 
     // 1. Pull the wallet's swap history (the I/O-bound Helius call we parallelize).
-    const history = await fetchWalletSwapHistory(wallet, maxTxsPerWallet);
+    const { trades: history, complete } = await fetchWalletSwapHistory(wallet, maxTxsPerWallet);
 
     if (history.length > 0) {
       for (const t of history) res.bySource[t.source] = (res.bySource[t.source] ?? 0) + 1;
@@ -289,6 +289,18 @@ export async function runSeedIndexer(opts: SeedIndexerOptions = {}): Promise<See
       } else {
         res.tradesIngested = rows.length;
       }
+    }
+
+    // CRITICAL: if the Helius daily budget cap (or a transient fetch error) cut
+    // the history short, do NOT score/verify on a partial record — that would
+    // either write wrong all-time PnL/ROI or, for a zero-page fetch, retire the
+    // wallet as "no trades" forever. Leave it verified=false so a later run
+    // (after the cap resets) re-scans it with a complete history. Any partial
+    // trades already ingested above are harmless (idempotent; the webhook fills
+    // the rest). processed=false marks it a skip, not a real scan.
+    if (!complete) {
+      res.processed = false;
+      return res;
     }
 
     // 2. Score from the already-in-memory history — no write-then-read round

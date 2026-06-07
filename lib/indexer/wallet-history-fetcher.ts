@@ -32,22 +32,31 @@ function heliusBase(): string | null {
 export async function fetchWalletSwapHistory(
   wallet: string,
   maxTxs = 250
-): Promise<Trade[]> {
+): Promise<{ trades: Trade[]; complete: boolean }> {
   const base = heliusBase();
   if (!base) {
     console.warn('[SEED] HELIUS_API_KEY not set — cannot fetch wallet history');
-    return [];
+    // No key ⇒ this is NOT a real "we scanned and found nothing" result.
+    return { trades: [], complete: false };
   }
 
   const url = `${base}/addresses/${wallet}/transactions`;
   const trades: Trade[] = [];
   let before: string | undefined;
   let fetched = 0;
+  // True only if we exhausted the wallet's history (or hit maxTxs / an empty
+  // page) naturally. Set false if the budget cap or a fetch error cut us short,
+  // so callers don't persist partial PnL as if it were the full record.
+  let complete = true;
 
   while (fetched < maxTxs) {
     // Hard cost ceiling: stop paginating once the daily Helius credit cap is
-    // reached, returning whatever we've gathered so far.
-    if (!(await guardHeliusPage(100))) break;
+    // reached. Mark INCOMPLETE so the caller leaves the wallet for a later run
+    // rather than scoring/verifying it on a truncated history.
+    if (!(await guardHeliusPage(100))) {
+      complete = false;
+      break;
+    }
 
     const limit = Math.min(HELIUS_PAGE_SIZE, maxTxs - fetched);
 
@@ -72,10 +81,11 @@ export async function fetchWalletSwapHistory(
         throw new Error(`Helius auth failed (status ${status}) — check HELIUS_API_KEY`);
       }
       console.error(`[SEED] history fetch failed for ${wallet} (status ${status}):`, (err as Error).message);
+      complete = false; // partial due to a transient fetch error — retry later
       break;
     }
 
-    if (txs.length === 0) break;
+    if (txs.length === 0) break; // genuinely no more history — a complete scan
 
     for (const tx of txs) {
       for (const trade of parseWalletTradesFromTx(tx, wallet)) trades.push(trade);
@@ -83,8 +93,8 @@ export async function fetchWalletSwapHistory(
 
     fetched += txs.length;
     before = txs[txs.length - 1]?.signature;
-    if (!before || txs.length < limit) break; // last page
+    if (!before || txs.length < limit) break; // last page — complete
   }
 
-  return trades;
+  return { trades, complete };
 }

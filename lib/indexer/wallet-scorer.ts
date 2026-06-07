@@ -38,7 +38,7 @@ export async function scoreWalletAllTime(
   wallet: string,
   opts?: { maxTxs?: number }
 ): Promise<WalletAllTimeScore> {
-  const trades = await fetchWalletSwapHistory(wallet, opts?.maxTxs ?? 1500);
+  const { trades } = await fetchWalletSwapHistory(wallet, opts?.maxTxs ?? 1500);
   const pnl = computeAccuratePnL(trades);
 
   return {

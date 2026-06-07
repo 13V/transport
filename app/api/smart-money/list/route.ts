@@ -312,9 +312,17 @@ export async function GET(request: NextRequest) {
     activeDays == null &&
     !tierFilter;
 
-  let total: number | null = null;
+  // If the bounded over-fetch did NOT hit its cap, we scanned the entire
+  // matching set, so the gated survivors ARE the exact total — authoritative and
+  // perfectly consistent with the page slice. This covers the vast majority of
+  // real pages. Only when the scan was capped (very deep pages / huge sets) do
+  // we fall back to the cached/estimated count; pages beyond the scanned window
+  // aren't reliably navigable (documented tradeoff).
+  const scanCapped = (data?.length ?? 0) >= scanTarget;
 
-  if (isDefaultView) {
+  let total: number | null = scanCapped ? null : filtered.length;
+
+  if (total == null && isDefaultView) {
     try {
       const { data: cacheRow } = await supabase
         .from('indexer_state')
