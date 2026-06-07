@@ -272,6 +272,17 @@ const OHLCV_TTL_MS = 60_000;
 // Hottest-tokens strip size.
 const HOT_STRIP_SIZE = 6;
 
+// --- Axiom-style entry animation tuning ---
+// Cap how many freshly-arrived bursts animate in one tick — a big snapshot must
+// not animate 50 rows. Extra new ids still surface at the top, they just skip
+// the per-row entry transition.
+const ENTER_MAX_ANIMATED = 6;
+// Delay between staggered entries so a batch cascades intentionally (ms/row).
+const ENTER_STAGGER_MS = 70;
+// How long an id stays "entering" (drives top-placement + glow) before it folds
+// back into the normal sorted list. Covers the expand (~400ms) + glow (~1.2s).
+const ENTER_HOLD_MS = 1400;
+
 // localStorage key for the "group bursts by token" toggle (Wave 3, default ON).
 const PREF_GROUP_KEY = 'sm_pref_group_by_token';
 
@@ -355,6 +366,17 @@ function pickPrimary(a: Burst, b: Burst): Burst {
   const bLive = b.finalized === false;
   if (aLive !== bLive) return aLive ? a : b;
   return (ms(b.windowEnd) ?? 0) > (ms(a.windowEnd) ?? 0) ? b : a;
+}
+
+// Does this device ask for reduced motion? Read live (not cached) so a system
+// preference change is respected on the next render path that calls it.
+function prefersReducedMotion(): boolean {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false;
+  try {
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  } catch {
+    return false;
+  }
 }
 
 // Read the "group by token" pref (default ON when unset).
@@ -814,6 +836,24 @@ export default function LiveFeed() {
   const mountedRef = useRef(true);
   const [newIds, setNewIds] = useState<Set<string>>(new Set());
 
+  // --- Axiom-style entry animation ---
+  // `entering` maps a freshly-arrived burst id → its stagger index, so its group
+  // can float to the TOP of the list and play the expand/glow. Ids are removed
+  // after ENTER_HOLD_MS, folding the row back into the user's sorted ordering.
+  // `enterOrderRef` records a monotonically-increasing arrival sequence per id so
+  // the entering rows themselves stack newest-first at the very top.
+  const [entering, setEntering] = useState<Map<string, number>>(new Map());
+  const enterOrderRef = useRef<Map<string, number>>(new Map());
+  const enterSeqRef = useRef(0);
+  // Per-id removal timers so staggered/overlapping batches each clean up cleanly.
+  const enterTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  // `enterOpen` holds ids whose wrapper has been flipped to the open state. A row
+  // mounts collapsed (grid-template-rows:0fr) and is flipped open on the NEXT
+  // frame so the 0fr→1fr expand actually transitions instead of snapping. rAF
+  // handle kept so we cancel a pending flip on unmount.
+  const [enterOpen, setEnterOpen] = useState<Set<string>>(new Set());
+  const enterRafRef = useRef<number | null>(null);
+
   // Re-rendered "now" tick so relative ages stay fresh between polls.
   const [, setTick] = useState(0);
 
@@ -1154,16 +1194,41 @@ export default function LiveFeed() {
     });
   }, [visible, groupByToken]);
 
+  // DISPLAY ORDER — Axiom live-feed feel: groups whose primary is currently
+  // "entering" (a genuinely-new burst flagged in the last ~ENTER_HOLD_MS) float to
+  // the TOP, newest arrival first (by the monotonic enterOrderRef sequence), ahead
+  // of the user's already-sorted/grouped rest. Once an id's hold expires it leaves
+  // `entering` and the group folds back into its natural sorted position. This is
+  // what makes a fresh cluster visibly enter at the top while the rest stay put.
+  const displayGroups: BurstGroup[] = useMemo(() => {
+    if (entering.size === 0) return groups;
+    const fresh: BurstGroup[] = [];
+    const rest: BurstGroup[] = [];
+    for (const g of groups) {
+      if (entering.has(g.primary.id)) fresh.push(g);
+      else rest.push(g);
+    }
+    if (fresh.length === 0) return groups;
+    // Newest arrival first: higher enter sequence ranks earlier.
+    fresh.sort(
+      (a, b) =>
+        (enterOrderRef.current.get(b.primary.id) ?? 0) -
+        (enterOrderRef.current.get(a.primary.id) ?? 0)
+    );
+    return [...fresh, ...rest];
+  }, [groups, entering]);
+
   // Flat list of rows actually rendered (primaries + any expanded children), in
   // render order — the index space the keyboard selection / ape bar operate on.
+  // Built from displayGroups so keyboard nav / ape bar match the on-screen order.
   const rows: Burst[] = useMemo(() => {
     const out: Burst[] = [];
-    for (const g of groups) {
+    for (const g of displayGroups) {
       out.push(g.primary);
       if (expandedGroups.has(g.primary.mint)) out.push(...g.others);
     }
     return out;
-  }, [groups, expandedGroups]);
+  }, [displayGroups, expandedGroups]);
 
   // The set of mints currently on screen (capped) — the only thing we fetch
   // OHLCV for. Deduped & bounded so a single batch request stays cheap.
@@ -1289,6 +1354,94 @@ export default function LiveFeed() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [rows, selIdx, prefTerminal, toggleWatch]);
+
+  // ENTRY ORCHESTRATION — react to genuinely-new ids (flagged by flagNewIds into
+  // `newIds`; empty on first load so the initial snapshot never animates). For
+  // each not-already-entering id: assign it an arrival sequence (newest-first
+  // ordering at the top) and a capped stagger index, mark it entering, then
+  // schedule its removal after the expand+glow completes. Under reduced motion we
+  // skip the animation entirely — ids still surface at top briefly via the same
+  // bookkeeping, but the CSS renders them in place with no motion.
+  useEffect(() => {
+    if (newIds.size === 0) return;
+    const reduce = prefersReducedMotion();
+    // Only ids we aren't already animating; cap how many get a staggered entry.
+    const fresh: string[] = [];
+    for (const id of newIds) {
+      if (!enterOrderRef.current.has(id)) fresh.push(id);
+    }
+    if (fresh.length === 0) return;
+
+    setEntering((prev) => {
+      const next = new Map(prev);
+      fresh.forEach((id, i) => {
+        enterOrderRef.current.set(id, ++enterSeqRef.current);
+        // Cap the staggered/animated set so a 50-row snapshot can't animate all.
+        const staggerIdx = i < ENTER_MAX_ANIMATED ? i : ENTER_MAX_ANIMATED - 1;
+        next.set(id, reduce ? 0 : staggerIdx);
+        // Schedule fold-back into the sorted list once the entry finishes.
+        const prevTimer = enterTimersRef.current.get(id);
+        if (prevTimer) clearTimeout(prevTimer);
+        const hold = reduce ? 0 : ENTER_HOLD_MS + staggerIdx * ENTER_STAGGER_MS;
+        const t = setTimeout(() => {
+          if (!mountedRef.current) return;
+          enterTimersRef.current.delete(id);
+          enterOrderRef.current.delete(id);
+          setEntering((cur) => {
+            if (!cur.has(id)) return cur;
+            const m = new Map(cur);
+            m.delete(id);
+            return m;
+          });
+        }, hold);
+        enterTimersRef.current.set(id, t);
+      });
+      return next;
+    });
+  }, [newIds]);
+
+  // OPEN/CLOSE the entry wrappers. Entering rows mount collapsed; we flip them to
+  // the open state on the next animation frame so the grid-template-rows 0fr→1fr
+  // expand (which drives the smooth push-down of the rows below) actually
+  // transitions. When an id leaves `entering` (its hold expired) we drop it from
+  // the open set too, so a later re-arrival animates again from collapsed.
+  useEffect(() => {
+    // Prune ids that are no longer entering.
+    setEnterOpen((prev) => {
+      let changed = false;
+      const next = new Set(prev);
+      for (const id of prev) {
+        if (!entering.has(id)) { next.delete(id); changed = true; }
+      }
+      return changed ? next : prev;
+    });
+    // Any entering id not yet open → open it on the next frame.
+    const toOpen: string[] = [];
+    for (const id of entering.keys()) {
+      if (!enterOpen.has(id)) toOpen.push(id);
+    }
+    if (toOpen.length === 0) return;
+    if (enterRafRef.current != null) cancelAnimationFrame(enterRafRef.current);
+    enterRafRef.current = requestAnimationFrame(() => {
+      enterRafRef.current = null;
+      if (!mountedRef.current) return;
+      setEnterOpen((prev) => {
+        const next = new Set(prev);
+        for (const id of toOpen) next.add(id);
+        return next;
+      });
+    });
+  }, [entering, enterOpen]);
+
+  // Clear all entry timers (and any pending open-frame) on unmount.
+  useEffect(() => {
+    const timers = enterTimersRef.current;
+    return () => {
+      for (const t of timers.values()) clearTimeout(t);
+      timers.clear();
+      if (enterRafRef.current != null) cancelAnimationFrame(enterRafRef.current);
+    };
+  }, []);
 
   if (loading) {
     return (
@@ -1444,7 +1597,13 @@ export default function LiveFeed() {
     const earlierCount = !isChild ? group.others.length : 0;
     const expanded = expandedGroups.has(group.primary.mint);
 
-    return (
+    // Axiom-style entry: this burst is freshly-arrived and within its animation
+    // hold. The wrapper (added at the end of this fn) expands 0fr→1fr to push the
+    // rows below down; `staggerMs` cascades a batch of arrivals.
+    const isEntering = entering.has(b.id);
+    const staggerMs = isEntering ? (entering.get(b.id) ?? 0) * ENTER_STAGGER_MS : 0;
+
+    const rowEl = (
       <div
         key={b.id}
         id={isChild ? undefined : `bf-${b.mint}`}
@@ -1704,6 +1863,23 @@ export default function LiveFeed() {
         </div>
       </div>
     );
+
+    // Not entering → render the row directly (it carries its own key).
+    if (!isEntering) return rowEl;
+
+    // Entering → wrap in the grid-template-rows 0fr→1fr expander. The inner clips
+    // overflow so the wrapper's height grows from 0 to the row's natural height,
+    // sliding the rows below down with no fixed max-height guess. `bf-enter-open`
+    // is added on the next frame (see enterOpen effect) to trigger the transition.
+    return (
+      <div
+        key={b.id}
+        className={`bf-enter${enterOpen.has(b.id) ? ' bf-enter-open' : ''}`}
+        style={{ ['--bf-stagger' as string]: `${staggerMs}ms` }}
+      >
+        <div className="bf-enter-inner">{rowEl}</div>
+      </div>
+    );
   };
 
   return (
@@ -1752,12 +1928,13 @@ export default function LiveFeed() {
       ) : (
         <div className={`bf-list stack gap-8${compact ? ' compact' : ''}`}>
           {(() => {
-            // Render groups in order; each primary row gets a flat row index used
-            // by keyboard selection + the mobile ape bar. Expanded children follow
-            // their primary and continue the same index space.
+            // Render groups in DISPLAY order (entering bursts floated to the top);
+            // each primary row gets a flat row index used by keyboard selection +
+            // the mobile ape bar. Expanded children follow their primary and
+            // continue the same index space.
             const out: React.ReactNode[] = [];
             let rowIdx = 0;
-            for (const g of groups) {
+            for (const g of displayGroups) {
               const expanded = expandedGroups.has(g.primary.mint);
               out.push(renderRow(g.primary, rowIdx++, g, false));
               if (expanded) {

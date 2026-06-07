@@ -723,6 +723,57 @@ pre.code .c { color: var(--text-4); }
 /* Newly-arrived bursts: accent rail + gentle fade-in. */
 .bf-row.is-new { box-shadow: inset 2px 0 0 var(--accent); animation: lf-fade-in .6s ease-out; }
 
+/* =========================================================================
+   LIVE FEED — Axiom-style entry: a freshly-detected burst expands in at the
+   TOP of the list and pushes the rows below smoothly down.
+
+   Technique: each entering row is wrapped in a grid container that animates
+   grid-template-rows 0fr -> 1fr. Because the inner element clips its overflow,
+   the wrapper's rendered height grows from 0 to the row's natural height with
+   NO fixed max-height guess — the flex-column list reflows continuously, so the
+   existing rows slide down driven purely by the entering row taking up space.
+   The row itself simultaneously fades + lifts in, and a brief accent glow
+   (reusing the .is-new accent) fades over ~1.2s. Per-row --bf-stagger delays
+   batched arrivals so multiple new bursts cascade instead of popping at once.
+   ========================================================================= */
+.bf-enter {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows .4s cubic-bezier(0.16, 1, 0.3, 1);
+  transition-delay: var(--bf-stagger, 0ms);
+}
+.bf-enter.bf-enter-open { grid-template-rows: 1fr; }
+.bf-enter-inner {
+  overflow: hidden;
+  min-height: 0; /* allow the grid track to actually collapse to 0 */
+}
+/* The row content fades + lifts in from just above, GPU-friendly. */
+.bf-enter .bf-row {
+  opacity: 0;
+  transform: translateY(-6px);
+  transition: opacity .38s ease-out, transform .38s ease-out;
+  transition-delay: var(--bf-stagger, 0ms);
+  will-change: transform, opacity;
+}
+.bf-enter.bf-enter-open .bf-row {
+  opacity: 1;
+  transform: translateY(0);
+}
+/* Brief arrival glow that fades over ~1.2s on top of the .is-new accent rail. */
+.bf-enter.bf-enter-open .bf-row.is-new {
+  animation: bf-enter-glow 1.2s ease-out var(--bf-stagger, 0ms) both;
+}
+@keyframes bf-enter-glow {
+  0%   { box-shadow: inset 3px 0 0 var(--accent), 0 0 0 1px var(--accent-ring), 0 0 16px 0 var(--accent-ring); }
+  100% { box-shadow: inset 2px 0 0 var(--accent), 0 0 0 0 transparent, 0 0 0 0 transparent; }
+}
+/* Reduced motion: no expand / lift / glow — the row simply appears in place. */
+@media (prefers-reduced-motion: reduce) {
+  .bf-enter { grid-template-rows: 1fr; transition: none; }
+  .bf-enter .bf-row { opacity: 1; transform: none; transition: none; }
+  .bf-enter.bf-enter-open .bf-row.is-new { animation: none; }
+}
+
 /* --- Identity line: avatar + ticker + faint name/mint + age --- */
 .bf-id { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .bf-id-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
