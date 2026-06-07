@@ -44,7 +44,10 @@ $jobs = @(
   # Measure what each burst's token did 15m/1h/24h later from real candle history.
   @{ t="measure-bursts";      p="/api/cron/measure-bursts";                              m=(Every 5) },
   # Once-daily recap of measured outcomes (count, median return, best call).
-  @{ t="daily-digest";        p="/api/cron/daily-digest";                                m=@(5); h=@(0) }
+  @{ t="daily-digest";        p="/api/cron/daily-digest";                                m=@(5); h=@(0) },
+  # Keep the trades table (and Disk IO) bounded: delete rows older than the
+  # retention window (TRADES_RETENTION_DAYS, default 14). Daily, off-peak.
+  @{ t="prune-trades";        p="/api/cron/prune-trades";                                m=@(20); h=@(0) }
 )
 
 if ($apiKey -eq "PASTE_YOUR_CRONJOB_ORG_API_KEY") { Write-Host "Edit `$apiKey first." -ForegroundColor Red; return }
