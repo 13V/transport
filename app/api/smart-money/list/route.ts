@@ -30,6 +30,22 @@ const CACHE_HEADERS = {
   'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=300',
 };
 
+// Shared status cache (written by /api/status): a JSON blob in indexer_state
+// carrying the EXACT smart-wallet count. We reuse it as the pager `total` for
+// the default gated+verified view so the common case needs no extra full scan.
+const STATUS_CACHE_KEY = 'status_cache';
+const STATUS_CACHE_TTL_MS = 3 * 60_000; // ~3 minutes — must match /api/status
+
+// How many SQL rows we over-fetch per requested window before applying the
+// JS-only part of the gate (bot-filter, maxWinRate cap, verified/tier). The
+// bot-filter is a ratio/dust heuristic that only fires for a tiny fraction of
+// high-volume wallets, so a small multiple of the page reliably yields a full
+// page of survivors without scanning the whole table. See the note where it's
+// used for the exactness tradeoff.
+const OVERFETCH_FACTOR = 4;
+// Absolute floor on rows scanned so tiny pages still pull a useful buffer.
+const MIN_SCAN = 200;
+
 interface SmartWalletRow {
   address: string;
   score: number;
@@ -114,12 +130,29 @@ export async function GET(request: NextRequest) {
   const baseCols =
     'wallet, score, realized_pnl, win_rate, consistency, total_trades, tokens_traded, last_trade_at';
   const extCols = `${baseCols}, seeded, roi_pct, invested_sol, verified`;
+  // Map the requested sort to a DB column so ORDER BY happens in PostgREST (the
+  // page comes back already sorted, matching the JS comparators below). `recent`
+  // and `roi` sort nulls last in desc, which the JS comparators emulate via the
+  // `?? -1` / `?? -1e9` sentinels, so we mirror that with nullsFirst.
+  const SORT_COLUMN: Record<typeof sortKey, string> = {
+    score: 'score',
+    roi: 'roi_pct',
+    pnl: 'realized_pnl',
+    winrate: 'win_rate',
+    recent: 'last_trade_at',
+  };
+  const orderColumn = SORT_COLUMN[sortKey];
+  const orderAscending = sortDir === 'asc';
+  // In desc (the default) nulls should sort LAST; in asc they sort first — both
+  // match the sentinel-based JS comparators retained below for tie-breaking.
+  const orderNullsFirst = orderAscending;
+
   // Build a FRESH query per page (Supabase builders are single-use). Optional
   // refinements are applied independently of the smart-money gate so the
   // leaderboard's search / min-PnL / active-within filters work across the full
-  // set rather than only the first client-side page.
-  const buildExt = () => {
-    let qb = supabase.from('wallet_stats').select(extCols);
+  // set rather than only the first client-side page. Sorting is pushed to the DB.
+  const buildExt = (cols: string) => {
+    let qb = supabase.from('wallet_stats').select(cols);
     if (q) {
       qb = qb.ilike('wallet', `${q}%`);
     }
@@ -148,19 +181,48 @@ export async function GET(request: NextRequest) {
         qb = qb.gte('last_trade_at', cutoff);
       }
     }
-    return qb.order('score', { ascending: false });
+    return qb.order(orderColumn, { ascending: orderAscending, nullsFirst: orderNullsFirst });
   };
-  // PostgREST caps a single response at ~1000 rows (so .limit(20000) silently
-  // clamps and the leaderboard/total pin at 1000). Page through with .range() to
-  // get the TRUE full filtered set before we sort + slice the requested page.
-  const extRead = await fetchAllRows(buildExt);
+
+  // How many SORTED rows we actually need from the DB before the JS-only gate.
+  // Paged mode needs through the end of the requested page; legacy mode needs up
+  // to `limit`. We over-fetch a bounded multiple so the JS bot/maxWinRate/tier
+  // pass still yields a full window of survivors — instead of pulling the WHOLE
+  // table. TRADEOFF: if the JS filter were to reject more than (OVERFETCH_FACTOR
+  // - 1)/OVERFETCH_FACTOR of the scanned rows for the requested window, the last
+  // page could be short by a few rows. The bot-filter only fires for a tiny set
+  // of extreme high-volume wallets and maxWinRate is disabled by default, so in
+  // practice the buffer is never exhausted; the cap below bounds the worst case.
+  const windowEnd = hasPaging ? page * pageSize : limit;
+  const scanTarget = Math.max(windowEnd * OVERFETCH_FACTOR, MIN_SCAN);
+  // fetchAllRows pages with .range() and honours `cap` — so we read at most
+  // ~`scanTarget` rows rather than the entire table. We also shrink the per-call
+  // pageSize to scanTarget (bounded by PostgREST's 1000-row response cap) so a
+  // small page request reads ~a page of rows in a single round-trip, not 1000.
+  const scanPageSize = Math.min(Math.max(scanTarget, 1), 1000);
+  const fetchScan = (cols: string) =>
+    fetchAllRows(() => buildExt(cols), { cap: scanTarget, pageSize: scanPageSize });
+
+  const extRead = await fetchScan(extCols);
 
   // Degraded / pre-migration fallback: if the accurate columns (or gate filters)
-  // aren't available, fall back to a base-column fetch (paged the same way).
+  // aren't available, fall back to a base-column fetch (scanned the same way).
   const { data, error }: { data: any[] | null; error: { message: string } | null } =
     extRead.error
-      ? await fetchAllRows(() =>
-          supabase.from('wallet_stats').select(baseCols).order('score', { ascending: false })
+      ? await fetchAllRows(
+          () => {
+            // Pre-migration: roi_pct/invested_sol/verified may not exist. Order
+            // by the requested column only if it's a base column (roi_pct isn't),
+            // else by `score`. The JS comparator below still applies the exact
+            // requested sort over the scanned window.
+            const fallbackCol = orderColumn === 'roi_pct' ? 'score' : orderColumn;
+            const fallbackAsc = orderColumn === 'roi_pct' ? false : orderAscending;
+            return supabase
+              .from('wallet_stats')
+              .select(baseCols)
+              .order(fallbackCol, { ascending: fallbackAsc, nullsFirst: fallbackAsc });
+          },
+          { cap: scanTarget, pageSize: scanPageSize }
         )
       : extRead;
 
@@ -175,9 +237,9 @@ export async function GET(request: NextRequest) {
 
   // The smart-money gate finishes in JS (the bot-filter, maxWinRate cap and the
   // verified-only restriction aren't all expressible in the query), so we apply
-  // it here to get the exact, correct full set. We then sort and paginate that
-  // set on the SERVER and ship only the requested slice — the browser no longer
-  // pulls 20k rows. `total` is the size of this fully-filtered, sorted set.
+  // it here over the over-fetched, DB-sorted window. `total` (the full
+  // filtered+gated size for the pager) is sourced separately below from a cached
+  // count — we no longer materialise the entire set just to size it.
   const filtered = (data ?? []).filter((r: any) => {
     // When the accurate columns exist and verified-only is on, restrict to
     // deep-scanned wallets so the displayed ROI is trustworthy.
@@ -226,13 +288,100 @@ export async function GET(request: NextRequest) {
     return d * flip;
   });
 
-  // `total` reflects the whole filtered+gated set, regardless of paging mode.
-  const total = filtered.length;
-
   // Paged mode: slice out the requested 1-based page. Legacy mode: cap at limit.
+  // `filtered` is the JS-gated, DB-sorted over-fetch starting at row 0, so the
+  // page slice indexes line up exactly with the full-set positions.
   const pageRows = hasPaging
     ? filtered.slice((page - 1) * pageSize, (page - 1) * pageSize + pageSize)
     : filtered.slice(0, limit);
+
+  // `total` is the size of the WHOLE filtered+gated set (for the pager). We no
+  // longer materialise that whole set, so we size it cheaply:
+  //   1. If this is the default gated+verified view with no extra refinements,
+  //      reuse the EXACT count cached by /api/status (status_cache blob).
+  //   2. Otherwise (or on cache miss/stale) run a head-only count:'exact' query
+  //      carrying the SQL-expressible filters.
+  // Both are approximations of the JS bot-filter / maxWinRate exclusions, which
+  // can't be expressed in SQL — see the tradeoff note below.
+  const isDefaultView =
+    applyGate &&
+    verifiedOnly &&
+    !q &&
+    minPnl == null &&
+    minRoi == null &&
+    activeDays == null &&
+    !tierFilter;
+
+  let total: number | null = null;
+
+  if (isDefaultView) {
+    try {
+      const { data: cacheRow } = await supabase
+        .from('indexer_state')
+        .select('value')
+        .eq('key', STATUS_CACHE_KEY)
+        .maybeSingle();
+      const blob = (cacheRow as any)?.value as
+        | { computedAt?: number; smartWallets?: number }
+        | undefined;
+      if (
+        blob &&
+        typeof blob.computedAt === 'number' &&
+        Date.now() - blob.computedAt < STATUS_CACHE_TTL_MS &&
+        typeof blob.smartWallets === 'number'
+      ) {
+        total = blob.smartWallets;
+      }
+    } catch {
+      total = null;
+    }
+  }
+
+  // Cache miss / non-default view → cheap head-only exact count with the
+  // SQL-expressible filters. TRADEOFF: this counts rows that pass the SQL gate
+  // but excludes neither the JS bot-filter (a ratio/dust heuristic) nor the
+  // maxWinRate cap, so it can slightly OVER-count vs. the exact JS-filtered set.
+  // In practice the bot-filter only catches a tiny number of extreme high-volume
+  // wallets and maxWinRate is disabled by default, so `total` is exact or off by
+  // a handful. The pager tolerates a small over-count (at worst one near-empty
+  // trailing page). If even the count query fails, fall back to the size of the
+  // scanned window so the field is never missing.
+  if (total == null) {
+    try {
+      let cq = supabase.from('wallet_stats').select('wallet', { count: 'exact', head: true });
+      if (q) cq = cq.ilike('wallet', `${q}%`);
+      if (minPnl != null && Number.isFinite(minPnl)) cq = cq.gte('realized_pnl', minPnl);
+      if (minRoi != null && Number.isFinite(minRoi)) cq = cq.gte('roi_pct', minRoi);
+      if (activeDays != null && Number.isFinite(activeDays) && activeDays > 0) {
+        cq = cq.gte('last_trade_at', new Date(now - activeDays * 86_400_000).toISOString());
+      }
+      if (verifiedOnly && hasVerifiedCol) cq = cq.eq('verified', true);
+      if (applyGate) {
+        cq = cq
+          .not('roi_pct', 'is', null)
+          .gte('roi_pct', criteria.minRoiPct)
+          .gte('realized_pnl', criteria.minPnlSol)
+          .gte('total_trades', criteria.minTrades)
+          .gte('tokens_traded', criteria.minTokens);
+        if (criteria.minInvestedSol > 0) cq = cq.gte('invested_sol', criteria.minInvestedSol);
+        if (criteria.maxIdleDays > 0) {
+          cq = cq.gte(
+            'last_trade_at',
+            new Date(now - criteria.maxIdleDays * 86_400_000).toISOString()
+          );
+        }
+      }
+      const { count, error: countErr } = await cq;
+      if (!countErr && typeof count === 'number') total = count;
+    } catch {
+      total = null;
+    }
+  }
+
+  // Last-resort fallback: never leave `total` null. If the whole over-fetch fit
+  // in the scanned window (i.e. we didn't hit the scan cap), `filtered.length`
+  // IS the exact full count; otherwise it's a lower bound but keeps the shape.
+  if (total == null) total = filtered.length;
 
   const wallets: SmartWalletRow[] = pageRows.map((r: any) => ({
     address: r.wallet,

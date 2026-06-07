@@ -28,6 +28,7 @@ import { getSupabase, isSupabaseConfigured } from '../supabase-client';
 import { getSmartCriteria, isSmartWallet } from './curation';
 import { buildClusters } from './clusters';
 import { tierFromScore } from '../format';
+import { readSnapshot, writeSnapshot } from './smart-set-cache';
 
 export interface LiveBurst {
   /**
@@ -233,12 +234,18 @@ async function resolveEntityMap(wallets: string[]): Promise<Map<string, string>>
 }
 
 /**
- * Resolve the smart-wallet set + entity map + per-wallet score, memoized
- * in-process with a short TTL. The underlying data (verified wallet stats +
- * funding clusters) only changes on cron cadence, so /live and the alert
- * webhook can share one resolution instead of each re-running ~25 DB queries.
+ * Resolve the smart-wallet set + entity map + per-wallet score, cached in two
+ * layers (see getSmartWalletSet): a per-instance in-process memo (~5 min) backed
+ * by a persisted snapshot in indexer_state (~5 min). The underlying data
+ * (verified wallet stats + funding clusters) only changes on cron cadence, so
+ * /live and the alert webhook share one resolution instead of each re-running
+ * the heavy paginate+cluster resolve (~25 DB queries) per cold instance.
+ *
+ * Raised from 60s to 5 min: the smart set moves slowly, and the persisted
+ * snapshot already bounds how often the heavy resolve runs globally, so a longer
+ * in-process memo is safe and further cuts DB load.
  */
-const SMART_SET_TTL_MS = 60_000;
+const SMART_SET_TTL_MS = 5 * 60 * 1000;
 let smartSetCache: { value: SmartSet; at: number } | null = null;
 let smartSetInflight: Promise<SmartSet> | null = null;
 
@@ -315,9 +322,23 @@ async function resolveSmartSet(): Promise<SmartSet> {
 }
 
 /**
- * Memoized resolver for the smart-money set (wallets + entity map + scores).
- * Shared by getLiveBursts and detectBurstsForMints, and exported for the alert
- * webhook agent. Coalesces concurrent callers onto one in-flight resolution.
+ * Two-layer cached resolver for the smart-money set (wallets + entity map +
+ * scores + conviction stats). Shared by getLiveBursts and detectBurstsForMints,
+ * and exported for the alert webhook agent.
+ *
+ * Lookup order, cheapest first:
+ *   1. In-process memo (no DB) — per-instance, ~5 min TTL.
+ *   2. Persisted snapshot in indexer_state — ONE cheap single-row read; rebuilds
+ *      the SAME SmartSet shape. Shared across all serverless instances, so a cold
+ *      start gets a fresh set without the heavy resolve.
+ *   3. Live resolveSmartSet() — the expensive paginate + cluster path. Runs only
+ *      when both caches miss (~once per 5 min globally), and its result is
+ *      written back to the snapshot for everyone else.
+ *
+ * Concurrent callers are coalesced onto one in-flight resolution. FULLY
+ * RESILIENT: snapshot read/write failures are swallowed inside smart-set-cache
+ * (returning null / no-op), so any failure transparently falls through to the
+ * live resolve path and the returned SmartSet contract is unchanged.
  */
 export async function getSmartWalletSet(): Promise<SmartSet> {
   const now = Date.now();
@@ -326,16 +347,36 @@ export async function getSmartWalletSet(): Promise<SmartSet> {
   }
   if (smartSetInflight) return smartSetInflight;
 
-  smartSetInflight = resolveSmartSet()
-    .then((value) => {
-      // Only cache a non-empty result; empties may be transient failures and
-      // shouldn't be pinned for the full TTL.
-      if (value.wallets.size > 0) smartSetCache = { value, at: Date.now() };
-      return value;
-    })
-    .finally(() => {
-      smartSetInflight = null;
-    });
+  smartSetInflight = (async (): Promise<SmartSet> => {
+    // Layer 2: cheap persisted snapshot (single-row read). Any failure or a
+    // missing/stale row returns null and we fall through to the live resolve.
+    try {
+      const snap = await readSnapshot();
+      if (snap && snap.wallets.size > 0) {
+        smartSetCache = { value: snap, at: Date.now() };
+        return snap;
+      }
+    } catch {
+      // Snapshot layer must never break the feed; fall back to live resolve.
+    }
+
+    // Layer 3: heavy live resolve, then persist the snapshot for other instances.
+    const value = await resolveSmartSet();
+    // Only cache a non-empty result; empties may be transient failures and
+    // shouldn't be pinned for the full TTL (and shouldn't overwrite a good snap).
+    if (value.wallets.size > 0) {
+      smartSetCache = { value, at: Date.now() };
+      // Best-effort write; smart-set-cache swallows its own errors.
+      try {
+        await writeSnapshot(value);
+      } catch {
+        // Persisting is best-effort; next caller will simply re-resolve.
+      }
+    }
+    return value;
+  })().finally(() => {
+    smartSetInflight = null;
+  });
 
   return smartSetInflight;
 }

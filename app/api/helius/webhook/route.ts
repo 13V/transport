@@ -366,18 +366,17 @@ async function runWatchlistPush(bursts: LiveBurst[], now: number): Promise<void>
   }
 }
 
-/** Memoized smart-wallet address set for correct webhook attribution. */
-let subscribedCache: { wallets: Set<string>; at: number } | null = null;
-const SUBSCRIBED_TTL_MS = 60_000;
-
+/**
+ * Smart-wallet address set for correct webhook attribution. getSmartWalletSet()
+ * is already in-process memoized (short TTL, coalesced in-flight) by lib/indexer/
+ * live-bursts, so this is a thin no-throw wrapper — NO second cache layer here
+ * (that would just duplicate bookkeeping for the same set). Degrades to an empty
+ * set on failure so the caller falls back to feePayer trust rather than dropping
+ * trades.
+ */
 async function getSubscribedWallets(): Promise<Set<string>> {
-  const now = Date.now();
-  if (subscribedCache && now - subscribedCache.at < SUBSCRIBED_TTL_MS) {
-    return subscribedCache.wallets;
-  }
   try {
     const { wallets } = await getSmartWalletSet();
-    if (wallets.size > 0) subscribedCache = { wallets, at: now };
     return wallets;
   } catch {
     return new Set();

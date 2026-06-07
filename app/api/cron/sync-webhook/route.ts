@@ -20,8 +20,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabase, isSupabaseConfigured } from '../../../../lib/supabase-client';
-import { getSmartCriteria, isSmartWallet } from '../../../../lib/indexer/curation';
-import { fetchAllRows } from '../../../../lib/db-paginate';
+import { getSmartWalletSet } from '../../../../lib/indexer/live-bursts';
 import {
   createWebhook,
   editWebhook,
@@ -57,62 +56,41 @@ function sameWebhookUrl(a: string | undefined, b: string): boolean {
   return norm(a) === norm(b);
 }
 
-/** Resolve the FULL set of smart-wallet addresses (raw, NOT cluster-deduped). */
+/**
+ * Resolve the FULL set of smart-wallet addresses (raw, NOT cluster-deduped) to
+ * register on the Helius webhook.
+ *
+ * COST: this used to run a paginated FULL-TABLE gate scan of wallet_stats every
+ * 30-min run (mirroring /api/status). It now reuses getSmartWalletSet() — the
+ * SAME in-process-memoized gated smart-wallet set that already drives the live
+ * feed and the webhook receiver's attribution — so the cron stops doing its own
+ * scan and instead shares the cached resolution (often a 0-query cache hit).
+ *
+ * EQUIVALENCE: getSmartWalletSet().wallets is the set of wallets for which
+ * isSmartWallet(...) holds under getSmartCriteria() — exactly the gate the old
+ * scan applied in JS. The only implementation nuance: the old scan prefiltered
+ * the query by `roi_pct not null` + gte thresholds, while resolveSmartSet
+ * prefilters by `verified=true`; for non-seeded wallets these select the same
+ * population because isSmartWallet itself requires roi_pct != null (= verified)
+ * plus the identical thresholds, so the authoritative JS filter yields the same
+ * addresses. Adopting getSmartWalletSet() also makes the addresses synced to
+ * Helius consistent with the exact set used for ingest attribution + alerts.
+ *
+ * Over-cap ordering: the old scan ordered by score desc so MAX_ADDRESSES
+ * truncation kept the highest-score wallets. The cached set is an unordered Set,
+ * so we sort by the set's scoreByWallet map (desc) here to preserve that
+ * "keep highest-score" truncation behavior.
+ */
 async function resolveSmartAddresses(): Promise<{ addresses: string[]; error: string | null }> {
-  const supabase = getSupabase();
-  const criteria = getSmartCriteria();
-  const now = Date.now();
-
-  // Push the cheap gate conditions into the query so only plausible-smart rows
-  // come back; the remaining nuance (bot-filter, maxWinRate, idle) is applied in
-  // JS via isSmartWallet so the set is byte-identical to /api/status. Mirror that
-  // route exactly. Build a FRESH query per page (Supabase builders are single-use).
-  const cols =
-    'wallet, score, realized_pnl, win_rate, consistency, total_trades, tokens_traded, last_trade_at';
-  const buildGate = () => {
-    let qb = supabase
-      .from('wallet_stats')
-      .select(`${cols}, seeded, roi_pct, invested_sol, verified`)
-      .not('roi_pct', 'is', null)
-      .gte('roi_pct', criteria.minRoiPct)
-      .gte('realized_pnl', criteria.minPnlSol)
-      .gte('total_trades', criteria.minTrades)
-      .gte('tokens_traded', criteria.minTokens);
-    if (criteria.minInvestedSol > 0) {
-      qb = qb.gte('invested_sol', criteria.minInvestedSol);
-    }
-    if (criteria.maxIdleDays > 0) {
-      const cutoff = new Date(now - criteria.maxIdleDays * 86_400_000).toISOString();
-      qb = qb.gte('last_trade_at', cutoff);
-    }
-    return qb.order('score', { ascending: false });
-  };
-
-  const extRead = await fetchAllRows(buildGate);
-  if (extRead.error) {
-    return { addresses: [], error: extRead.error.message };
+  try {
+    const { wallets, scoreByWallet } = await getSmartWalletSet();
+    const addresses = Array.from(wallets).sort(
+      (a, b) => (scoreByWallet.get(b) ?? 0) - (scoreByWallet.get(a) ?? 0)
+    );
+    return { addresses, error: null };
+  } catch (err) {
+    return { addresses: [], error: (err as Error).message };
   }
-
-  const addresses = (extRead.data ?? [])
-    .filter((r: any) =>
-      isSmartWallet(
-        {
-          realizedPnl: Number(r.realized_pnl),
-          roiPct: r.roi_pct == null ? null : Number(r.roi_pct),
-          investedSol: r.invested_sol == null ? null : Number(r.invested_sol),
-          winRate: Number(r.win_rate),
-          totalTrades: Number(r.total_trades),
-          tokensTraded: Number(r.tokens_traded),
-          lastTradeAt: r.last_trade_at,
-          seeded: Boolean(r.seeded),
-        },
-        criteria,
-        now
-      )
-    )
-    .map((r: any) => String(r.wallet));
-
-  return { addresses, error: null };
 }
 
 export async function GET(request: NextRequest) {
