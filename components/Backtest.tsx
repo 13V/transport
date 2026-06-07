@@ -187,10 +187,14 @@ export default function Backtest() {
     return () => { mountedRef.current = false; };
   }, []);
 
-  // Re-run whenever the filters change (debounced lightly so dragging segments
-  // doesn't fire a request per intermediate value).
+  // Re-run whenever the filters change. Debounced so rapid toggling (or holding
+  // down a segment) collapses into a single request instead of a storm — the
+  // first paint runs immediately, later filter changes wait out the debounce.
+  const firstRunRef = useRef(true);
   useEffect(() => {
-    const t = setTimeout(() => run(query), 200);
+    const delay = firstRunRef.current ? 0 : 300;
+    firstRunRef.current = false;
+    const t = setTimeout(() => run(query), delay);
     return () => clearTimeout(t);
   }, [query, run]);
 
@@ -307,14 +311,26 @@ export default function Backtest() {
           </div>
         </div>
       ) : loading && !data ? (
-        <div className="card card-pad bt-loading">
-          <div className="sk sk-line" style={{ width: '40%', height: 18 }} />
-          <div className="bt-headlines">
-            <div className="sk" style={{ height: 96 }} />
-            <div className="sk" style={{ height: 96 }} />
-            <div className="sk" style={{ height: 96 }} />
+        // First-load skeleton reserves the FULL results layout (headlines +
+        // distribution + table) so the page never shifts when real data lands.
+        <>
+          <div className="card card-pad bt-results">
+            <div className="sk sk-line" style={{ width: '40%', height: 16, marginBottom: 16 }} />
+            <div className="bt-headlines">
+              <div className="sk" style={{ height: 96 }} />
+              <div className="sk" style={{ height: 96 }} />
+              <div className="sk" style={{ height: 96 }} />
+            </div>
           </div>
-        </div>
+          <div className="card card-pad">
+            <div className="sk sk-line" style={{ width: '30%', height: 16, marginBottom: 12 }} />
+            <div className="sk" style={{ height: 140 }} />
+          </div>
+          <div className="card card-pad">
+            <div className="sk sk-line" style={{ width: '30%', height: 16, marginBottom: 12 }} />
+            <div className="sk" style={{ height: 120 }} />
+          </div>
+        </>
       ) : !hasMatches ? (
         <div className="card card-pad">
           <div className="placeholder">
@@ -330,6 +346,7 @@ export default function Backtest() {
             <div className="bt-results-head">
               <span className="bt-tag">
                 <FlaskConical size={14} /> measured outcomes
+                {loading && <span className="bt-muted" style={{ marginLeft: 6, fontWeight: 400 }}>updating…</span>}
               </span>
               <span className="bt-meta bt-muted">
                 {data!.n} matching {data!.n === 1 ? 'burst' : 'bursts'} · {data!.measured} with measured outcomes · last {windowDays >= 365 ? '1y' : `${windowDays}d`}

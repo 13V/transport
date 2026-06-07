@@ -11,6 +11,15 @@ const config: NextConfig = {
   poweredByHeader: false,
   productionBrowserSourceMaps: false,
 
+  // Tree-shake barrel-style packages harder so only the icons / supabase
+  // symbols actually used end up in each route's bundle. lucide-react re-exports
+  // ~1k icons from one entry; @supabase/supabase-js is a large client — both
+  // benefit from per-export module resolution. Still under `experimental` in
+  // Next 16.
+  experimental: {
+    optimizePackageImports: ['lucide-react', '@supabase/supabase-js'],
+  },
+
   // Image optimization
   images: {
     formats: ['image/webp', 'image/avif'],

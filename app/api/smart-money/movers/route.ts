@@ -34,6 +34,6 @@ export async function GET(request: NextRequest) {
       count: movers.length,
       movers,
     },
-    { headers: { 'Cache-Control': 'public, max-age=300' } }
+    { headers: { 'Cache-Control': 'public, s-maxage=300, stale-while-revalidate=600' } }
   );
 }

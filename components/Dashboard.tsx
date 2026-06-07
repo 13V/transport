@@ -198,7 +198,7 @@ export default function Dashboard() {
   const router = useRouter();
   const status = useFetch<StatusResponse['totals']>('/api/status', (j) => (j as StatusResponse).totals);
   const top = useFetch<ListWallet[]>('/api/smart-money/list?sort=roi&limit=8', (j) => (j as { wallets: ListWallet[] }).wallets ?? []);
-  const buying = useFetch<BuyingToken[]>('/api/smart-money/buying?hours=24&limit=50', (j) => (j as { tokens: BuyingToken[] }).tokens ?? []);
+  const buying = useFetch<BuyingToken[]>('/api/smart-money/buying?hours=24&limit=30', (j) => (j as { tokens: BuyingToken[] }).tokens ?? []);
   const movers = useFetch<Mover[]>('/api/smart-money/movers?days=7&limit=6', (j) => (j as { movers: Mover[] }).movers ?? []);
   const proof = useFetch<LiveStats>('/api/smart-money/live/stats', (j) => j as LiveStats);
   const live = useFetch<LiveBurst[]>('/api/smart-money/live?limit=5&sort=quality', (j) => (j as { bursts: LiveBurst[] }).bursts ?? []);
@@ -283,7 +283,15 @@ export default function Dashboard() {
             <CardHead icon={Activity} title="Top tokens by smart SOL volume · 24h" note="SOL bought by smart money" />
             <div className="card-pad">
               {buying.state === 'loading' ? (
-                <SkLine w="100%" h={168} />
+                <div className="stack gap-10">
+                  <SkLine w="120px" h={22} />
+                  {[0, 1, 2, 3, 4, 5].map((i) => (
+                    <div key={i} className="stack gap-8">
+                      <div className="row between"><SkLine w="35%" h={13} /><SkLine w="60px" h={13} /></div>
+                      <SkLine w="100%" h={6} />
+                    </div>
+                  ))}
+                </div>
               ) : buying.state === 'error' ? (
                 <ErrorState msg="Couldn’t compute buy volume." />
               ) : topByVol.length === 0 ? (
@@ -328,7 +336,17 @@ export default function Dashboard() {
           <div className="card span-main">
             <CardHead icon={Crown} title="Top smart money by ROI" link="/smart-money" linkLabel="View all" />
             {top.state === 'loading' ? (
-              <div className="card-pad"><SkLine w="100%" h={160} /></div>
+              <div className="card-pad stack gap-10">
+                {[0, 1, 2, 3, 4, 5, 6, 7].map((i) => (
+                  <div key={i} className="row gap-8" style={{ alignItems: 'center' }}>
+                    <SkLine w="20px" h={14} />
+                    <SkLine w="40%" h={14} />
+                    <span className="spacer" />
+                    <SkLine w="56px" h={14} />
+                    <SkLine w="64px" h={14} />
+                  </div>
+                ))}
+              </div>
             ) : top.state === 'error' ? (
               <ErrorState msg="The leaderboard service didn’t respond." />
             ) : !top.data || top.data.length === 0 ? (
@@ -365,7 +383,17 @@ export default function Dashboard() {
           <div className="card">
             <CardHead icon={Flame} title="Smart money buying now" link="/smart-money/buying" linkLabel="See all" />
             {buying.state === 'loading' ? (
-              <div className="card-pad stack gap-12">{[0, 1, 2, 3].map((i) => <SkLine key={i} w="100%" h={22} />)}</div>
+              <div className="card-pad stack gap-12">
+                {[0, 1, 2, 3, 4, 5].map((i) => (
+                  <div key={i} className="row gap-8" style={{ alignItems: 'center' }}>
+                    <div className="sk sk-line" style={{ width: 32, height: 32, borderRadius: 8 }} />
+                    <SkLine w="40%" h={14} />
+                    <span className="spacer" />
+                    <SkLine w="28px" h={14} />
+                    <SkLine w="44px" h={14} />
+                  </div>
+                ))}
+              </div>
             ) : buying.state === 'error' ? (
               <ErrorState msg="Couldn’t load the buying feed." />
             ) : !buying.data || buying.data.length === 0 ? (

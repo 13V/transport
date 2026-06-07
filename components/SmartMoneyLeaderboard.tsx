@@ -442,11 +442,15 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
   };
 
   // ---- states ------------------------------------------------------------
+  // Skeleton renders the toolbar (controls are usable instantly) and exactly
+  // `pageSize` rows so the table paints at its final height — no layout shift
+  // when the page slice arrives.
   if (loading) {
     return (
       <div className="view stack gap-16">
         {pageHead}
-        <SkTable cols={10} rows={12} />
+        {toolbar}
+        <SkTable cols={10} rows={pageSize} />
       </div>
     );
   }

@@ -161,7 +161,7 @@ export async function GET(
 
     // Cumulative signed-SOL series, ordered oldest → newest, filling empty hours
     // so the curve is time-proportional (matches the Dashboard cumulative pattern).
-    const netFlowSeries: number[] = [];
+    let netFlowSeries: number[] = [];
     if (flowByHour.size > 0) {
       const buckets = Array.from(flowByHour.keys()).sort((x, y) => x - y);
       const r4flow = (n: number) => Math.round(n * 1e4) / 1e4;
@@ -169,6 +169,18 @@ export async function GET(
       for (let b = buckets[0]; b <= buckets[buckets.length - 1]; b += HOUR_MS) {
         acc += flowByHour.get(b) ?? 0;
         netFlowSeries.push(r4flow(acc));
+      }
+      // Cap the series length — long-lived coins can accumulate thousands of
+      // hourly points. This is a purely visual cumulative curve, so we downsample
+      // (always keeping the final point, the load-bearing net value) to bound the
+      // payload and the SVG smooth-path cost on this, the heaviest page.
+      const MAX_FLOW_POINTS = 240;
+      if (netFlowSeries.length > MAX_FLOW_POINTS) {
+        const step = netFlowSeries.length / MAX_FLOW_POINTS;
+        const sampled: number[] = [];
+        for (let i = 0; i < MAX_FLOW_POINTS; i++) sampled.push(netFlowSeries[Math.floor(i * step)]);
+        sampled[sampled.length - 1] = netFlowSeries[netFlowSeries.length - 1];
+        netFlowSeries = sampled;
       }
     }
 

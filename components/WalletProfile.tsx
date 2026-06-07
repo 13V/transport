@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   ChevronLeft, Clock, ExternalLink, CheckCircle, Star, Wallet,
@@ -10,10 +10,48 @@ import {
 import * as f from '@/lib/format';
 import {
   TierBadge, Roi, Pnl, TokenMark, SourceBadge, EmptyState, ErrorState,
-  SkCard, CopyIconButton, WatchStar, TradeLinks, WalletLinks,
+  SkCard, SkLine, CopyIconButton, WatchStar, TradeLinks, WalletLinks,
 } from '@/components/ui';
 import Link from 'next/link';
 import WalletHistoryChart from './WalletHistoryChart';
+
+// Row caps: trim payloads rendered into the DOM so one big wallet never
+// balloons the page. The underlying APIs may return more; we only paint these.
+const MAX_HOLDINGS = 25;
+const MAX_RECENT_TRADES = 15;
+const MAX_NEW_THIS_WEEK = 12;
+
+/**
+ * Below-the-fold lazy mount: renders a height-reserving placeholder until the
+ * section scrolls near the viewport, then swaps in the real children. Reserving
+ * `minH` keeps layout shift at zero while the section is deferred.
+ */
+function LazySection({ minH, children }: { minH: number; children: React.ReactNode }) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [shown, setShown] = useState(false);
+
+  useEffect(() => {
+    if (shown) return;
+    const el = ref.current;
+    if (!el || typeof IntersectionObserver === 'undefined') {
+      setShown(true);
+      return;
+    }
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          setShown(true);
+          io.disconnect();
+        }
+      },
+      { rootMargin: '400px 0px' }
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [shown]);
+
+  return <div ref={ref} style={shown ? undefined : { minHeight: minH }}>{shown ? children : null}</div>;
+}
 
 /**
  * WALLET PROFILE (premium-analytics view)
@@ -141,79 +179,89 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
   const [holdings, setHoldings] = useState<HoldingsResponse | null>(null);
   const [clusterMembers, setClusterMembers] = useState<ClusterMember[] | null>(null);
   const [record, setRecord] = useState<WalletRecordResponse | null>(null);
-  const [loading, setLoading] = useState(true);
+  // Per-section load flags so one slow endpoint never blocks the whole page.
+  // Only the core `profile` fetch gates the page shell; every other section
+  // tracks its own loading and renders its own skeleton independently.
+  const [profileLoading, setProfileLoading] = useState(true);
+  const [holdingsLoading, setHoldingsLoading] = useState(true);
+  const [recordLoading, setRecordLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
 
-    // Cluster ROI is enrichment: fetch it in parallel with the core profile so
-    // it never gates the main render, and never let a failure here break the
-    // core profile view.
-    async function loadCluster() {
+    // All five endpoints fire CONCURRENTLY on mount. Each updates its own state
+    // and skeleton flag so the page paints section-by-section as data lands —
+    // the headline (profile) does not wait on holdings, record, history, etc.
+
+    setProfileLoading(true);
+    setHoldingsLoading(true);
+    setRecordLoading(true);
+    setError(null);
+    setProfile(null);
+    setHoldings(null);
+    setClusterMembers(null);
+    setRecord(null);
+
+    // Core profile — the only fetch that can surface a page-level error.
+    (async () => {
       try {
-        const clusterRes = await fetch(`/api/wallet/${walletAddress}/cluster`);
-        if (clusterRes.ok) {
-          const clusterJson = (await clusterRes.json()) as ClusterResponse;
-          if (!cancelled) {
-            setClusterMembers(
-              Array.isArray(clusterJson?.members) ? clusterJson.members : []
-            );
-          }
-        }
-      } catch {
-        /* enrichment only — ignore */
-      }
-    }
-
-    // Measured track record is enrichment too: fetch it in parallel so it never
-    // gates the core profile render, and never let a failure here break it.
-    async function loadRecord() {
-      try {
-        const recRes = await fetch(`/api/wallet/${walletAddress}/record`);
-        if (recRes.ok) {
-          const recJson = (await recRes.json()) as WalletRecordResponse;
-          if (!cancelled) setRecord(recJson);
-        }
-      } catch {
-        /* enrichment only — ignore */
-      }
-    }
-
-    async function load() {
-      setLoading(true);
-      setError(null);
-      setClusterMembers(null);
-      setRecord(null);
-      try {
-        const [profileRes, holdingsRes] = await Promise.all([
-          fetch(`/api/wallet/${walletAddress}/profile`),
-          fetch(`/api/wallet/${walletAddress}/holdings`),
-        ]);
-
-        if (!profileRes.ok) throw new Error(`Failed to load profile (${profileRes.status})`);
-        if (!holdingsRes.ok) throw new Error(`Failed to load holdings (${holdingsRes.status})`);
-
-        const profileJson = (await profileRes.json()) as ProfileResponse;
-        const holdingsJson = (await holdingsRes.json()) as HoldingsResponse;
-
-        if (!cancelled) {
-          setProfile(profileJson);
-          setHoldings(holdingsJson);
-        }
+        const res = await fetch(`/api/wallet/${walletAddress}/profile`);
+        if (!res.ok) throw new Error(`Failed to load profile (${res.status})`);
+        const json = (await res.json()) as ProfileResponse;
+        if (!cancelled) setProfile(json);
       } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : 'Failed to load wallet profile');
-        }
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load wallet profile');
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) setProfileLoading(false);
       }
-    }
+    })();
 
-    load();
-    loadCluster();
-    loadRecord();
+    // Holdings — independent; failure renders an empty holdings table, not a
+    // page error.
+    (async () => {
+      try {
+        const res = await fetch(`/api/wallet/${walletAddress}/holdings`);
+        if (res.ok) {
+          const json = (await res.json()) as HoldingsResponse;
+          if (!cancelled) setHoldings(json);
+        }
+      } catch {
+        /* section-local — ignore */
+      } finally {
+        if (!cancelled) setHoldingsLoading(false);
+      }
+    })();
+
+    // Cluster ROI enrichment — never gates render, never breaks the page.
+    (async () => {
+      try {
+        const res = await fetch(`/api/wallet/${walletAddress}/cluster`);
+        if (res.ok) {
+          const json = (await res.json()) as ClusterResponse;
+          if (!cancelled) setClusterMembers(Array.isArray(json?.members) ? json.members : []);
+        }
+      } catch {
+        /* enrichment only — ignore */
+      }
+    })();
+
+    // Measured track record — its own skeleton so it never blocks the page.
+    (async () => {
+      try {
+        const res = await fetch(`/api/wallet/${walletAddress}/record`);
+        if (res.ok) {
+          const json = (await res.json()) as WalletRecordResponse;
+          if (!cancelled) setRecord(json);
+        }
+      } catch {
+        /* enrichment only — ignore */
+      } finally {
+        if (!cancelled) setRecordLoading(false);
+      }
+    })();
+
     return () => {
       cancelled = true;
     };
@@ -225,12 +273,16 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
     </button>
   );
 
-  if (loading) {
+  // Only the core profile fetch gates the page shell. Once it resolves, every
+  // other section streams in under its own skeleton.
+  if (profileLoading && !profile) {
     return (
       <div className="view stack gap-20">
         <div className="row">{backBtn}</div>
-        <SkCard h={150} />
-        <SkCard h={230} />
+        <SkCard h={150} />{/* headline */}
+        <SkCard h={120} />{/* measured calls */}
+        <SkCard h={230} />{/* history */}
+        <SkCard h={160} />{/* holdings */}
         <div className="grid cols-2"><SkCard h={160} /><SkCard h={160} /></div>
       </div>
     );
@@ -283,7 +335,10 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
   });
 
   // A valid-but-unscanned wallet: no stats row and nothing else to show.
+  // Guard on holdings having finished loading so we never flash this empty
+  // state while the (independent) holdings fetch is still in flight.
   const isEmpty =
+    !holdingsLoading &&
     !stats &&
     holdingList.length === 0 &&
     recentTrades.length === 0 &&
@@ -306,7 +361,9 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
   }
 
   const tier = f.tierFromScore(stats?.score ?? null);
-  const recent = recentTrades.slice(0, 15);
+  const recent = recentTrades.slice(0, MAX_RECENT_TRADES);
+  const holdingRows = holdingList.slice(0, MAX_HOLDINGS);
+  const newThisWeekRows = newThisWeek.slice(0, MAX_NEW_THIS_WEEK);
   const lastTradeMs = toMs(stats?.lastTradeAt);
 
   return (
@@ -371,21 +428,22 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
         </div>
       </div>
 
-      {/* Measured track record — verifiable per-wallet calls */}
-      <TrackRecordCard record={record} />
+      {/* Measured track record — verifiable per-wallet calls. Streams in under
+          its own skeleton so a slow /record never blocks the page. */}
+      <TrackRecordCard record={record} loading={recordLoading} />
 
       {/* Performance history */}
       <WalletHistoryChart walletAddress={walletAddress} />
 
       {/* This week's new positions */}
-      {newThisWeek.length > 0 && (
+      {newThisWeekRows.length > 0 && (
         <div className="card">
           <div className="card-head">
             <h3><span className="ic" style={{ color: 'var(--accent-hover)' }}><Sparkles size={16} /></span> This week’s new positions</h3>
             <span className="faint" style={{ fontSize: 12 }}>Bought in the last 7 days &amp; still held</span>
           </div>
           <div className="card-pad stack gap-8">
-            {newThisWeek.map((t, i) => (
+            {newThisWeekRows.map((t, i) => (
               <div className="trade" key={`${t.mint}-${i}`}>
                 <span className="tradetype buy">BUY</span>
                 <TokenMark symbol={f.short(t.mint, 4, 4)} size={22} />
@@ -402,17 +460,22 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
         </div>
       )}
 
-      {/* Current holdings */}
+      {/* Current holdings — own skeleton; independent of the profile fetch. */}
       <div className="card">
         <div className="card-head">
           <h3><span className="ic"><Wallet size={16} /></span> Current holdings</h3>
           {holdingList.length > 0 && (
             <span className="faint" style={{ fontSize: 12.5 }}>
+              {holdingList.length > MAX_HOLDINGS && (
+                <>Top {MAX_HOLDINGS} of {holdingList.length} · </>
+              )}
               Value {f.sol(holdings?.totals?.currentValueSol)} SOL · Unreal <Pnl value={holdings?.totals?.unrealizedSol} unit={false} />
             </span>
           )}
         </div>
-        {holdingList.length === 0 ? (
+        {holdingsLoading ? (
+          <div className="card-pad"><SkLine w="100%" h={150} /></div>
+        ) : holdingList.length === 0 ? (
           <EmptyState icon={Wallet} title="No open positions" msg="This wallet has fully realized every position." />
         ) : (
           <div className="table-wrap">
@@ -429,7 +492,7 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
                 </tr>
               </thead>
               <tbody>
-                {holdingList.map((h) => {
+                {holdingRows.map((h) => {
                   const canEnter =
                     h.avgCostSol != null && h.avgCostSol > 0 &&
                     h.priceSol != null && Number.isFinite(h.priceSol);
@@ -457,14 +520,17 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
         )}
       </div>
 
-      {/* Best / worst tokens */}
-      <div className="grid cols-2">
-        <TokenTable title="Best tokens" icon={TrendingUp} tone="pos" rows={best} />
-        <TokenTable title="Worst tokens" icon={TrendingDown} tone="neg" rows={worst} />
-      </div>
+      {/* Best / worst tokens — below the fold; lazy-mounted with reserved space. */}
+      <LazySection minH={220}>
+        <div className="grid cols-2">
+          <TokenTable title="Best tokens" icon={TrendingUp} tone="pos" rows={best} />
+          <TokenTable title="Worst tokens" icon={TrendingDown} tone="neg" rows={worst} />
+        </div>
+      </LazySection>
 
       {/* Recent trades */}
       {recent.length > 0 && (
+        <LazySection minH={260}>
         <div className="card">
           <div className="card-head"><h3><span className="ic"><List size={16} /></span> Recent trades</h3></div>
           <div className="card-pad stack gap-8">
@@ -491,10 +557,12 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
             })}
           </div>
         </div>
+        </LazySection>
       )}
 
-      {/* Funding cluster */}
+      {/* Funding cluster — below the fold; lazy-mounted with reserved space. */}
       {(fundedBy.length > 0 || funded.length > 0) && (
+        <LazySection minH={200}>
         <div className="card">
           <div className="card-head">
             <h3><span className="ic"><GitBranch size={16} /></span> Funding cluster</h3>
@@ -509,6 +577,7 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
             <ClusterSection title="Funded these wallets" links={funded} statByWallet={clusterStatByWallet} router={router} />
           </div>
         </div>
+        </LazySection>
       )}
     </div>
   );
@@ -523,7 +592,7 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
  * — never fabricated numbers. Reuses the existing card / headline / .bf-proof
  * look so it reads like the live-feed proof strip.
  */
-function TrackRecordCard({ record }: { record: WalletRecordResponse | null }) {
+function TrackRecordCard({ record, loading }: { record: WalletRecordResponse | null; loading: boolean }) {
   const n = record?.n ?? 0;
 
   const head = (
@@ -537,6 +606,18 @@ function TrackRecordCard({ record }: { record: WalletRecordResponse | null }) {
       </span>
     </div>
   );
+
+  // While the (independent) /record fetch is in flight, hold the slot with a
+  // skeleton so the prominent track record never flashes an empty state and the
+  // page below it never shifts.
+  if (loading && !record) {
+    return (
+      <div className="card" id="measured-calls" style={{ scrollMarginTop: 80 }}>
+        {head}
+        <div className="card-pad"><SkLine w="100%" h={120} /></div>
+      </div>
+    );
+  }
 
   if (n === 0) {
     return (

@@ -31,12 +31,24 @@ export function TokenImg({ srcs, radius }: { srcs: string[]; radius: number }) {
       key={srcs[i]}
       src={srcs[i]}
       alt=""
+      // Perf: defer offscreen logos, decode off the main thread, and keep these
+      // many slow external IPFS/CDN images low-priority so they never compete
+      // with critical content or block first paint. A broken/slow gateway just
+      // advances to the next candidate via onError — never blocks render.
       loading="lazy"
+      decoding="async"
+      fetchPriority="low"
       referrerPolicy="no-referrer"
       onError={() => setI((n) => n + 1)}
+      // Explicit pixel box (matches the parent TokenMark size via inset:0 +
+      // 100%/100%) so the image reserves space and cannot shift layout while it
+      // loads or if it never loads at all.
       style={{
         position: 'absolute', inset: 0, width: '100%', height: '100%',
         objectFit: 'cover', borderRadius: radius, display: 'block',
+        // Hard floor: even before the % box resolves, the element occupies the
+        // fixed avatar square so there is zero cumulative layout shift.
+        minWidth: '100%', minHeight: '100%',
       }}
     />
   );

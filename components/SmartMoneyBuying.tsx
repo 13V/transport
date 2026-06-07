@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { Flame } from 'lucide-react';
 import * as f from '@/lib/format';
 import {
-  TokenMark, Sparkline, EmptyState, ErrorState, SkTable, TradeLinks, CHART_COLORS,
+  TokenMark, Sparkline, EmptyState, ErrorState, SkLine, TradeLinks, CHART_COLORS,
 } from '@/components/ui';
 
 interface SmartBuyToken {
@@ -177,6 +177,44 @@ function Header({
   );
 }
 
+// Loading skeleton that mirrors the real `.bf-row` layout so the feed paints at
+// its final shape instantly and rows don't reflow when data lands. Reuses the
+// shared `.sk` shimmer primitives (SkLine) inside the same `.bf-*` shells.
+function BuyingSkeleton({ rows = 8 }: { rows?: number }) {
+  return (
+    <div className="bf-list compact" aria-hidden="true">
+      {Array.from({ length: rows }).map((_, i) => (
+        <div className="bf-row" key={i} style={{ cursor: 'default' }}>
+          <div className="stack gap-10" style={{ minWidth: 0 }}>
+            <div className="bf-id">
+              <span className="rank">{i + 1}</span>
+              <div
+                className="sk"
+                style={{ width: 34, height: 34, borderRadius: 10, flexShrink: 0 }}
+              />
+              <div className="bf-id-text" style={{ flex: 1 }}>
+                <SkLine w="120px" />
+                <SkLine w="80px" />
+              </div>
+            </div>
+            <div className="bf-hero">
+              <SkLine w="160px" h={16} />
+            </div>
+            <div className="bf-metrics">
+              <SkLine w="60px" />
+              <SkLine w="60px" />
+              <SkLine w="60px" />
+            </div>
+          </div>
+          <div className="bf-right">
+            <SkLine w="76px" h={28} />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function SmartMoneyBuying() {
   const router = useRouter();
   const [data, setData] = useState<SmartBuyToken[]>([]);
@@ -235,9 +273,9 @@ export default function SmartMoneyBuying() {
 
   if (loading) {
     return (
-      <div className="view stack gap-24">
+      <div className="view stack gap-16">
         <Header hours={hours} onWindow={setHours} minBuyers={minBuyers} onMinBuyers={setMinBuyers} sort={sort} onSort={setSort} />
-        <SkTable cols={8} rows={10} />
+        <BuyingSkeleton rows={8} />
       </div>
     );
   }
@@ -493,7 +531,11 @@ export default function SmartMoneyBuying() {
     <div className="view stack gap-16">
       <Header hours={hours} onWindow={setHours} minBuyers={minBuyers} onMinBuyers={setMinBuyers} sort={sort} onSort={setSort} />
 
-      <div className="bf-list stack gap-8">
+      {/* `compact` = the dense, signal-first variant matching the Live feed's
+          compact mode (tighter padding/gaps). `.bf-row` already carries
+          content-visibility:auto so off-screen rows are skipped — lightweight
+          virtualization for long lists with no extra deps. */}
+      <div className="bf-list compact">
         {rows.map((t, i) => renderRow(t, i))}
       </div>
 

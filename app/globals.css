@@ -714,6 +714,12 @@ pre.code .c { color: var(--text-4); }
   background: var(--surface);
   cursor: pointer;
   transition: border-color .14s ease, background .14s ease, box-shadow .14s ease, opacity .14s ease;
+  /* Perf: skip layout/paint for rows scrolled off-screen in long live feeds.
+     contain-intrinsic-size gives the browser a height estimate so the scrollbar
+     stays stable and skipped rows still reserve space (no jump on scroll). This
+     also implicitly pauses the off-screen .is-live rail pulse animation. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 84px;
 }
 .bf-row:hover {
   background: var(--surface-2);
@@ -1398,4 +1404,62 @@ pre.code .c { color: var(--text-4); }
   .bt-dist { gap: 3px; }
   .bt-dist-label { font-size: 8px; }
   .bt-dist-bar-wrap { height: 90px; }
+}
+
+/* =========================================================================
+   SHARED DENSE / SKELETON UTILITIES  (prefix: u-)
+   Reusable building blocks for page agents: instant skeletons, compact table
+   rows, and tight stat cells. Intentionally standalone from the bf- / bt-
+   systems so they compose anywhere without inheriting feed-specific layout. All
+   animation is transform/opacity only (GPU-friendly) and respects
+   reduced-motion below.
+   ========================================================================= */
+
+/* Generic shimmer placeholder block — drop in at any size for instant skeleton
+   UI before data arrives. Reuses the existing `shimmer` keyframe. */
+.u-skel {
+  position: relative;
+  overflow: hidden;
+  background: var(--surface-3);
+  border-radius: 6px;
+  /* sensible default so an unsized .u-skel is still visible */
+  min-height: 11px;
+}
+.u-skel::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.06), transparent);
+  animation: shimmer 1.5s ease-in-out infinite;
+  will-change: transform;
+}
+.u-skel-text { height: 11px; border-radius: 4px; }
+.u-skel-line { height: 14px; border-radius: 4px; }
+.u-skel-circle { border-radius: 50%; }
+
+/* Off-screen long-list optimization page agents can opt any list item into. */
+.u-cv-auto { content-visibility: auto; contain-intrinsic-size: auto 64px; }
+
+/* Tight data-table row — denser than the default .dt spacing for long feeds. */
+.u-trow td,
+.u-trow th { padding: 6px 10px; border-bottom: 1px solid var(--border-faint); }
+.u-trow:hover td { background: var(--surface-2); }
+
+/* Compact inline stat: small uppercase label + tabular value, no card chrome. */
+.u-stat { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.u-stat .k {
+  font-size: 10px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--text-4); white-space: nowrap;
+}
+.u-stat .v {
+  font-size: 15px; font-weight: 700; color: var(--text);
+  font-variant-numeric: tabular-nums; line-height: 1.1;
+}
+.u-stat .v.pos { color: var(--pos); }
+.u-stat .v.neg { color: var(--neg); }
+.u-stat .v.dim { color: var(--text-2); font-weight: 600; }
+
+@media (prefers-reduced-motion: reduce) {
+  .u-skel::after { animation: none; }
 }

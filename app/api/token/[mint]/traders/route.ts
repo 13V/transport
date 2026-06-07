@@ -39,7 +39,9 @@ export async function GET(
 
   const { searchParams } = request.nextUrl;
   const max = Math.min(Math.max(parseInt(searchParams.get('max') || '600', 10) || 600, 100), 2000);
-  const limit = Math.min(Math.max(parseInt(searchParams.get('limit') || '100', 10) || 100, 1), 500);
+  // Cap the returned list hard (50) — the token page only renders the top ~25,
+  // and a fat trader array is pure payload weight on the heaviest page.
+  const limit = Math.min(Math.max(parseInt(searchParams.get('limit') || '50', 10) || 50, 1), 100);
   const sort = searchParams.get('sort') === 'realized' ? 'realized' : 'total';
   const metric = (t: { totalPnl: number; realizedPnl: number }) =>
     sort === 'realized' ? t.realizedPnl : t.totalPnl;
@@ -66,7 +68,7 @@ export async function GET(
         returned: filtered.length,
         traders: filtered,
       },
-      { headers: { 'Cache-Control': 'public, max-age=120' } }
+      { headers: { 'Cache-Control': 'public, s-maxage=120, stale-while-revalidate=300' } }
     );
   } catch (error) {
     console.error(`[TRADERS] failed for ${mint}:`, error);

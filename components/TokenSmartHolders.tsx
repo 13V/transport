@@ -1,12 +1,12 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { Sparkles, Users, Wallet, TrendingUp, Globe, Twitter, Send, MessageCircle, ExternalLink, LineChart, Activity } from 'lucide-react';
 import * as f from '@/lib/format';
 import {
   TokenMark, TierBadge, Roi, Pnl, AddrChip, CopyIconButton,
-  EmptyState, ErrorState, SkCard, SkStat, SkTable,
+  EmptyState, ErrorState, SkStat, SkTable,
   AreaChart, CHART_COLORS,
 } from '@/components/ui';
 
@@ -137,8 +137,30 @@ function PriceChart({ mint, pair }: { mint: string; pair?: string }) {
   const [tf, setTf] = useState<TF>('1h');
   const [data, setData] = useState<OhlcvResponse | null>(null);
   const [state, setState] = useState<'loading' | 'error' | 'done'>('loading');
+  // Defer the heavy OHLCV fetch + SVG render until the chart is near the
+  // viewport. The chart is the heaviest widget on the page (external
+  // GeckoTerminal round-trip + a smooth-path SVG), so we never let it block
+  // first paint — it self-mounts once scrolled into view (or after first paint
+  // for above-the-fold viewports, via the generous rootMargin).
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  const [visible, setVisible] = useState(false);
 
   useEffect(() => {
+    const el = cardRef.current;
+    if (!el || visible) return;
+    if (typeof IntersectionObserver === 'undefined') { setVisible(true); return; }
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) { setVisible(true); io.disconnect(); }
+      },
+      { rootMargin: '300px' }
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [visible]);
+
+  useEffect(() => {
+    if (!visible) return;
     let alive = true;
     setState('loading');
     const qs = `tf=${tf}${pair ? `&pair=${pair}` : ''}`;
@@ -147,7 +169,7 @@ function PriceChart({ mint, pair }: { mint: string; pair?: string }) {
       .then((j: OhlcvResponse) => { if (alive) { setData(j); setState('done'); } })
       .catch(() => { if (alive) setState('error'); });
     return () => { alive = false; };
-  }, [mint, pair, tf]);
+  }, [mint, pair, tf, visible]);
 
   const closes = data?.closes ?? [];
   // A few evenly-spaced time labels across the series for the x-axis.
@@ -166,7 +188,7 @@ function PriceChart({ mint, pair }: { mint: string; pair?: string }) {
   const color = up ? CHART_COLORS.POS : CHART_COLORS.NEG;
 
   return (
-    <div className="card" style={{ overflow: 'hidden' }}>
+    <div ref={cardRef} className="card" style={{ overflow: 'hidden' }}>
       <div className="card-head">
         <h3><span className="ic"><LineChart size={16} /></span> Price</h3>
         <div className="row gap-10">
@@ -192,7 +214,7 @@ function PriceChart({ mint, pair }: { mint: string; pair?: string }) {
         </div>
       </div>
       <div style={{ padding: '4px 8px 8px', minHeight: 240 }}>
-        {state === 'loading' ? (
+        {!visible || state === 'loading' ? (
           <div className="faint" style={{ padding: '90px 0', textAlign: 'center', fontSize: 13 }}>Loading price…</div>
         ) : closes.length >= 2 ? (
           <AreaChart values={closes} height={240} color={color} xLabels={xLabels} fmtY={(v) => usd(Number(v))} />
@@ -414,12 +436,14 @@ export default function TokenSmartHolders({ mint }: TokenSmartHoldersProps) {
     };
   }, [mint, reloadKey]);
 
-  // ---- loading skeleton ----
+  // ---- loading: render the page shell immediately so the chart can fetch in
+  // PARALLEL with /smart-holders (it resolves its own pool, so it doesn't wait
+  // for the smart-holders payload). Only the holder-derived sections skeleton. ----
   if (loading && !data) {
     return (
       <div className="view stack gap-20">
-        <SkCard h={110} />
-        <SkCard h={460} />
+        <TitleCard mint={mint} token={undefined} count={null} />
+        {mint && <PriceChart mint={mint} />}
         <div className="stat-grid cols-4"><SkStat /><SkStat /><SkStat /><SkStat /></div>
         <SkTable cols={8} rows={8} />
       </div>
@@ -484,7 +508,11 @@ export default function TokenSmartHolders({ mint }: TokenSmartHoldersProps) {
       )}
 
       {/* Native price chart — candles pulled from GeckoTerminal and rendered
-          with our own SVG (no third-party iframe, so ad-blockers can't break it). */}
+          with our own SVG (no third-party iframe, so ad-blockers can't break it).
+          Rendered at the SAME position as the loading shell so React keeps the one
+          mounted instance: the fetch fired in parallel with /smart-holders stays
+          warm. `pair` only arrives now (post-load) and is a non-essential hint —
+          the OHLCV route resolves its own pool — used here for the DexScreener link. */}
       {mint && <PriceChart mint={mint} pair={tk?.pairAddress} />}
 
       {/* Net smart-money flow — cumulative signed SOL (buys − sells) over time */}
