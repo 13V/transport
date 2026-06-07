@@ -19,6 +19,7 @@
 
 import { getLiveBursts, qualityScore, type LiveBurst } from './live-bursts';
 import { getTokenMeta } from '../token-meta';
+import { getSupabase, isSupabaseConfigured } from '../supabase-client';
 
 /** Inputs to buildLiveFeed — already clamped/parsed by the caller (the routes). */
 export interface BuildLiveFeedParams {
@@ -146,7 +147,119 @@ async function computeLiveFeed(p: BuildLiveFeedParams): Promise<LiveFeedResult> 
     // ignore — return the un-enriched feed
   }
 
+  // Annotate each burst with the smart-money EXIT signal via ONE batched,
+  // indexed SELL query for the whole (capped) feed. Resilient: on any failure
+  // the bursts are returned unchanged (fields stay undefined).
+  bursts = await annotateSmartSells(bursts, hours);
+
   return { ...result, count: bursts.length, nextCursor, bursts };
+}
+
+/**
+ * Annotate bursts with whether smart wallets are already SELLING the token.
+ *
+ * Runs exactly ONE batched query for the WHOLE feed (not per card): SELL trades
+ * over the same `hours` lookback, scoped to the (small, capped) set of burst
+ * mints AND to the exact buyer wallets we already know are in those bursts. That
+ * wallet set is small and exact, so we don't need the full smart-wallet `.in()`
+ * list, and the query rides the trades(token_mint, block_time) index. It runs
+ * once per feed build, behind the 2s buildLiveFeed result cache.
+ *
+ * Cost: 1 query/feed build (cached 2s). No per-card queries, no extra latency on
+ * the hot path beyond this single batched read.
+ *
+ * FULLY RESILIENT: not configured, no mints, or a query error -> bursts returned
+ * unchanged with the new fields left undefined.
+ */
+async function annotateSmartSells(
+  bursts: LiveBurst[],
+  hours: number
+): Promise<LiveBurst[]> {
+  if (bursts.length === 0 || !isSupabaseConfigured()) return bursts;
+
+  // Collect the distinct burst mints and the exact buyer wallets we already
+  // know are "in" (the smart wallets that produced these bursts). Filtering
+  // sells to these wallets keeps the .in() list small and exact.
+  const burstMints = Array.from(new Set(bursts.map((b) => b.mint).filter(Boolean)));
+  const buyerWalletSet = new Set<string>();
+  for (const b of bursts) {
+    for (const w of b.wallets) if (w) buyerWalletSet.add(w);
+  }
+  if (burstMints.length === 0 || buyerWalletSet.size === 0) return bursts;
+  const buyerWallets = Array.from(buyerWalletSet);
+
+  try {
+    const supabase = getSupabase();
+    const sinceIso = new Date(Date.now() - hours * 3_600_000).toISOString();
+
+    // ONE batched, indexed query for the whole feed.
+    const { data, error } = await supabase
+      .from('trades')
+      .select('wallet, token_mint, amount, price, block_time')
+      .eq('trade_type', 'SELL')
+      .in('token_mint', burstMints)
+      .in('wallet', buyerWallets)
+      .gte('block_time', sinceIso);
+
+    if (error || !data) return bursts;
+
+    // Aggregate sells per mint: distinct seller wallets + total SOL value.
+    interface SellAgg {
+      sellers: Set<string>;
+      sol: number;
+    }
+    const byMint = new Map<string, SellAgg>();
+    for (const row of data as any[]) {
+      const mint = String(row.token_mint);
+      const wallet = String(row.wallet);
+      if (!mint || !wallet) continue;
+      const amount = Number(row.amount);
+      const price = Number(row.price);
+      const sol =
+        Number.isFinite(amount) && Number.isFinite(price) ? amount * price : 0;
+      let agg = byMint.get(mint);
+      if (!agg) {
+        agg = { sellers: new Set(), sol: 0 };
+        byMint.set(mint, agg);
+      }
+      agg.sellers.add(wallet);
+      agg.sol += sol;
+    }
+
+    return bursts.map((b) => {
+      const agg = byMint.get(b.mint);
+      if (!agg) {
+        // No smart-money sells for this token in-window: explicitly net-zero exit.
+        return {
+          ...b,
+          smartSellWallets: 0,
+          smartSellSol: 0,
+          netSolFlow: Math.round(b.solTotal * 1e4) / 1e4,
+          someBuyersExited: false,
+        };
+      }
+      const smartSellSol = Math.round(agg.sol * 1e4) / 1e4;
+      // Did any wallet in THIS burst's buyer set also sell this same token?
+      const buyerSet = new Set(b.wallets);
+      let someBuyersExited = false;
+      for (const seller of agg.sellers) {
+        if (buyerSet.has(seller)) {
+          someBuyersExited = true;
+          break;
+        }
+      }
+      return {
+        ...b,
+        smartSellWallets: agg.sellers.size,
+        smartSellSol,
+        netSolFlow: Math.round((b.solTotal - smartSellSol) * 1e4) / 1e4,
+        someBuyersExited,
+      };
+    });
+  } catch {
+    // Never break the feed on the exit-signal query.
+    return bursts;
+  }
 }
 
 /**

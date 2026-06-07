@@ -120,6 +120,18 @@ export interface LiveBurst {
   sells24h?: number;
   volume24hUsd?: number;
   topHolderPct?: number;
+  // Smart-money EXIT signal (filled in computeLiveFeed via ONE batched, indexed
+  // SELL query per feed build). All optional + backward-compatible: if the sell
+  // query fails or returns nothing, these stay undefined and the feed is
+  // unchanged. Answers "is smart money already selling this token?"
+  /** Distinct smart wallets that SOLD this token in the lookback window. */
+  smartSellWallets?: number;
+  /** Total SOL value (amount*price) of those smart-money sells. */
+  smartSellSol?: number;
+  /** solTotal (buys) - smartSellSol. Positive = net accumulating; negative = net distributing. */
+  netSolFlow?: number;
+  /** True if any wallet in this burst's buyer set also appears in the sells (they're flipping out). */
+  someBuyersExited?: boolean;
 }
 
 export interface LiveBurstsResult {
