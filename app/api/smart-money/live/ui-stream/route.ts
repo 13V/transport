@@ -12,7 +12,13 @@
  * Events:
  *   event: snapshot  data: <full LiveFeedResult>            (sent once, on open)
  *   event: bursts    data: { bursts: LiveBurst[], generatedAt }  (only changed)
- *   : ping                                                   (heartbeat comment)
+ *   event: ping      data: { t: <Date.now()> }             (heartbeat, every ~10s)
+ *
+ * The heartbeat is a NAMED event (not a `:` comment) so the browser EventSource
+ * can observe it via addEventListener('ping', …) — a comment-only heartbeat is
+ * invisible to EventSource, which would leave a quiet-but-healthy connection
+ * looking "stale" on the client. The ping is the client's connection-liveness
+ * signal during gaps with no new bursts.
  *
  * DB-LOAD SAFETY: every buildLiveFeed call is served from the shared ~2s
  * in-process result cache (lib/indexer/live-feed). With a ~2.5s tick, that means
@@ -43,7 +49,7 @@ function clampFloat(raw: string | null, fallback: number, min: number, max: numb
 // platform kills it, letting the browser reconnect on our terms.
 const STREAM_MS = 50_000;
 const TICK_MS = 2_500;
-const HEARTBEAT_MS = 15_000;
+const HEARTBEAT_MS = 10_000;
 const RECONNECT_MS = 3_000;
 
 export async function GET(request: NextRequest) {
@@ -122,9 +128,12 @@ export async function GET(request: NextRequest) {
         recordSent(initial.bursts);
         safeEnqueue(`event: snapshot\ndata: ${JSON.stringify(initial)}\n\n`);
 
-        // Heartbeat so proxies don't drop the idle connection.
+        // Heartbeat: a REAL named `ping` event (not a `:` comment) so the browser
+        // EventSource can observe it and treat the connection as live during quiet
+        // periods with no new bursts. Also keeps proxies from dropping the idle
+        // connection. Sent every ~10s in addition to snapshot/bursts.
         heartbeatTimer = setInterval(() => {
-          safeEnqueue(`: ping\n\n`);
+          safeEnqueue(`event: ping\ndata: ${JSON.stringify({ t: Date.now() })}\n\n`);
         }, HEARTBEAT_MS);
 
         // Diff loop: every ~2.5s, recompute (from the ~2s cache) and push only

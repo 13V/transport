@@ -6,8 +6,11 @@
  * that loads wins, else the letter avatar). This makes logos resilient:
  *   1. DexScreener profile image (when present)
  *   2. DexScreener token image CDN (exists for most DexScreener-known tokens)
- *   3. pump.fun / IPFS image from Helius DAS metadata, via a fast Pinata gateway
- *      and ipfs.io — covers fresh pump coins DexScreener has no image for.
+ *   3. pump.fun / IPFS image from Helius DAS metadata (image link, metadata.image,
+ *      and file uri), each fanned out across several independent IPFS gateways
+ *      (Pinata, ipfs.io, Cloudflare, nft.storage, dweb.link) so one slow/down
+ *      gateway can't kill the logo — covers fresh pump coins DexScreener has no
+ *      image for yet.
  *
  * Resilient (never throws), cheap (10-min in-memory cache), dependency-light.
  */
@@ -77,8 +80,13 @@ function imageCandidates(raw?: string): string[] {
     if (m) ipfsPath = m[1];
   }
   if (ipfsPath) {
+    // Multiple independent gateways so a single slow/down gateway can't kill the
+    // logo — the client tries them in order and stops at the first that loads.
     out.push(`https://pump.mypinata.cloud/ipfs/${ipfsPath}`); // what pump.fun itself serves
     out.push(`https://ipfs.io/ipfs/${ipfsPath}`);
+    out.push(`https://cloudflare-ipfs.com/ipfs/${ipfsPath}`);
+    out.push(`https://nftstorage.link/ipfs/${ipfsPath}`);
+    out.push(`https://dweb.link/ipfs/${ipfsPath}`);
   } else if (raw.startsWith('http://')) {
     out.push('https://' + raw.slice('http://'.length));
   } else if (raw.startsWith('https://')) {
@@ -233,8 +241,12 @@ async function fetchHelius(mints: string[], acc: Map<string, Acc>): Promise<void
         const dec = numOrU(ti?.decimals);
         if (dec != null) entry.decimals = dec;
         // pump.fun token image lives in the on-chain metadata (IPFS via Pinata).
+        // Pull from every place DAS may surface it and run each through
+        // imageCandidates (multi-gateway). Order: Helius CDN (fast) → DAS image
+        // link → metadata.image → first file uri. De-dupe happens in finalize().
         if (file?.cdn_uri) entry.cands.push(file.cdn_uri); // Helius-hosted CDN (fast)
         entry.cands.push(...imageCandidates(content?.links?.image));
+        entry.cands.push(...imageCandidates(typeof md?.image === 'string' ? md.image : undefined));
         entry.cands.push(...imageCandidates(file?.uri));
         acc.set(id, entry);
       }
@@ -334,7 +346,13 @@ async function mapWithConcurrency<T, R>(
 }
 
 function finalize(entry: Acc): TokenMeta {
-  const icons = Array.from(new Set(entry.cands.filter((c) => typeof c === 'string' && c))).slice(0, 6);
+  // Ordered, de-duped, empties dropped. Order is preserved by Set insertion:
+  // DexScreener profile image → DexScreener token CDN → Helius CDN → DAS/IPFS
+  // gateways. Cap a little higher than before so a real DAS logo isn't truncated
+  // away just because several IPFS-gateway variants precede it.
+  const icons = Array.from(
+    new Set(entry.cands.filter((c): c is string => typeof c === 'string' && c.trim().length > 0))
+  ).slice(0, 10);
   // De-dupe links by url, cap to a sensible number.
   const seen = new Set<string>();
   const links: TokenLink[] = [];

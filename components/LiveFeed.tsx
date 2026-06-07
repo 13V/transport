@@ -245,6 +245,15 @@ const POLL_MS = 3 * 1000;
 // treat the stream as unhealthy and fall back to polling until it recovers.
 const SSE_WATCHDOG_MS = 8_000;
 
+// The SSE connection is LIVE while frames of ANY kind — snapshot, bursts, or the
+// server's named `ping` heartbeat (~10s) — keep arriving within this window. A
+// quiet market with an open connection still pings, so this stays GREEN. Only
+// when NO frame at all has arrived for this long do we declare SSE dead and
+// resume polling. Set comfortably above the ~10s ping cadence to tolerate jitter.
+const SSE_FRAME_TIMEOUT_MS = 20_000;
+// How often to re-check SSE frame liveness (independent of the connect watchdog).
+const SSE_LIVENESS_CHECK_MS = 5_000;
+
 // Liquidity below this (USD) is a cheap rug proxy — flag it (flat fallback).
 const LOW_LIQ_USD = 5_000;
 // liq/MC ratio below this → "THIN LIQ" (supersedes the flat guard when MC known).
@@ -795,7 +804,10 @@ export default function LiveFeed() {
   const [minBuyers, setMinBuyers] = useState<number>(3);
   const [windowSec, setWindowSec] = useState<number>(30);
   const [minSol, setMinSol] = useState<number>(0);
-  const [sort, setSort] = useState<'quality' | 'recent'>('quality');
+  // Default to a live TAPE: newest cluster first, so fresh bursts lead and stay
+  // at the top (the entry animation plays as they arrive). User can still flip to
+  // Quality via the toggle.
+  const [sort, setSort] = useState<'quality' | 'recent'>('recent');
   const [statusFilter, setStatusFilter] = useState<'all' | 'live' | 'cooling'>('all');
   const [compact, setCompact] = useState(false);
   const [groupByToken, setGroupByToken] = useState(true);
@@ -867,6 +879,15 @@ export default function LiveFeed() {
   // this is false, so the two never race for long.
   const [sseOk, setSseOk] = useState(false);
   const esRef = useRef<EventSource | null>(null);
+  // Wall-clock of the last frame of ANY kind received over SSE — snapshot, bursts
+  // OR ping. This is the TRUE connection-liveness signal (unlike lastOkAt, which
+  // only moves on actual data). A periodic check (below) declares SSE dead when no
+  // frame has arrived for SSE_FRAME_TIMEOUT_MS, resuming polling. Set to 0 when no
+  // stream is connected so liveness checks treat it as not-yet-live.
+  const lastServerFrameAtRef = useRef(0);
+  // State mirror of "is a frame recent?" so the freshness dot re-renders. Updated
+  // by the liveness interval; true while pings/snapshots/bursts keep flowing.
+  const [sseFrameFresh, setSseFrameFresh] = useState(false);
   // Watchdog timer: if no snapshot lands within SSE_WATCHDOG_MS of (re)connect we
   // declare the stream unhealthy and let polling take over.
   const sseWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1091,6 +1112,16 @@ export default function LiveFeed() {
       `/api/smart-money/live/ui-stream?windowSec=${windowSec}&minBuyers=${minBuyers}` +
       `&minSol=${minSol}&hours=6&limit=50&sort=${sort}`;
 
+    // Mark a frame of ANY kind received — the true liveness signal. Marks SSE
+    // healthy and frame-fresh immediately so a quiet (ping-only) connection is
+    // GREEN without waiting for the next liveness tick.
+    const markFrame = () => {
+      lastServerFrameAtRef.current = Date.now();
+      if (!mountedRef.current) return;
+      setSseFrameFresh(true);
+      setSseOk(true);
+    };
+
     let es: EventSource;
     try {
       es = new EventSource(url);
@@ -1107,7 +1138,7 @@ export default function LiveFeed() {
         const json = JSON.parse(ev.data) as LiveResponse;
         applySnapshot(json.bursts ?? [], json.generatedAt);
         clearWatchdog();
-        setSseOk(true);
+        markFrame();
         setLoading(false);
       } catch {
         /* malformed frame — ignore, keep last set */
@@ -1122,16 +1153,30 @@ export default function LiveFeed() {
         // A delta proves the stream is alive even if the watchdog hasn't seen a
         // snapshot yet (shouldn't happen, but keeps us healthy & re-arms).
         clearWatchdog();
-        setSseOk(true);
+        markFrame();
       } catch {
         /* ignore */
       }
     });
 
+    // PING — the server's named heartbeat (~10s). It carries no burst data, so it
+    // must NOT touch lastOkAt ("Updated Xs ago" reflects real data), but it IS a
+    // frame: it proves the connection is alive during quiet markets, keeping the
+    // dot GREEN and suppressing the polling fallback. Comment-only heartbeats were
+    // invisible here; this named event is observable.
+    es.addEventListener('ping', () => {
+      if (!mountedRef.current) return;
+      clearWatchdog();
+      markFrame();
+    });
+
     es.onerror = () => {
       // EventSource auto-reconnects on its own; we just drop to polling meanwhile.
       // Never blank the feed — the last burst set stays on screen.
-      if (mountedRef.current) setSseOk(false);
+      if (mountedRef.current) {
+        setSseOk(false);
+        setSseFrameFresh(false);
+      }
       // Re-arm so a stalled-but-not-closed socket still trips the fallback.
       armWatchdog();
     };
@@ -1139,19 +1184,45 @@ export default function LiveFeed() {
     return () => {
       clearWatchdog();
       es.close();
+      lastServerFrameAtRef.current = 0;
+      setSseFrameFresh(false);
       if (esRef.current === es) esRef.current = null;
     };
   }, [applySnapshot, upsertBursts, minBuyers, windowSec, minSol, sort]);
+
+  // SSE FRAME-LIVENESS CHECK — independent of the connect watchdog. The browser
+  // EventSource can keep a socket "open" while it has actually buffered/stalled;
+  // the only reliable proof of life is frames still arriving. If NO frame of any
+  // kind (snapshot/bursts/ping) has landed for SSE_FRAME_TIMEOUT_MS, declare SSE
+  // dead (sseOk=false) so polling reliably RESUMES; the next snapshot/ping flips
+  // it healthy again (stopping the poll). This is what covers a buffered/half-dead
+  // stream that the connect watchdog alone would miss.
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (!mountedRef.current) return;
+      const last = lastServerFrameAtRef.current;
+      const fresh = last > 0 && Date.now() - last <= SSE_FRAME_TIMEOUT_MS;
+      setSseFrameFresh(fresh);
+      // Frames went silent on a still-"open" socket → drop to polling.
+      if (!fresh) setSseOk((prev) => (prev ? false : prev));
+    }, SSE_LIVENESS_CHECK_MS);
+    return () => clearInterval(id);
+  }, []);
 
   // Poll for the current controls — FALLBACK only. Skipped entirely while SSE is
   // the healthy primary path (sseOk). When SSE is down: if Realtime is pushing
   // this drops to a slow safety net; otherwise it's the primary 3s refresh.
   useEffect(() => {
-    if (sseOk) return; // SSE is primary — don't run both at once.
+    // SSE is primary ONLY while it's actually delivering frames (sseOk &&
+    // sseFrameFresh). The liveness interval flips sseOk→false when pings stop, so
+    // this effect re-runs and polling RESUMES, reliably covering any gap — even a
+    // buffered/half-dead-but-"open" socket. Once pings/snapshots resume, sseOk
+    // flips back true, this re-runs, and the poll stops again.
+    if (sseOk && sseFrameFresh) return; // SSE healthy — don't run both at once.
     const pollMs = realtimeOk ? 30_000 : POLL_MS;
     const interval = setInterval(() => fetchLive(minBuyers, windowSec, minSol, sort), pollMs);
     return () => clearInterval(interval);
-  }, [fetchLive, minBuyers, windowSec, minSol, sort, realtimeOk, sseOk]);
+  }, [fetchLive, minBuyers, windowSec, minSol, sort, realtimeOk, sseOk, sseFrameFresh]);
 
   // Keep relative ages ticking between polls (every 5s is plenty).
   useEffect(() => {
@@ -1174,7 +1245,21 @@ export default function LiveFeed() {
   // (preserving the server's overall order by first-appearance), with the rest
   // available under "+N earlier". When off, each burst is its own group.
   const groups: BurstGroup[] = useMemo(() => {
-    if (!groupByToken) return visible.map((b) => ({ primary: b, others: [] }));
+    // Order the groups by the ACTIVE sort. For 'recent' (the default live-tape
+    // mode) the newest cluster leads — by primary windowEnd descending — so new
+    // bursts (snapshot REPLACE or delta UPSERT) stay at the TOP after their entry
+    // animation hold expires, instead of sinking back to insertion order. For
+    // 'quality' we preserve the server's authoritative (first-appearance) order.
+    const sortGroups = (gs: BurstGroup[]): BurstGroup[] => {
+      if (sort !== 'recent') return gs;
+      return [...gs].sort(
+        (a, b) => (ms(b.primary.windowEnd) ?? 0) - (ms(a.primary.windowEnd) ?? 0)
+      );
+    };
+
+    if (!groupByToken) {
+      return sortGroups(visible.map((b) => ({ primary: b, others: [] })));
+    }
     const order: string[] = [];
     const byMint = new Map<string, Burst[]>();
     for (const b of visible) {
@@ -1184,7 +1269,7 @@ export default function LiveFeed() {
       }
       byMint.get(b.mint)!.push(b);
     }
-    return order.map((mint) => {
+    const built = order.map((mint) => {
       const list = byMint.get(mint)!;
       const primary = list.reduce((acc, b) => pickPrimary(acc, b));
       const others = list.filter((b) => b.id !== primary.id);
@@ -1192,7 +1277,8 @@ export default function LiveFeed() {
       others.sort((a, b) => (ms(b.windowEnd) ?? 0) - (ms(a.windowEnd) ?? 0));
       return { primary, others };
     });
-  }, [visible, groupByToken]);
+    return sortGroups(built);
+  }, [visible, groupByToken, sort]);
 
   // DISPLAY ORDER — Axiom live-feed feel: groups whose primary is currently
   // "entering" (a genuinely-new burst flagged in the last ~ENTER_HOLD_MS) float to
@@ -1487,20 +1573,26 @@ export default function LiveFeed() {
     );
   }
 
-  // HONEST FRESHNESS — color the live dot by actual state instead of a
-  // hardcoded green. Driven by the last received event (snapshot/delta/poll via
-  // lastOkAt). Green when a live push channel (SSE stream, else Realtime) is
-  // connected AND the last event is recent; amber when we've dropped to polling
-  // or the last event went stale; grey before the first successful event.
+  // HONEST FRESHNESS — color the live dot by CONNECTION health, not by
+  // time-since-last-burst. A push channel is healthy when SSE frames (incl. the
+  // ~10s ping) are arriving (sseOk && sseFrameFresh) OR Realtime is subscribed; a
+  // quiet market on a live connection is GREEN, not "stale". We only fall to amber
+  // when no push channel is healthy: "reconnecting…" while a recent poll is still
+  // covering the gap, "stale — retrying…" only when even polling hasn't landed a
+  // fresh result. "Updated Xs ago" elsewhere still reflects lastOkAt (real data),
+  // but it must NOT drive the stale state while the connection is alive.
   const sinceOk = lastOkAt == null ? Infinity : Date.now() - lastOkAt;
-  const stale = sinceOk > STALE_MS;
-  const livePush = sseOk || realtimeOk;
+  const pollFresh = sinceOk <= STALE_MS;
+  const pushHealthy = (sseOk && sseFrameFresh) || realtimeOk;
   const freshness =
     lastOkAt == null
       ? { color: DOT_NEUTRAL, label: 'connecting…' }
-      : livePush && !stale
-      ? { color: CHART_COLORS.POS, label: sseOk ? 'live — streaming updates' : 'live — updates instantly' }
-      : !livePush
+      : pushHealthy
+      ? {
+          color: CHART_COLORS.POS,
+          label: sseOk && sseFrameFresh ? 'live — streaming updates' : 'live — updates instantly',
+        }
+      : pollFresh
       ? { color: DOT_WARN, label: 'reconnecting… — polling every 3s' }
       : { color: DOT_WARN, label: 'stale — retrying…' };
 
