@@ -7,7 +7,7 @@ import * as f from '@/lib/format';
 import { getBrowserSupabase } from '@/lib/supabase-browser';
 import { useWatchlist } from '@/lib/useWatchlist';
 import {
-  TokenMark, TradeLinks, AddrChip, TierBadge, EmptyState, ErrorState,
+  TokenMark, EmptyState, ErrorState,
   SkTable, SkCard, CHART_COLORS, Sparkline,
 } from '@/components/ui';
 import { tokenLinks } from '@/lib/trade-links';
@@ -54,6 +54,10 @@ interface Burst {
   sells24h?: number | null;
   volume24hUsd?: number | null;
   topHolderPct?: number | null;
+  // Exit-signal enrichment — all optional; render only when present.
+  netSolFlow?: number | null;          // buys − sells SOL (+ accumulating, − distributing)
+  smartSellWallets?: number | null;    // count of smart wallets that SOLD in-window
+  someBuyersExited?: boolean | null;   // a buyer flipped to selling
 }
 
 interface LiveResponse {
@@ -262,8 +266,6 @@ const THIN_LIQ_RATIO = 0.02;
 const VERY_NEW_MS = 10 * 60 * 1000;
 // Top-holder concentration above this → whale-risk amber chip.
 const WHALE_PCT = 25;
-// Realtime is only "fresh" if the last good fetch landed within this window.
-const STALE_MS = 15_000;
 // Hard floor between realtime-triggered refetches so a swap flood can't
 // out-poll the poller.
 const REALTIME_MIN_INTERVAL_MS = 3_000;
@@ -330,14 +332,6 @@ function ageShort(fromMs: number, now: number): string {
   const h = Math.round(m / 60);
   if (h < 24) return `${h}h`;
   return `${Math.round(h / 24)}d`;
-}
-
-// Mcap tier label for a USD market cap. null when unknown.
-function mcapTier(mc: number | null | undefined): string | null {
-  if (mc == null || !Number.isFinite(mc)) return null;
-  if (mc < 100_000) return 'micro';
-  if (mc < 1_000_000) return 'small';
-  return 'mid';
 }
 
 // --- Wave 3 helpers ---
@@ -1209,20 +1203,20 @@ export default function LiveFeed() {
     return () => clearInterval(id);
   }, []);
 
-  // Poll for the current controls — FALLBACK only. Skipped entirely while SSE is
-  // the healthy primary path (sseOk). When SSE is down: if Realtime is pushing
-  // this drops to a slow safety net; otherwise it's the primary 3s refresh.
+  // Poll for the current controls — the GUARANTEED-LIVE heartbeat. On Vercel's
+  // Node runtime the held SSE stream can be buffered and deliver nothing while
+  // the socket still looks "open"; an open-but-silent SSE connection must NEVER
+  // suppress polling. So polling ALWAYS runs: it is the reliable cadence, with
+  // SSE as a bonus accelerant layered on top. When SSE IS actively delivering
+  // frames (sseOk && sseFrameFresh) we throttle the poll to ~8s to avoid
+  // redundant fetches; otherwise we poll every POLL_MS (~3s). It never stops.
+  // A poll REPLACE of identical data is a no-op render and — because flagNewIds
+  // keys off genuinely-new ids — does NOT retrigger the entry animation.
   useEffect(() => {
-    // SSE is primary ONLY while it's actually delivering frames (sseOk &&
-    // sseFrameFresh). The liveness interval flips sseOk→false when pings stop, so
-    // this effect re-runs and polling RESUMES, reliably covering any gap — even a
-    // buffered/half-dead-but-"open" socket. Once pings/snapshots resume, sseOk
-    // flips back true, this re-runs, and the poll stops again.
-    if (sseOk && sseFrameFresh) return; // SSE healthy — don't run both at once.
-    const pollMs = realtimeOk ? 30_000 : POLL_MS;
+    const pollMs = sseOk && sseFrameFresh ? 8000 : POLL_MS;
     const interval = setInterval(() => fetchLive(minBuyers, windowSec, minSol, sort), pollMs);
     return () => clearInterval(interval);
-  }, [fetchLive, minBuyers, windowSec, minSol, sort, realtimeOk, sseOk, sseFrameFresh]);
+  }, [fetchLive, minBuyers, windowSec, minSol, sort, sseOk, sseFrameFresh]);
 
   // Keep relative ages ticking between polls (every 5s is plenty).
   useEffect(() => {
@@ -1573,16 +1567,14 @@ export default function LiveFeed() {
     );
   }
 
-  // HONEST FRESHNESS — color the live dot by CONNECTION health, not by
-  // time-since-last-burst. A push channel is healthy when SSE frames (incl. the
-  // ~10s ping) are arriving (sseOk && sseFrameFresh) OR Realtime is subscribed; a
-  // quiet market on a live connection is GREEN, not "stale". We only fall to amber
-  // when no push channel is healthy: "reconnecting…" while a recent poll is still
-  // covering the gap, "stale — retrying…" only when even polling hasn't landed a
-  // fresh result. "Updated Xs ago" elsewhere still reflects lastOkAt (real data),
-  // but it must NOT drive the stale state while the connection is alive.
+  // HONEST FRESHNESS — now that polling ALWAYS runs (the guaranteed heartbeat),
+  // the dot is essentially always green or amber and never falsely stuck. GREEN
+  // "live" when a push channel is healthy (SSE frames incl. the ~10s ping, OR
+  // Realtime subscribed) OR a poll landed within ~6s. AMBER "polling" otherwise
+  // (a poll is always in flight on a ~3s cadence, so this is transient). GREY
+  // only before the very first successful load.
   const sinceOk = lastOkAt == null ? Infinity : Date.now() - lastOkAt;
-  const pollFresh = sinceOk <= STALE_MS;
+  const pollFresh = sinceOk <= 6000;
   const pushHealthy = (sseOk && sseFrameFresh) || realtimeOk;
   const freshness =
     lastOkAt == null
@@ -1593,8 +1585,8 @@ export default function LiveFeed() {
           label: sseOk && sseFrameFresh ? 'live — streaming updates' : 'live — updates instantly',
         }
       : pollFresh
-      ? { color: DOT_WARN, label: 'reconnecting… — polling every 3s' }
-      : { color: DOT_WARN, label: 'stale — retrying…' };
+      ? { color: CHART_COLORS.POS, label: 'live — polling every 3s' }
+      : { color: DOT_WARN, label: 'polling…' };
 
   // The currently selected burst (for the mobile ape bar), looked up by mint
   // among the rendered rows.
@@ -1622,28 +1614,13 @@ export default function LiveFeed() {
     const symbol = b.symbol || f.short(b.mint, 4, 4);
     const startMs = ms(b.windowStart);
     const endMs = ms(b.windowEnd);
-    const spanSec =
-      startMs != null && endMs != null
-        ? Math.max(0, Math.round((endMs - startMs) / 1000))
-        : null;
-    const durLabel =
-      spanSec == null
-        ? null
-        : spanSec >= 60
-        ? `over ${Math.round(spanSec / 60)}m`
-        : `over ${spanSec}s`;
     const isNew = newIds.has(b.id);
     const sample = b.sampleBuyers.slice(0, 4);
     const tiers = b.tiers ?? [];
     const buyerStats = b.buyerStats ?? [];
-    const tierSummary = tiers.filter((t): t is string => !!t).join('·');
     const isTrap = b.buyerWallets >= 2 * b.buyers && b.buyers > 0;
     const isIndependent = !isTrap && b.buyers > 0 && b.buyerWallets <= b.buyers + 1;
     const mcap = usdCompact(b.marketCapUsd);
-    const liq = usdCompact(b.liquidityUsd);
-    const chg = b.priceChange24h;
-    const vol = usdCompact(b.volume24hUsd);
-    const tier = mcapTier(b.marketCapUsd);
     const mintLive = b.mintRenounced === false;
     const freezeLive = b.freezeRenounced === false;
     const bothSafe = b.mintRenounced === true && b.freezeRenounced === true;
@@ -1658,9 +1635,6 @@ export default function LiveFeed() {
     const createdMs = ms(b.pairCreatedAt);
     const ageLabel = createdMs != null ? ageShort(createdMs, now) : null;
     const veryNew = createdMs != null && now - createdMs < VERY_NEW_MS;
-    const velSolMin = spanSec != null && spanSec > 0 ? (b.solTotal / spanSec) * 60 : null;
-    const hasSafetyRow =
-      mintLive || freezeLive || bothSafe || ageLabel || noSells || thinLiq || lowLiq || whale;
     const isLive = b.finalized === false;
 
     // --- Wave 3: price sparkline + "% since first buy" from OHLCV series. ---
@@ -1685,6 +1659,77 @@ export default function LiveFeed() {
       }
     }
 
+    // --- HERO: "% since first buy" is the visual hero (22px mono ▲/▼). ---
+    const sinceUp = sinceFirst != null && sinceFirst >= 0;
+
+    // --- MC entry → now framing ("$12k → $47k (3.9×)"). Both fields required. ---
+    let mcAtEntryLabel: string | null = null;
+    let mcMultiple: number | null = null;
+    if (b.marketCapUsd != null && Number.isFinite(b.marketCapUsd) && sinceFirst != null) {
+      const mcAtEntry = b.marketCapUsd / (1 + sinceFirst / 100);
+      if (Number.isFinite(mcAtEntry) && mcAtEntry > 0) {
+        mcAtEntryLabel = usdCompact(mcAtEntry);
+        mcMultiple = b.marketCapUsd / mcAtEntry;
+      }
+    }
+
+    // --- ONE safety verdict pill (folds the scattered booleans). ---
+    const safetyReasons: string[] = [];
+    if (mintLive) safetyReasons.push('Mint authority live');
+    if (freezeLive) safetyReasons.push('Freeze authority live');
+    if (noSells) safetyReasons.push('No sells in 24h (honeypot risk)');
+    if (thinLiq) safetyReasons.push(`Thin liq (${(liqMcRatio! * 100).toFixed(1)}% of MC)`);
+    if (lowLiq) safetyReasons.push('Low liquidity');
+    if (whale) safetyReasons.push(`Top holder ${Math.round(b.topHolderPct!)}%`);
+    if (veryNew && ageLabel) safetyReasons.push(`Very new (${ageLabel} old)`);
+    const isDanger = mintLive || freezeLive || noSells || thinLiq || lowLiq;
+    const isCaution = !isDanger && (whale || veryNew);
+    // We only know it's SAFE if both authorities are renounced AND nothing flagged.
+    const verdict: 'safe' | 'caution' | 'danger' | 'unknown' = isDanger
+      ? 'danger'
+      : isCaution
+      ? 'caution'
+      : bothSafe
+      ? 'safe'
+      : 'unknown';
+    const verdictLabel =
+      verdict === 'safe' ? '◆ SAFE'
+      : verdict === 'caution' ? '◆ CAUTION'
+      : verdict === 'danger' ? '◆ DANGER'
+      : '◆ ?';
+    const verdictTitle =
+      safetyReasons.length > 0
+        ? safetyReasons.join(' · ')
+        : verdict === 'safe'
+        ? 'Mint & freeze renounced · no risk flags'
+        : 'Safety data unavailable';
+
+    // --- EXIT SIGNAL (Part B). Render only when a field is present. ---
+    const hasExitData =
+      b.someBuyersExited != null || b.netSolFlow != null || b.smartSellWallets != null;
+    const sellWallets = b.smartSellWallets ?? 0;
+    const isSelling =
+      b.someBuyersExited === true ||
+      (b.netSolFlow != null && b.netSolFlow < 0) ||
+      sellWallets > 0;
+    const isAccumulating = !isSelling && b.netSolFlow != null && b.netSolFlow > 0;
+
+    // --- Conviction one-liner (replaces per-buyer ROI rows; detail in title). ---
+    const leadTierLabel = b.leadTier ? `${b.leadTier}-lead` : b.leadBuyer ? 'lead' : null;
+    const convictionTitle = sample
+      .map((addr, i) => {
+        const bs = buyerStats[i];
+        const t = bs?.tier ?? (tiers[i] ?? null);
+        const roi = bs?.roiPct;
+        const wr = bs?.winRate;
+        const parts = [f.short(addr, 4, 4)];
+        if (t) parts.push(`${t}-tier`);
+        if (roi != null && Number.isFinite(roi)) parts.push(`${roi >= 0 ? '+' : ''}${Math.round(roi)}% ROI`);
+        if (wr != null && Number.isFinite(wr)) parts.push(`${Math.round(wr)}% win`);
+        return parts.join(' ');
+      })
+      .join('\n');
+
     const isSelected = rowIndex === selIdx || (selMint != null && selMint === b.mint && !isChild);
     const earlierCount = !isChild ? group.others.length : 0;
     const expanded = expandedGroups.has(group.primary.mint);
@@ -1695,209 +1740,143 @@ export default function LiveFeed() {
     const isEntering = entering.has(b.id);
     const staggerMs = isEntering ? (entering.get(b.id) ?? 0) * ENTER_STAGGER_MS : 0;
 
+    // --- Trade links: ONE preferred APE button + the rest behind a ⋯ overflow. ---
+    const links = tokenLinks(b.mint, { pairAddress: b.pairAddress ?? undefined });
+    let apeLink = prefTerminal
+      ? links.find((l) => l.kind === 'trade' && l.label.toLowerCase() === prefTerminal.toLowerCase())
+      : undefined;
+    if (!apeLink) apeLink = links.find((l) => l.kind === 'trade');
+    const overflowLinks = links.filter((l) => l !== apeLink);
+
+    // Conviction one-liner: "4 smart · 🥇 S-lead · indep" (red TRAP when crowd faked).
+    const convictionParts: React.ReactNode[] = [];
+    convictionParts.push(
+      <span key="cnt" className="bf-conv-n"><b>{b.buyers}</b> smart</span>
+    );
+    if (leadTierLabel) {
+      convictionParts.push(
+        <span key="lead" className="bf-conv-lead">🥇 {leadTierLabel}</span>
+      );
+    }
+    if (isIndependent) {
+      convictionParts.push(<span key="indep" className="bf-conv-indep">indep</span>);
+    }
+
     const rowEl = (
       <div
         key={b.id}
         id={isChild ? undefined : `bf-${b.mint}`}
-        className={`bf-row${isNew ? ' is-new' : ''}${isSelected ? ' is-selected' : ''}${isChild ? ' bf-row-child' : ''}`}
+        className={`bf-row${isNew ? ' is-new' : ''}${isSelected ? ' is-selected' : ''}${isChild ? ' bf-row-child' : ''}${isLive ? ' is-live' : ' is-ended'}`}
         onClick={() => {
           setSelMint(b.mint);
           setSelIdx(rowIndex);
           router.push(`/token/${b.mint}`);
         }}
       >
-        <div className="stack gap-10" style={{ minWidth: 0 }}>
+        {/* LEFT ZONE — identity + hero %-since + decision signals */}
+        <div className="bf-left" style={{ minWidth: 0 }}>
           <div className="bf-id">
             <TokenMark
               symbol={b.symbol || b.mint}
               icon={b.icon ?? undefined}
               icons={b.icons ?? undefined}
-              size={34}
+              size={30}
             />
             <div className="bf-id-text">
               <div className="bf-ticker-line">
-                <span className="bf-ticker">{symbol}</span>
+                <span
+                  className="bf-ticker"
+                  title={`${b.mint} — click to copy`}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (typeof navigator !== 'undefined' && navigator.clipboard) {
+                      navigator.clipboard.writeText(b.mint).catch(() => {});
+                    }
+                  }}
+                >
+                  {symbol}
+                </span>
                 {b.name && <span className="bf-name">{b.name}</span>}
+                <span className="bf-age">{f.ago(endMs)}</span>
               </div>
-              <div className="bf-meta-line">
-                <span className="bf-mint mono">{f.short(b.mint, 4, 4)}</span>
-                <span className="bf-age">· {f.ago(endMs)}</span>
-              </div>
-            </div>
-            {/* Inline price sparkline + % since first buy (Wave 3) */}
-            {hasSpark && (
-              <div className="bf-spark" title="Price, last ~7d (1h candles)">
-                <Sparkline values={closes} width={84} height={26} color={sparkColor} />
-                {sinceFirst != null && (
+              {/* HERO: % since first buy (the "early or chasing?" signal). */}
+              <div className="bf-decision">
+                {sinceFirst != null ? (
                   <span
-                    className={`bf-since ${sinceFirst >= 0 ? 'pos' : 'neg'}`}
-                    title="Price change since this burst's first buy — still early or gone?"
+                    className={`bf-since-hero ${sinceUp ? 'pos' : 'neg'}`}
+                    title="Price change since this burst's first buy — still early or already gone?"
                   >
-                    {sinceFirst >= 0 ? '▲' : '▼'} {f.pct(sinceFirst)} since first buy
+                    {sinceUp ? '▲' : '▼'} {f.pct(sinceFirst)}
+                  </span>
+                ) : (
+                  <span className="bf-since-hero dim" title="Price change since first buy — awaiting price data">
+                    —
                   </span>
                 )}
-              </div>
-            )}
-          </div>
-
-          <div className="bf-hero">
-            <span className="bf-sol">
-              {f.sol(b.solTotal)}<span className="unit">SOL</span>
-            </span>
-            <span className="bf-wallets">
-              <b>{b.buyers}</b> smart {b.buyers === 1 ? 'wallet' : 'wallets'}
-            </span>
-            {tierSummary && (
-              <span className="bf-tiermix" title="Tiers of the sampled buyers (conviction at a glance)">
-                {tierSummary}
-              </span>
-            )}
-            {velSolMin != null && velSolMin > 0 && (
-              <span className="bf-velocity" title="Buying velocity over the burst window">
-                🔥 {f.sol(velSolMin)}◎/min
-              </span>
-            )}
-          </div>
-
-          {hasSafetyRow && (
-            <div className="bf-badges">
-              {mintLive && (
-                <span className="bf-chip danger" title="Mint authority NOT renounced — dev can mint more supply">
-                  MINT LIVE
-                </span>
-              )}
-              {freezeLive && (
-                <span className="bf-chip danger" title="Freeze authority NOT renounced — possible honeypot">
-                  FREEZE
-                </span>
-              )}
-              {bothSafe && (
-                <span className="bf-chip safe" title="Mint & freeze authorities both renounced">
-                  ✓ safe
-                </span>
-              )}
-              {ageLabel && (
-                <span
-                  className={`bf-chip${veryNew ? ' danger' : ' neutral'}`}
-                  title={veryNew ? 'Very new token — elevated rug risk' : 'Token age'}
-                >
-                  ⏳ {ageLabel} old
-                </span>
-              )}
-              {noSells && (
-                <span className="bf-chip danger" title="Buys but zero sells in 24h — possible honeypot (can't sell)">
-                  NO SELLS
-                </span>
-              )}
-              {thinLiq && (
-                <span
-                  className="bf-chip danger"
-                  title={`Liquidity is ${(liqMcRatio! * 100).toFixed(1)}% of market cap — thin, high rug risk`}
-                >
-                  THIN LIQ
-                </span>
-              )}
-              {lowLiq && (
-                <span className="bf-chip danger" title={`Liquidity under $${LOW_LIQ_USD / 1000}k — high rug risk`}>
-                  LOW LIQ
-                </span>
-              )}
-              {whale && (
-                <span className="bf-chip warn" title="Top holder controls a large share of supply">
-                  WHALE {Math.round(b.topHolderPct!)}%
-                </span>
-              )}
-            </div>
-          )}
-
-          {(b.leadBuyer || b.leadTier || b.smartSetSize != null || isIndependent || isTrap) && (
-            <div className="bf-sub">
-              {(b.leadBuyer || b.leadTier) && (
-                <span className="bf-lead" title={b.leadBuyer ? `First to buy: ${b.leadBuyer}` : 'First wallet to buy'}>
-                  🥇 lead{b.leadTier ? `: ${b.leadTier}-tier` : ''}
-                </span>
-              )}
-              {b.smartSetSize != null && b.smartSetSize > 0 && (
-                <span title="Share of the known smart-wallet set that bought">
-                  {b.buyers} of ~{b.smartSetSize} smart in ({Math.round((b.buyers / b.smartSetSize) * 100)}%)
-                </span>
-              )}
-              {isIndependent && (
-                <span className="bf-indep" title="Wallet count ≈ entity count — a genuine independent crowd">
-                  {b.buyers} independent
-                </span>
-              )}
-              {isTrap && (
-                <span className="bf-trap" title="Many wallets map to few entities — likely one actor faking a crowd">
-                  TRAP · {b.buyerWallets}w / {b.buyers}e
-                </span>
-              )}
-            </div>
-          )}
-
-          {(mcap || liq || vol || (chg != null && Number.isFinite(chg)) || durLabel) && (
-            <div className="bf-metrics">
-              {mcap && (
-                <div className="bf-metric">
-                  <span className="k">MC{tier ? ` · ${tier}` : ''}</span>
-                  <span className="v">{mcap}</span>
-                </div>
-              )}
-              {liq && (
-                <div className="bf-metric">
-                  <span className="k">Liq</span>
-                  <span className="v">{liq}</span>
-                </div>
-              )}
-              {vol && (
-                <div className="bf-metric">
-                  <span className="k">Vol 24h</span>
-                  <span className="v">{vol}</span>
-                </div>
-              )}
-              {chg != null && Number.isFinite(chg) && (
-                <div className="bf-metric">
-                  <span className="k">24h</span>
-                  <span className={`v ${chg >= 0 ? 'pos' : 'neg'}`}>{f.pct(chg)}</span>
-                </div>
-              )}
-              {durLabel && (
-                <div className="bf-metric">
-                  <span className="k">Span</span>
-                  <span className="v dim">{durLabel}</span>
-                </div>
-              )}
-            </div>
-          )}
-
-          {sample.length > 0 && (
-            <div className="bf-buyers">
-              {sample.map((addr, i) => {
-                const bs = buyerStats[i];
-                const roi = bs?.roiPct;
-                const t = bs?.tier ?? (tiers[i] ?? null);
-                const wr = bs?.winRate;
-                const roiLabel =
-                  roi != null && Number.isFinite(roi)
-                    ? `${roi >= 0 ? '+' : ''}${Math.round(roi)}%`
-                    : null;
-                return (
-                  <span key={addr} className="bf-buyer">
-                    <AddrChip address={addr} />
-                    {t && <TierBadge tier={t} />}
-                    {roiLabel && (
-                      <span
-                        className={`bf-roi ${roi! >= 0 ? 'pos' : 'neg'}`}
-                        title={wr != null && Number.isFinite(wr) ? `Win rate ${Math.round(wr)}%` : 'Historical ROI'}
-                      >
-                        {roiLabel}
-                      </span>
+                {/* MC entry → now framing. */}
+                {mcAtEntryLabel && mcap ? (
+                  <span className="bf-mc-flow" title="Market cap at the burst's first buy → now">
+                    {mcAtEntryLabel} → {mcap}
+                    {mcMultiple != null && Number.isFinite(mcMultiple) && mcMultiple >= 1.05 && (
+                      <span className="bf-mc-mult"> ({mcMultiple.toFixed(1)}×)</span>
                     )}
                   </span>
-                );
-              })}
+                ) : mcap ? (
+                  <span className="bf-mc-flow" title="Current market cap">{mcap}</span>
+                ) : null}
+              </div>
             </div>
-          )}
+          </div>
+
+          {/* DECISION ROW: safety verdict + exit signal + conviction one-liner */}
+          <div className="bf-signals">
+            <span
+              className={`bf-verdict ${verdict}`}
+              title={verdictTitle}
+            >
+              {verdictLabel}
+            </span>
+
+            {/* EXIT SIGNAL (Part B) — only when the fields are present. */}
+            {hasExitData && isSelling && (
+              <span
+                className="bf-flow sell"
+                title={[
+                  b.someBuyersExited === true ? 'A buyer flipped to selling' : null,
+                  b.netSolFlow != null && b.netSolFlow < 0 ? `Net flow ${f.sol(b.netSolFlow)}◎ (distributing)` : null,
+                  sellWallets > 0 ? `${sellWallets} smart wallet${sellWallets === 1 ? '' : 's'} sold in-window` : null,
+                ].filter(Boolean).join(' · ')}
+              >
+                ⚠ {sellWallets > 0 ? `SELLING — ${sellWallets} exited` : 'DISTRIBUTING'}
+              </span>
+            )}
+            {hasExitData && isAccumulating && (
+              <span
+                className="bf-flow accum"
+                title={`Net flow +${f.sol(b.netSolFlow!)}◎ — buyers accumulating`}
+              >
+                accumulating
+              </span>
+            )}
+            {isTrap && (
+              <span className="bf-trap" title="Many wallets map to few entities — likely one actor faking a crowd">
+                ⚠ TRAP {b.buyerWallets}w/{b.buyers}e
+              </span>
+            )}
+
+            {/* Conviction one-liner (per-wallet detail in the title tooltip). */}
+            {!isTrap && (
+              <span className="bf-conv" title={convictionTitle || undefined}>
+                {convictionParts.map((p, i) => (
+                  <span key={i} className="bf-conv-seg">
+                    {i > 0 && <span className="bf-conv-dot">·</span>}
+                    {p}
+                  </span>
+                ))}
+              </span>
+            )}
+          </div>
 
           {/* "+N earlier" affordance — collapse repeated bursts per token (Wave 3) */}
           {earlierCount > 0 && (
@@ -1922,35 +1901,72 @@ export default function LiveFeed() {
           )}
         </div>
 
+        {/* RIGHT ZONE — sparkline (line 1) + status + execution */}
         <div className="bf-right">
           <div className="bf-right-top">
+            {hasSpark && (
+              <span className="bf-spark-inline" title="Price, last ~7d (1h candles)">
+                <Sparkline values={closes} width={72} height={22} color={sparkColor} />
+              </span>
+            )}
             {isLive ? (
               <span className="bf-status live" title="This burst is still being added to">
-                <span className="dot" aria-hidden /> Live
+                <span className="dot" aria-hidden /> LIVE
               </span>
             ) : (
               <span className="bf-status ended" title={`Burst ended ${f.ago(endMs)}`}>
-                ended
+                ENDED
               </span>
             )}
-            <ShareButton burst={b} symbol={symbol} />
             <BurstWatchStar mint={b.mint} />
           </div>
-          {(prefSize != null || b.suggestedSizeSol != null) && (
-            <span className="bf-size-hint" title="Suggested starting size — a hint, not advice">
-              {prefSize != null
-                ? `your ${f.sol(prefSize)}◎`
-                : `suggested ${f.sol(b.suggestedSizeSol)}◎`}
+
+          {/* Secondary metrics — demoted SOL total + your size pref (hover/quiet). */}
+          <div className="bf-right-meta">
+            <span className="bf-sol-sm" title="Total SOL committed across the burst">
+              {f.sol(b.solTotal)}◎
             </span>
-          )}
-          <div className="bf-actions">
-            <TradeLinks
-              mint={b.mint}
-              size="xs"
-              primary
-              preferred={prefTerminal ?? undefined}
-              pairAddress={b.pairAddress ?? undefined}
-            />
+            {prefSize != null && (
+              <span className="bf-size-hint" title="Your default position size">
+                · you {f.sol(prefSize)}◎
+              </span>
+            )}
+          </div>
+
+          <div className="bf-actions" onClick={(e) => e.stopPropagation()}>
+            {apeLink && (
+              <a
+                className={`btn primary sm trade-primary bf-ape${isLive ? '' : ' ghost'}`}
+                style={{ textDecoration: 'none' }}
+                href={apeLink.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={`Trade on ${apeLink.label} — one tap`}
+              >
+                Ape · {apeLink.label}
+              </a>
+            )}
+            {overflowLinks.length > 0 && (
+              <details className="bf-overflow">
+                <summary className="bf-overflow-btn" title="More terminals & explorers" aria-label="More trade links">⋯</summary>
+                <div className="bf-overflow-menu">
+                  {overflowLinks.map((l) => (
+                    <a
+                      key={l.label}
+                      className={`badge ${l.kind === 'trade' ? 'accent' : 'tag'}`}
+                      style={{ textDecoration: 'none' }}
+                      href={l.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title={`Open in ${l.label}`}
+                    >
+                      {l.label}
+                    </a>
+                  ))}
+                  <ShareButton burst={b} symbol={symbol} />
+                </div>
+              </details>
+            )}
           </div>
         </div>
       </div>

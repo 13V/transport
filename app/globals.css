@@ -706,19 +706,19 @@ pre.code .c { color: var(--text-4); }
   position: relative;
   display: grid;
   grid-template-columns: 1fr auto;
-  gap: 14px 18px;
-  align-items: start;
-  padding: 12px 16px;
+  gap: 8px 18px;
+  align-items: center;
+  padding: 10px 16px 10px 18px;
   border: 1px solid var(--border);
   border-radius: var(--r);
   background: var(--surface);
   cursor: pointer;
-  transition: border-color .14s ease, background .14s ease, box-shadow .14s ease;
+  transition: border-color .14s ease, background .14s ease, box-shadow .14s ease, opacity .14s ease;
 }
 .bf-row:hover {
   background: var(--surface-2);
   border-color: var(--border-strong);
-  box-shadow: inset 2px 0 0 var(--accent-line);
+  box-shadow: inset 3px 0 0 var(--accent-line);
 }
 /* Newly-arrived bursts: accent rail + gentle fade-in. */
 .bf-row.is-new { box-shadow: inset 2px 0 0 var(--accent); animation: lf-fade-in .6s ease-out; }
@@ -1113,6 +1113,161 @@ pre.code .c { color: var(--text-4); }
   /* Sparkline stacks under the identity on phones to keep the row tidy. */
   .bf-spark { margin-left: 0; align-items: flex-start; }
   .bf-row-child { margin-left: 8px; }
+}
+
+/* =========================================================================
+   LIVE FEED — DENSITY REDESIGN (≤96px desktop / ≤64px compact). Two-zone grid:
+   left (identity + hero %-since + decision signals) / right (spark + exec).
+   Rule: at most TWO saturated colors per card — price move + risk; everything
+   else uses --text/--text-2/--text-3. New prefixes: .bf-left, .bf-decision,
+   .bf-since-hero, .bf-mc-flow, .bf-verdict, .bf-flow, .bf-conv, .bf-overflow,
+   .bf-row.is-ended / .is-live. Builds on the existing .bf-* system.
+   ========================================================================= */
+
+/* LEFT ZONE — vertical stack of identity / hero / signals. */
+.bf-left { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+
+/* Identity line: avatar + ticker + name + age. */
+.bf-id { gap: 9px; align-items: center; }
+.bf-ticker { cursor: pointer; }
+.bf-ticker:hover { color: var(--accent-hover); }
+.bf-ticker-line .bf-age {
+  margin-left: auto; font-size: 10.5px; color: var(--text-3); white-space: nowrap; flex-shrink: 0;
+}
+
+/* HERO line: % since first buy (22px green/red) + MC entry→now framing. */
+.bf-decision { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-top: 1px; }
+.bf-since-hero {
+  font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+  font-size: 22px; font-weight: 800; line-height: 1; letter-spacing: -0.02em;
+}
+.bf-since-hero.pos { color: var(--pos); }
+.bf-since-hero.neg { color: var(--neg); }
+.bf-since-hero.dim { color: var(--text-3); font-weight: 700; }
+.bf-mc-flow {
+  font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+  font-size: 11.5px; font-weight: 600; color: var(--text-2); white-space: nowrap;
+}
+.bf-mc-mult { color: var(--text-3); }
+
+/* DECISION ROW: ONE safety verdict pill + exit signal + conviction one-liner. */
+.bf-signals { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* ONE safety verdict pill (folds the 7 scattered chips). */
+.bf-verdict {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 19px; padding: 0 8px; border-radius: var(--r-sm);
+  font-size: 10px; font-weight: 800; letter-spacing: .04em;
+  border: 1px solid var(--border); background: var(--surface-3); color: var(--text-3);
+  white-space: nowrap; cursor: help;
+}
+.bf-verdict.safe    { background: var(--pos-soft); color: var(--pos); border-color: var(--pos-ring); }
+.bf-verdict.caution { background: var(--bf-amber-soft); color: var(--bf-amber); border-color: var(--bf-amber-ring); }
+.bf-verdict.danger  { background: var(--neg-soft); color: var(--neg); border-color: var(--neg-ring); }
+.bf-verdict.unknown { background: var(--surface-3); color: var(--text-3); border-color: var(--border); }
+
+/* EXIT SIGNAL chip (Part B): red selling / amber distributing / subtle accumulating. */
+.bf-flow {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 19px; padding: 0 8px; border-radius: var(--r-sm);
+  font-size: 10px; font-weight: 800; letter-spacing: .03em; white-space: nowrap; cursor: help;
+}
+.bf-flow.sell  { background: var(--neg-soft); color: var(--neg); border: 1px solid var(--neg-ring); }
+.bf-flow.accum {
+  background: transparent; color: var(--pos); border: 1px solid transparent;
+  font-weight: 650; font-size: 10.5px; letter-spacing: 0;
+}
+
+/* Conviction one-liner ("4 smart · 🥇 S-lead · indep"); detail in title tooltip. */
+.bf-conv { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-3); cursor: help; }
+.bf-conv-seg { display: inline-flex; align-items: center; gap: 6px; }
+.bf-conv-dot { color: var(--text-4); }
+.bf-conv-n b { color: var(--text); font-weight: 700; }
+.bf-conv-lead { color: var(--text-2); }
+.bf-conv-indep { color: var(--text-2); }
+
+/* RIGHT ZONE — sparkline + status (line 1), demoted SOL/size, execution. */
+.bf-right { gap: 7px; }
+.bf-right-top { align-items: center; gap: 9px; }
+.bf-spark-inline { display: inline-flex; align-items: center; }
+.bf-right-meta {
+  display: flex; align-items: baseline; gap: 4px; justify-content: flex-end;
+  font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 11px;
+}
+.bf-sol-sm { color: var(--text-2); font-weight: 650; }
+.bf-right-meta .bf-size-hint { color: var(--text-3); }
+
+/* APE button + ⋯ overflow. Keep the APE always visible. */
+.bf-actions { gap: 6px; align-items: center; }
+.bf-ape { white-space: nowrap; }
+/* ENDED demotes the APE to a quiet ghost. */
+.bf-ape.ghost {
+  background: transparent; border: 1px solid var(--border-strong);
+  color: var(--text-2); box-shadow: none;
+}
+.bf-ape.ghost:hover { background: var(--surface-2); color: var(--text); }
+
+.bf-overflow { position: relative; }
+.bf-overflow > summary { list-style: none; }
+.bf-overflow > summary::-webkit-details-marker { display: none; }
+.bf-overflow-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border-radius: var(--r-sm);
+  border: 1px solid var(--border); background: var(--surface-3); color: var(--text-2);
+  font-size: 15px; font-weight: 700; cursor: pointer; user-select: none;
+}
+.bf-overflow-btn:hover { color: var(--text); border-color: var(--border-strong); }
+.bf-overflow[open] > summary .bf-overflow-btn,
+.bf-overflow[open] > .bf-overflow-btn { border-color: var(--accent-line); color: var(--text); }
+.bf-overflow-menu {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 30;
+  display: flex; flex-direction: column; align-items: stretch; gap: 6px;
+  padding: 8px; min-width: 132px;
+  background: var(--surface-4); border: 1px solid var(--border-strong);
+  border-radius: var(--r); box-shadow: var(--shadow-lg);
+}
+.bf-overflow-menu a.badge { justify-content: flex-start; height: 26px; }
+
+/* ENDED is STRUCTURAL: dim the whole card + grey rail; LIVE = green pulsing rail. */
+.bf-row.is-live { box-shadow: inset 3px 0 0 var(--pos-ring); }
+.bf-row.is-live:hover { box-shadow: inset 3px 0 0 var(--accent-line); }
+.bf-row.is-live::before {
+  content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 3px;
+  border-radius: 0 3px 3px 0; background: var(--pos);
+  animation: bf-rail-pulse 1.8s ease-in-out infinite;
+}
+.bf-row.is-ended { opacity: 0.65; }
+.bf-row.is-ended::before {
+  content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 3px;
+  border-radius: 0 3px 3px 0; background: var(--text-4);
+}
+.bf-row.is-ended:hover { opacity: 0.82; }
+@keyframes bf-rail-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .35; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bf-row.is-live::before { animation: none; }
+}
+
+/* COMPACT density (≤64px): collapse the hero + signals onto fewer lines. */
+.bf-list.compact .bf-row { padding: 6px 14px 6px 16px; gap: 5px 14px; }
+.bf-list.compact .bf-since-hero { font-size: 18px; }
+.bf-list.compact .bf-left { gap: 3px; }
+.bf-list.compact .bf-decision { gap: 9px; }
+
+/* MOBILE (≤640px): keep safety verdict + %-since + APE always visible; defer the
+   rest behind the existing sticky ape bar / overflow. Two-zone collapses to a
+   single column but the right zone stays inline-ish for the spark + status. */
+@media (max-width: 640px) {
+  .bf-row { grid-template-columns: 1fr; gap: 8px; padding: 12px 14px; }
+  .bf-right { align-items: stretch; }
+  .bf-right-top { justify-content: space-between; }
+  .bf-right-meta { justify-content: flex-start; }
+  .bf-actions { justify-content: flex-start; }
+  .bf-overflow-menu { right: auto; left: 0; }
+  .bf-since-hero { font-size: 24px; }
+  .bf-name { max-width: 120px; }
 }
 
 .toast {
