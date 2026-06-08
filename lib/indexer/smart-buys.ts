@@ -18,7 +18,7 @@
 
 import { getSupabase, isSupabaseConfigured } from '../supabase-client';
 import { fetchTokenPricesSol } from '../prices/price-oracle';
-import { getSmartCriteria, isSmartWallet } from './curation';
+import { getBroadSmartCriteria, isSmartWallet } from './curation';
 import { buildClusters } from './clusters';
 
 export interface SmartBuyToken {
@@ -145,7 +145,8 @@ export async function getSmartMoneyBuys(
 
   try {
     const supabase = getSupabase();
-    const criteria = getSmartCriteria();
+    // INCLUSION uses the BROAD gate so more smart wallets feed the buy flow.
+    const criteria = getBroadSmartCriteria();
     const now = Date.now();
 
     // 1. Resolve the smart-wallet set. Only verified (deep-scanned) wallets have

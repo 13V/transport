@@ -32,11 +32,16 @@ export interface LinkTrackingOptions {
 
 export async function runLinkTracking(opts: LinkTrackingOptions = {}): Promise<LinkTrackingResult> {
   const start = Date.now();
-  const maxWallets = opts.maxWallets ?? envInt('LINK_MAX_WALLETS', 20);
+  // Per-run caps raised to process MORE winners and discover MORE funded wallets
+  // each run (a cheap discovery multiplier). All env-overridable. Helius spend
+  // stays bounded by the daily credit circuit-breaker (guardHeliusPage in
+  // wallet-links.ts) AND by timeBudgetMs, so raising these can only widen
+  // coverage WITHIN the existing budget, never blow past it.
+  const maxWallets = opts.maxWallets ?? envInt('LINK_MAX_WALLETS', 60);
   const minSol = opts.minSol ?? Number(process.env.LINK_MIN_SOL ?? 0.5);
   const maxTxsPerWallet = opts.maxTxsPerWallet ?? envInt('LINK_MAX_TXS', 500);
-  const maxLinksPerWallet = opts.maxLinksPerWallet ?? envInt('LINK_MAX_TARGETS', 50);
-  const timeBudgetMs = opts.timeBudgetMs ?? envInt('LINK_TIME_BUDGET_MS', 50_000);
+  const maxLinksPerWallet = opts.maxLinksPerWallet ?? envInt('LINK_MAX_TARGETS', 100);
+  const timeBudgetMs = opts.timeBudgetMs ?? envInt('LINK_TIME_BUDGET_MS', 55_000);
 
   const blank = (error?: string): LinkTrackingResult => ({
     ok: !error,

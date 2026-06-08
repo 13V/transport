@@ -19,7 +19,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabase, isSupabaseConfigured } from '../../../../../lib/supabase-client';
-import { getSmartCriteria, isSmartWallet } from '../../../../../lib/indexer/curation';
+import { getBroadSmartCriteria, isSmartWallet } from '../../../../../lib/indexer/curation';
 import { tierFromScore } from '../../../../../lib/format';
 import { getTokenMeta } from '../../../../../lib/token-meta';
 import { fetchTokenPricesSol } from '../../../../../lib/prices/price-oracle';
@@ -69,7 +69,8 @@ export async function GET(
 
   try {
     const supabase = getSupabase();
-    const criteria = getSmartCriteria();
+    // INCLUSION uses the BROAD gate so the smart-holders list matches the buying feed.
+    const criteria = getBroadSmartCriteria();
     const now = Date.now();
 
     // 1. Resolve the smart-wallet set — identical definition to the buying feed.

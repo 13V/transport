@@ -72,6 +72,12 @@ const DEFAULT_MIN_PROFIT_FACTOR = 0;
 const DEFAULT_SUSPECT_WIN_RATE = 0.95;
 const DEFAULT_SUSPECT_MIN_EVENTS = 30;
 
+function bool(name: string, fallback: boolean): boolean {
+  const v = process.env[name];
+  if (v == null || v === '') return fallback;
+  return v === '1' || v.toLowerCase() === 'true';
+}
+
 export function getSmartCriteria(): SmartCriteria {
   return {
     // ROI must be a real, non-trivial edge — not "up 0.01%".
@@ -99,6 +105,65 @@ export function getSmartCriteria(): SmartCriteria {
     suspectMinEvents: num('SMART_SUSPECT_MIN_EVENTS', DEFAULT_SUSPECT_MIN_EVENTS),
     maxIdleDays: num('SMART_MAX_IDLE_DAYS', 90),
   };
+}
+
+/**
+ * BROAD ("A") SMART TIER — a second, looser inclusion gate that surfaces many
+ * more smart wallets WITHOUT diluting the elite "S" set or letting bots in.
+ *
+ * It loosens ONLY the size/edge thresholds (ROI%, PnL, invested, trades, tokens)
+ * via separate SMART2_* env vars; the anti-bot / anti-fraud safety gates
+ * (suspectWinRate 0.95, suspectMinEvents 30, bot filter, maxIdleDays 90, plus
+ * minConsistency/minProfitFactor) are kept IDENTICAL to the strict gate so the
+ * broad tier is wider but no less safe.
+ *
+ * KILL-SWITCH: SMART_TIERS_ENABLED (default '1'/true). When disabled, this
+ * returns the strict criteria verbatim — so broad == strict == the original
+ * single-tier behavior, an instant, deploy-free rollback.
+ */
+export function getBroadSmartCriteria(): SmartCriteria {
+  const strict = getSmartCriteria();
+  // Kill-switch off → broad collapses to strict (single-tier behavior restored).
+  if (!bool('SMART_TIERS_ENABLED', true)) return strict;
+  return {
+    // Looser size/edge thresholds (the only knobs that change vs strict).
+    minRoiPct: num('SMART2_MIN_ROI_PCT', 15),
+    minPnlSol: num('SMART2_MIN_PNL_SOL', 0.5),
+    minInvestedSol: num('SMART2_MIN_INVESTED_SOL', 2),
+    minTrades: num('SMART2_MIN_TRADES', 15),
+    minTokens: num('SMART2_MIN_TOKENS', 8),
+    // IDENTICAL safety / edge gates to the strict tier (anti-bot, anti-fraud).
+    maxWinRate: strict.maxWinRate,
+    minConsistency: strict.minConsistency,
+    minProfitFactor: strict.minProfitFactor,
+    suspectWinRate: strict.suspectWinRate,
+    suspectMinEvents: strict.suspectMinEvents,
+    maxIdleDays: strict.maxIdleDays,
+  };
+}
+
+/**
+ * Coarse smart TIER for a wallet:
+ *   'S' — clears the strict elite gate (getSmartCriteria).
+ *   'A' — clears only the broad gate (getBroadSmartCriteria), not the elite one.
+ *   null — not smart under either gate.
+ * Note: when SMART_TIERS_ENABLED is off, broad == strict, so every smart wallet
+ * is 'S' and 'A' never appears (matching the original single-tier behavior).
+ */
+export function smartTier(s: CuratableStat, now: number = Date.now()): 'S' | 'A' | null {
+  if (isSmartWallet(s, getSmartCriteria(), now)) return 'S';
+  if (isSmartWallet(s, getBroadSmartCriteria(), now)) return 'A';
+  return null;
+}
+
+/**
+ * Whether a wallet clears the BROAD (inclusion) smart gate. This is the gate the
+ * product uses to decide "is this wallet in the smart set" — S and A tiers both
+ * pass. Use smartTier() when the caller needs to distinguish elite (S) from
+ * broad-only (A).
+ */
+export function isSmartBroad(s: CuratableStat, now: number = Date.now()): boolean {
+  return isSmartWallet(s, getBroadSmartCriteria(), now);
 }
 
 /** The fields curation needs; works for both DB rows and computed stats. */

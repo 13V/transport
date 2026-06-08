@@ -1,4 +1,10 @@
-import { isSmartWallet, getSmartCriteria } from '../indexer/curation';
+import {
+  isSmartWallet,
+  getSmartCriteria,
+  getBroadSmartCriteria,
+  isSmartBroad,
+  smartTier,
+} from '../indexer/curation';
 import type { CuratableStat, SmartCriteria } from '../indexer/curation';
 
 const NOW = new Date('2026-06-05T00:00:00Z').getTime();
@@ -111,5 +117,111 @@ describe('isSmartWallet', () => {
     const c = getSmartCriteria();
     expect(c).toEqual(baseCriteria);
     process.env = saved;
+  });
+});
+
+describe('broad smart tier (SMART2_* / getBroadSmartCriteria / smartTier / isSmartBroad)', () => {
+  // Env keys that influence either tier — cleared around each test so defaults apply.
+  const TIER_ENV = [
+    'SMART_TIERS_ENABLED',
+    'SMART2_MIN_ROI_PCT',
+    'SMART2_MIN_PNL_SOL',
+    'SMART2_MIN_INVESTED_SOL',
+    'SMART2_MIN_TRADES',
+    'SMART2_MIN_TOKENS',
+    'SMART_MIN_ROI_PCT',
+    'SMART_MIN_PNL_SOL',
+    'SMART_MIN_INVESTED_SOL',
+    'SMART_MIN_TRADES',
+    'SMART_MIN_TOKENS',
+    'SMART_SUSPECT_WIN_RATE',
+    'SMART_SUSPECT_MIN_EVENTS',
+    'SMART_ALLOW_BOTS',
+  ];
+  let saved: NodeJS.ProcessEnv;
+  beforeEach(() => {
+    saved = { ...process.env };
+    for (const k of TIER_ENV) delete process.env[k];
+  });
+  afterEach(() => {
+    process.env = saved;
+  });
+
+  it('getBroadSmartCriteria has the documented looser size defaults + identical safety gates', () => {
+    const broad = getBroadSmartCriteria();
+    const strict = getSmartCriteria();
+    // Looser size/edge thresholds.
+    expect(broad.minRoiPct).toBe(15);
+    expect(broad.minPnlSol).toBe(0.5);
+    expect(broad.minInvestedSol).toBe(2);
+    expect(broad.minTrades).toBe(15);
+    expect(broad.minTokens).toBe(8);
+    // IDENTICAL anti-bot / anti-fraud gates.
+    expect(broad.suspectWinRate).toBe(strict.suspectWinRate);
+    expect(broad.suspectMinEvents).toBe(strict.suspectMinEvents);
+    expect(broad.maxIdleDays).toBe(strict.maxIdleDays);
+    expect(broad.minConsistency).toBe(strict.minConsistency);
+    expect(broad.minProfitFactor).toBe(strict.minProfitFactor);
+    expect(broad.maxWinRate).toBe(strict.maxWinRate);
+  });
+
+  it('kill-switch SMART_TIERS_ENABLED=0 makes broad == strict (single-tier rollback)', () => {
+    process.env.SMART_TIERS_ENABLED = '0';
+    expect(getBroadSmartCriteria()).toEqual(getSmartCriteria());
+    // With broad==strict, an A-only wallet no longer qualifies.
+    const aOnly = goodStat({ roiPct: 20, realizedPnl: 1, investedSol: 3, totalTrades: 20, tokensTraded: 8 });
+    expect(isSmartBroad(aOnly, NOW)).toBe(false);
+    expect(smartTier(aOnly, NOW)).toBeNull();
+  });
+
+  it('smartTier: elite wallet is S', () => {
+    expect(smartTier(goodStat(), NOW)).toBe('S');
+    expect(isSmartBroad(goodStat(), NOW)).toBe(true);
+  });
+
+  it('smartTier: broad-but-not-elite wallet is A (passes broad, fails strict)', () => {
+    // ROI 20 (<30 strict, >=15 broad), PnL 1 (<2 strict, >=0.5 broad),
+    // invested 3 (<5 strict, >=2 broad), 20 trades (<30 strict, >=15 broad),
+    // 8 tokens (<10 strict, >=8 broad).
+    const a = goodStat({ roiPct: 20, realizedPnl: 1, investedSol: 3, totalTrades: 20, tokensTraded: 8 });
+    expect(isSmartWallet(a, getSmartCriteria(), NOW)).toBe(false); // fails strict
+    expect(isSmartBroad(a, NOW)).toBe(true); // passes broad
+    expect(smartTier(a, NOW)).toBe('A');
+  });
+
+  it('smartTier: wallet below even the broad floor is null', () => {
+    const tooLow = goodStat({ roiPct: 5, realizedPnl: 0.1, investedSol: 1, totalTrades: 5, tokensTraded: 2 });
+    expect(isSmartBroad(tooLow, NOW)).toBe(false);
+    expect(smartTier(tooLow, NOW)).toBeNull();
+  });
+
+  it('broad tier STILL rejects suspect win-rate (≥0.95 over a large sample)', () => {
+    // Clears every broad size floor but has a suspiciously perfect win rate over
+    // a large realized sample — the broad tier keeps the SAME suspect gate.
+    const suspect = goodStat({
+      roiPct: 20,
+      realizedPnl: 1,
+      investedSol: 3,
+      totalTrades: 40,
+      tokensTraded: 8,
+      winRate: 0.98,
+      realizedEvents: 40,
+    });
+    expect(isSmartBroad(suspect, NOW)).toBe(false);
+    expect(smartTier(suspect, NOW)).toBeNull();
+  });
+
+  it('broad tier STILL rejects likely bots', () => {
+    // High trade count, tiny tokens-traded, near-zero avg trade size → bot-like.
+    // This pattern is rejected by detectBot regardless of tier.
+    const bot = goodStat({
+      roiPct: 20,
+      realizedPnl: 1,
+      investedSol: 0.01,
+      totalTrades: 5000,
+      tokensTraded: 8,
+      winRate: 0.5,
+    });
+    expect(isSmartBroad(bot, NOW)).toBe(false);
   });
 });
