@@ -104,6 +104,9 @@ async function runBurstAlerts(touchedMints: string[]): Promise<void> {
     const minBuyers = envInt('ALERT_BURST_MIN_BUYERS', 4);
     const minSol = envNum('ALERT_BURST_MIN_SOL', 5);
     const requireS = process.env.ALERT_BURST_REQUIRE_S !== '0';
+    // Burst window (env-configurable; smart money trickles in over minutes, so a
+    // 30s window essentially never fired). Shared by the detect call and labels.
+    const windowSec = envInt('BURST_WINDOW_SEC', 180);
     const cooldownMin = envInt('ALERT_BURST_COOLDOWN_MIN', 30);
     const cooldownMs = cooldownMin * 60_000;
     const now = Date.now();
@@ -117,7 +120,7 @@ async function runBurstAlerts(touchedMints: string[]): Promise<void> {
     const { buy: bursts, sell: sellBursts } = await detectBurstsForMintsBothSides(
       mints,
       {
-        windowSec: 30,
+        windowSec,
         minBuyBuyers: minBuyers,
         // Detect at the sell gate's entity threshold; if sell alerts are
         // disabled we still pass a sane default but skip the path entirely below.
@@ -168,7 +171,7 @@ async function runBurstAlerts(touchedMints: string[]): Promise<void> {
         : '';
       const text =
         `🚨 <b>${escapeHtml(symbol)}</b> — ${b.buyers} smart wallets (${escapeHtml(mix)}) ` +
-        `bought ${fmtSol(b.solTotal)} SOL within 30s` +
+        `bought ${fmtSol(b.solTotal)} SOL within ${windowSec}s` +
         `\n<code>${escapeHtml(mint)}</code>` +
         link;
 
@@ -191,7 +194,7 @@ async function runBurstAlerts(touchedMints: string[]): Promise<void> {
       try {
         await sendWebPushToAll({
           title: `🚨 ${symbol}`,
-          body: `${b.buyers} smart wallets bought ${fmtSol(b.solTotal)} SOL in 30s`,
+          body: `${b.buyers} smart wallets bought ${fmtSol(b.solTotal)} SOL in ${windowSec}s`,
           url: `/token/${mint}`,
         });
       } catch (error) {
@@ -223,6 +226,9 @@ async function runSellBurstAlerts(bursts: LiveBurst[], now: number): Promise<voi
   try {
     const minEntities = envInt('ALERT_SELL_MIN_ENTITIES', 3);
     const minSol = envNum('ALERT_SELL_MIN_SOL', 5);
+    // Same env-configurable window as the buy path (the bursts were detected at
+    // this window by the coalesced scan) so the labels stay accurate.
+    const windowSec = envInt('BURST_WINDOW_SEC', 180);
     const cooldownMin = envInt('ALERT_SELL_COOLDOWN_MIN', 30);
     const cooldownMs = cooldownMin * 60_000;
 
@@ -257,7 +263,7 @@ async function runSellBurstAlerts(bursts: LiveBurst[], now: number): Promise<voi
         : '';
       const text =
         `🔴 <b>Smart money EXITING ${escapeHtml(symbol)}</b> — ${b.buyers} entities ` +
-        `sold ${fmtSol(b.solTotal)} SOL in 30s` +
+        `sold ${fmtSol(b.solTotal)} SOL in ${windowSec}s` +
         `\n<code>${escapeHtml(mint)}</code>` +
         link;
 
@@ -274,7 +280,7 @@ async function runSellBurstAlerts(bursts: LiveBurst[], now: number): Promise<voi
       try {
         await sendWebPushToAll({
           title: `🔴 Smart money exiting ${symbol}`,
-          body: `${b.buyers} entities sold ${fmtSol(b.solTotal)} SOL in 30s`,
+          body: `${b.buyers} entities sold ${fmtSol(b.solTotal)} SOL in ${windowSec}s`,
           url: `/token/${mint}`,
         });
       } catch (error) {

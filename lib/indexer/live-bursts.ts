@@ -30,6 +30,7 @@ import { buildClusters } from './clusters';
 import { tierFromScore } from '../format';
 import { readSnapshot, writeSnapshot } from './smart-set-cache';
 import { envInt } from './env';
+import { fetchAllRows } from '../db-paginate';
 
 export interface LiveBurst {
   /**
@@ -430,10 +431,19 @@ async function resolveSmartSet(): Promise<SmartSet> {
     // passed as null — the suspect-win-rate rule then falls back to totalTrades.
     const statCols =
       'wallet, score, realized_pnl, roi_pct, invested_sol, win_rate, total_trades, tokens_traded, last_trade_at, seeded, profit_factor, consistency';
-    const statRead = await supabase
-      .from('wallet_stats')
-      .select(statCols)
-      .eq('verified', true);
+    // PostgREST caps a single response at ~1000 rows, so a bare select silently
+    // clamps the verified set to ~1k once it grows past that — starving the live
+    // feed/alerts of the full broadened smart set. Page through with .range()
+    // (stable .order('score') so pagination is deterministic) up to a sane cap.
+    const statRead = await fetchAllRows(
+      () =>
+        supabase
+          .from('wallet_stats')
+          .select(statCols)
+          .eq('verified', true)
+          .order('score', { ascending: false }),
+      { cap: envInt('SMART_SET_MAX', 5000) }
+    );
 
     if (statRead.error || !statRead.data) return empty;
 
@@ -766,7 +776,7 @@ export async function getLiveBursts(opts: {
   hours?: number;
   limit?: number;
 }): Promise<LiveBurstsResult> {
-  const windowSec = opts.windowSec ?? 30;
+  const windowSec = opts.windowSec ?? envInt('BURST_WINDOW_SEC', 180);
   const minBuyers = opts.minBuyers ?? 3;
   const hours = opts.hours ?? 6;
   const limit = opts.limit ?? 50;
@@ -929,7 +939,7 @@ export async function detectBurstsForMintsBothSides(
     minSellEntities?: number;
   }
 ): Promise<{ buy: LiveBurst[]; sell: LiveBurst[] }> {
-  const windowSec = opts?.windowSec ?? 30;
+  const windowSec = opts?.windowSec ?? envInt('BURST_WINDOW_SEC', 180);
   const lookbackMs = opts?.lookbackMs ?? 5 * 60 * 1000;
   const minBuyBuyers = opts?.minBuyBuyers ?? 3;
   const minSellEntities = opts?.minSellEntities ?? 3;

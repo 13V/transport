@@ -30,6 +30,7 @@ import { NextRequest } from 'next/server';
 import { buildLiveFeed } from '../../../../../lib/indexer/live-feed';
 import type { LiveBurst } from '../../../../../lib/indexer/live-bursts';
 import { rateLimit, concurrencyLimit, clientIp } from '../../../../../lib/rate-limit';
+import { envInt } from '../../../../../lib/indexer/env';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
@@ -87,7 +88,9 @@ export async function GET(request: NextRequest) {
   }
 
   const { searchParams } = request.nextUrl;
-  const windowSec = clampInt(searchParams.get('windowSec'), 30, 5, 300);
+  // Default to the wider, env-configurable burst window (matches the /live route
+  // and feed default); still clamped 5..300 so explicit overrides are honored.
+  const windowSec = clampInt(searchParams.get('windowSec'), envInt('BURST_WINDOW_SEC', 180), 5, 300);
   const minBuyers = clampInt(searchParams.get('minBuyers'), 3, 2, 20);
   const hours = clampInt(searchParams.get('hours'), 6, 1, 48);
   const limit = clampInt(searchParams.get('limit'), 50, 1, 200);
