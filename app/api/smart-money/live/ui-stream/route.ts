@@ -96,9 +96,14 @@ export async function GET(request: NextRequest) {
   const limit = clampInt(searchParams.get('limit'), 50, 1, 200);
   const sort = searchParams.get('sort') === 'recent' ? 'recent' : 'quality';
   const minSol = clampFloat(searchParams.get('minSol'), 0, 0, Number.MAX_SAFE_INTEGER);
+  // Opt-in "Early" signal layer (matches the poll route): tier=early ALSO streams
+  // early-s1/heating/fresh items (each tagged via `type`). Omitted → bursts only.
+  const tier = searchParams.get('tier');
+  const types = searchParams.get('types');
+  const includeEarly = tier === 'early' || (types != null && /early|heating|fresh|s1/i.test(types));
 
   // The stream never uses a `since` cursor — it diffs in-process instead.
-  const params = { windowSec, minBuyers, hours, limit, sort, minSol, sinceMs: null } as const;
+  const params = { windowSec, minBuyers, hours, limit, sort, minSol, sinceMs: null, includeEarly } as const;
 
   const encoder = new TextEncoder();
 

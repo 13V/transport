@@ -13,6 +13,11 @@
  *   GET /api/smart-money/live?sort=quality     → ranking: quality (default) | recent (legacy)
  *   GET /api/smart-money/live?minSol=0         → only bursts with solTotal >= minSol
  *   GET /api/smart-money/live?since=<iso|ms>   → only bursts with windowEnd > since (bot polling)
+ *   GET /api/smart-money/live?tier=early       → ALSO include the "Early" signal layer
+ *                                                 (early-s1/heating/fresh) alongside bursts.
+ *                                                 Each item carries a `type` discriminator so
+ *                                                 the client can filter; classic bursts are
+ *                                                 unchanged. Default (omitted) = bursts only.
  *
  * Read-only and public (no CRON_SECRET) — safe to poll. Must feel live, so it's
  * force-dynamic with only a short edge cache. Degrades to an empty burst list
@@ -73,6 +78,12 @@ export async function GET(request: NextRequest) {
   const sort = searchParams.get('sort') === 'recent' ? 'recent' : 'quality';
   const minSol = clampFloat(searchParams.get('minSol'), 0, 0, Number.MAX_SAFE_INTEGER);
   const sinceMs = parseSince(searchParams.get('since'));
+  // Opt-in "Early" signal layer. `tier=early` (or types=early) ADDS early-s1 /
+  // heating / fresh items (each tagged via the `type` field) so the client can
+  // show an Early filter; omitted → the classic bursts-only feed, unchanged.
+  const tier = searchParams.get('tier');
+  const types = searchParams.get('types');
+  const includeEarly = tier === 'early' || (types != null && /early|heating|fresh|s1/i.test(types));
 
   // All filter/sort/cap/enrich logic now lives in buildLiveFeed, served from a
   // short result cache shared with the SSE stream route. Same shape as before.
@@ -84,6 +95,7 @@ export async function GET(request: NextRequest) {
     sort,
     minSol,
     sinceMs,
+    includeEarly,
   });
 
   return NextResponse.json(

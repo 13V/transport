@@ -136,6 +136,10 @@ export async function persistBursts(): Promise<{ persisted: number }> {
         id: b.id,
         mint: b.mint,
         side: b.side ?? 'buy',
+        // Signal type for per-type outcome aggregation (migration 0021). Written
+        // optimistically; stripped on the fallback path below when the column is
+        // absent (pre-migration), so persisting never fails on this field.
+        type: b.type ?? 'burst',
         symbol: b.symbol ?? null,
         window_start: windowStart,
         window_end: windowEnd,
@@ -154,6 +158,21 @@ export async function persistBursts(): Promise<{ persisted: number }> {
       .from('live_bursts')
       .upsert(rows, { onConflict: 'id' });
     if (error) {
+      // GRACEFUL DEGRADATION: if the `type` column hasn't been migrated to prod
+      // yet, the upsert fails on the unknown column. Retry once WITHOUT `type`
+      // (mirrors the seeded/roi_pct pre-migration fallbacks elsewhere) so the
+      // existing persist path keeps working until migration 0021 is applied.
+      if (isMissingColumnError(error, 'type')) {
+        const stripped = rows.map(({ type: _omit, ...rest }) => rest);
+        const retry = await supabase
+          .from('live_bursts')
+          .upsert(stripped, { onConflict: 'id' });
+        if (retry.error) {
+          console.error('[BURSTS] persist upsert failed (no-type retry):', retry.error.message);
+          return { persisted: 0 };
+        }
+        return { persisted: stripped.length };
+      }
       console.error('[BURSTS] persist upsert failed:', error.message);
       return { persisted: 0 };
     }
@@ -181,6 +200,22 @@ const ALL_BUYERS_CAP = 500;
 function numOrNull(v: unknown): number | null {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Does a Supabase/Postgres error indicate the given column is missing (i.e. a
+ * migration hasn't been applied yet)? PostgREST surfaces this as code 42703
+ * ("undefined column") and/or a message naming the column. Used to fall back to
+ * a pre-migration write path so a not-yet-migrated prod never breaks the feed.
+ */
+function isMissingColumnError(
+  err: { code?: string; message?: string } | null | undefined,
+  column: string
+): boolean {
+  if (!err) return false;
+  if (err.code === '42703') return true;
+  const msg = (err.message ?? '').toLowerCase();
+  return msg.includes('column') && msg.includes(column.toLowerCase());
 }
 
 /** Larger of an incoming value and a prior value, ignoring nullish operands. */
@@ -533,6 +568,12 @@ export interface BurstStats {
   /** Best 24h (fallback 1h) call in the window, by realized return. */
   bestCall: { symbol: string | null; mint: string; ret: number } | null;
   windowHours: number;
+  /**
+   * Per-signal-type 1h breakdown (migration 0021). Empty when the `type` column
+   * isn't present yet (pre-migration) — the overall stats above are unaffected.
+   * Lets the feed show e.g. "early-s1: 41% hit / median +12% 1h" beside bursts.
+   */
+  byType?: Record<string, { n: number; medianRet1h: number | null; hitRate1h: number | null }>;
 }
 
 function median(nums: number[]): number | null {
@@ -572,24 +613,48 @@ export async function getBurstStats(windowHours = 24): Promise<BurstStats> {
     const now = Date.now();
     const sinceIso = new Date(now - windowHours * HOUR).toISOString();
 
-    const { data, error } = await supabase
-      .from('live_bursts')
-      .select(
-        'mint, symbol, window_end, first_seen, ret_1h, ret_24h'
-      )
-      .gte('window_end', sinceIso)
-      .limit(2000);
-
-    if (error || !data) {
-      if (error) console.error('[BURSTS] stats read failed:', error.message);
-      return empty;
+    // Try selecting `type` (migration 0021) for the per-type breakdown; on a
+    // pre-migration DB this errors on the unknown column, so fall back to the
+    // legacy column set so the overall stats keep working.
+    let data: any[] | null = null;
+    let hasType = true;
+    {
+      const withType = await supabase
+        .from('live_bursts')
+        .select('mint, symbol, window_end, first_seen, ret_1h, ret_24h, type')
+        .gte('window_end', sinceIso)
+        .limit(2000);
+      if (withType.error) {
+        if (isMissingColumnError(withType.error, 'type')) {
+          hasType = false;
+          const legacy = await supabase
+            .from('live_bursts')
+            .select('mint, symbol, window_end, first_seen, ret_1h, ret_24h')
+            .gte('window_end', sinceIso)
+            .limit(2000);
+          if (legacy.error || !legacy.data) {
+            if (legacy.error) console.error('[BURSTS] stats read failed:', legacy.error.message);
+            return empty;
+          }
+          data = legacy.data as any[];
+        } else {
+          console.error('[BURSTS] stats read failed:', withType.error.message);
+          return empty;
+        }
+      } else {
+        data = (withType.data ?? []) as any[];
+      }
     }
+    if (!data) return empty;
 
     const ret1h: number[] = [];
     const ret24h: number[] = [];
     let best: BurstStats['bestCall'] = null;
     let measuredCount = 0;
     const todaySince = now - DAY;
+
+    // Per-type 1h returns (only when the `type` column is present).
+    const ret1hByType = new Map<string, number[]>();
 
     let burstsToday = 0;
     for (const r of data as any[]) {
@@ -605,6 +670,16 @@ export async function getBurstStats(windowHours = 24): Promise<BurstStats> {
 
       if (r1 != null && Number.isFinite(r1)) ret1h.push(r1);
       if (r24 != null && Number.isFinite(r24)) ret24h.push(r24);
+
+      if (hasType && r1 != null && Number.isFinite(r1)) {
+        const t = r.type == null ? 'burst' : String(r.type);
+        let arr = ret1hByType.get(t);
+        if (!arr) {
+          arr = [];
+          ret1hByType.set(t, arr);
+        }
+        arr.push(r1);
+      }
 
       // Best call prefers a realized 24h return, falling back to 1h.
       const candidateRet =
@@ -633,6 +708,21 @@ export async function getBurstStats(windowHours = 24): Promise<BurstStats> {
         ? round2((ret24h.filter((x) => x > 0).length / ret24h.length) * 100)
         : null;
 
+    let byType: BurstStats['byType'];
+    if (hasType && ret1hByType.size > 0) {
+      byType = {};
+      for (const [t, arr] of ret1hByType) {
+        const m = median(arr);
+        byType[t] = {
+          n: arr.length,
+          medianRet1h: m == null ? null : round2(m),
+          hitRate1h: arr.length > 0
+            ? round2((arr.filter((x) => x > 0).length / arr.length) * 100)
+            : null,
+        };
+      }
+    }
+
     return {
       n: measuredCount,
       burstsToday,
@@ -642,6 +732,7 @@ export async function getBurstStats(windowHours = 24): Promise<BurstStats> {
       hitRate24h: hit24,
       bestCall: best,
       windowHours,
+      byType,
     };
   } catch (err) {
     console.error('[BURSTS] stats crashed:', (err as Error).message);
