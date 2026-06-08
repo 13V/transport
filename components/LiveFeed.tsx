@@ -41,6 +41,13 @@ interface Burst {
   priceChange24h?: number | null;
   priceUsd?: number | null;
   pairAddress?: string | null;
+  // Server-computed LIVE entry→now price change + entry market cap. Covers fresh
+  // pre-graduation pump.fun tokens (falls back to on-chain trade prices when
+  // DexScreener/GeckoTerminal can't price them) and updates each poll. Used as a
+  // fallback when the client OHLCV series has no candles. Optional/nullable so an
+  // older snapshot simply renders the prior behaviour.
+  priceChangeSincePct?: number | null;
+  entryMarketCapUsd?: number | null;
   finalized?: boolean;
   // Wave 2 enrichment — all optional; render only when present, never fabricate.
   buyerStats?: BuyerStat[] | null;       // aligned to sampleBuyers
@@ -1805,6 +1812,14 @@ export default function LiveFeed() {
       }
     }
 
+    // FALLBACK: fresh pre-graduation pump.fun tokens have no GeckoTerminal candles
+    // (the OHLCV series is empty → sinceFirst null). The server computes a LIVE
+    // entry→now % from DexScreener-or-on-chain trade prices that DOES cover them
+    // and refreshes each poll, so use it whenever the OHLCV path produced nothing.
+    if (sinceFirst == null && b.priceChangeSincePct != null && Number.isFinite(b.priceChangeSincePct)) {
+      sinceFirst = b.priceChangeSincePct;
+    }
+
     // --- HERO: "% since first buy" is the visual hero (22px mono ▲/▼). ---
     const sinceUp = sinceFirst != null && sinceFirst >= 0;
 
@@ -1812,7 +1827,12 @@ export default function LiveFeed() {
     let mcAtEntryLabel: string | null = null;
     let mcMultiple: number | null = null;
     if (b.marketCapUsd != null && Number.isFinite(b.marketCapUsd) && sinceFirst != null) {
-      const mcAtEntry = b.marketCapUsd / (1 + sinceFirst / 100);
+      // Prefer the server's entry market cap (derived from the same entry→now
+      // price ratio) when present; otherwise derive it from the % as before.
+      const mcAtEntry =
+        b.entryMarketCapUsd != null && Number.isFinite(b.entryMarketCapUsd) && b.entryMarketCapUsd > 0
+          ? b.entryMarketCapUsd
+          : b.marketCapUsd / (1 + sinceFirst / 100);
       if (Number.isFinite(mcAtEntry) && mcAtEntry > 0) {
         mcAtEntryLabel = usdCompact(mcAtEntry);
         mcMultiple = b.marketCapUsd / mcAtEntry;

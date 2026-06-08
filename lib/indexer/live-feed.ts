@@ -19,6 +19,7 @@
 
 import { getLiveBursts, qualityScore, type LiveBurst } from './live-bursts';
 import { getTokenMeta } from '../token-meta';
+import { fetchTokenPricesSol } from '../prices/price-oracle';
 import { getSupabase, isSupabaseConfigured } from '../supabase-client';
 
 /** Inputs to buildLiveFeed — already clamped/parsed by the caller (the routes). */
@@ -156,6 +157,18 @@ async function computeLiveFeed(p: BuildLiveFeedParams): Promise<LiveFeedResult> 
     // ignore — return the un-enriched feed
   }
 
+  // LIVE entry→now price change. The burst card's hero % and the "$entry → $now"
+  // market-cap pair must update every poll AND cover fresh pre-graduation
+  // pump.fun tokens that DexScreener/GeckoTerminal can't price yet. The on-chain
+  // trades the burst is built on always carry a real SOL price, so:
+  //   - entry price  = firstBuyPriceSol (the burst's first on-chain buy)
+  //   - current price = DexScreener oracle (preferred, fresh) ELSE the burst's
+  //     most-recent on-chain buy price (lastBuyPriceSol) — moves as buys land.
+  // This recomputes here on every (cache-missed) feed build, so the % is never
+  // frozen at first detection. Fully resilient: the oracle is optional, and any
+  // failure simply leaves the on-chain fallback in place.
+  bursts = await annotateLivePriceChange(bursts);
+
   // Annotate each burst with the smart-money EXIT signal via ONE batched,
   // indexed SELL query for the whole (capped) feed. Resilient: on any failure
   // the bursts are returned unchanged (fields stay undefined).
@@ -176,6 +189,86 @@ async function computeLiveFeed(p: BuildLiveFeedParams): Promise<LiveFeedResult> 
   }
 
   return { ...result, count: bursts.length, nextCursor, bursts, solPriceUsd };
+}
+
+/**
+ * Compute a LIVE entry→now price change for each burst and the matching entry
+ * market cap, so the card's hero % moves every poll and covers fresh tokens.
+ *
+ * Current price is resolved per mint with a clear precedence:
+ *   1. DexScreener SOL oracle (fetchTokenPricesSol) — fresh, listed tokens.
+ *   2. The burst's own most-recent on-chain buy price (lastBuyPriceSol) — the
+ *      only price available for pre-graduation pump.fun tokens DexScreener /
+ *      GeckoTerminal haven't indexed yet. It advances as new smart buys land,
+ *      so the % still moves.
+ * Entry price is always the burst's first on-chain buy (firstBuyPriceSol).
+ *
+ * entryMarketCapUsd is derived by scaling the (DexScreener) current marketCapUsd
+ * back through the entry→now price ratio, so "$entry → $now" renders coherently
+ * regardless of which current-price source was used.
+ *
+ * FULLY RESILIENT: the oracle call is best-effort (any failure falls back to the
+ * on-chain price); bursts without a usable entry price are returned unchanged.
+ */
+export async function annotateLivePriceChange(bursts: LiveBurst[]): Promise<LiveBurst[]> {
+  if (bursts.length === 0) return bursts;
+
+  // One batched SOL-price oracle read for the whole feed (cached ~60s). Prefer
+  // it as the live current price; fall back to on-chain when a mint isn't listed.
+  let oracle = new Map<string, number>();
+  try {
+    oracle = await fetchTokenPricesSol(
+      Array.from(new Set(bursts.map((b) => b.mint).filter(Boolean)))
+    );
+  } catch {
+    oracle = new Map();
+  }
+
+  return bursts.map((b) => {
+    const entry =
+      b.firstBuyPriceSol != null && Number.isFinite(b.firstBuyPriceSol) && b.firstBuyPriceSol > 0
+        ? b.firstBuyPriceSol
+        : null;
+    if (entry == null) {
+      // No on-chain entry price → leave the computed fields null (card falls back
+      // to its OHLCV-derived path / "—" exactly as before).
+      return { ...b, priceChangeSincePct: null, entryMarketCapUsd: null };
+    }
+
+    // Current price: DexScreener oracle first, else the latest on-chain buy.
+    const oraclePrice = oracle.get(b.mint);
+    const onchain =
+      b.lastBuyPriceSol != null && Number.isFinite(b.lastBuyPriceSol) && b.lastBuyPriceSol > 0
+        ? b.lastBuyPriceSol
+        : null;
+    const current =
+      oraclePrice != null && Number.isFinite(oraclePrice) && oraclePrice > 0
+        ? oraclePrice
+        : onchain;
+
+    if (current == null) {
+      return { ...b, priceChangeSincePct: null, entryMarketCapUsd: null };
+    }
+
+    const pct = Math.round(((current - entry) / entry) * 100 * 100) / 100;
+
+    // Entry market cap: scale the current mcap back by the price ratio. Only when
+    // a current marketCapUsd is known (DexScreener-listed); otherwise null.
+    let entryMarketCapUsd: number | null = null;
+    if (
+      b.marketCapUsd != null &&
+      Number.isFinite(b.marketCapUsd) &&
+      b.marketCapUsd > 0 &&
+      current > 0
+    ) {
+      const scaled = (b.marketCapUsd * entry) / current;
+      if (Number.isFinite(scaled) && scaled > 0) {
+        entryMarketCapUsd = Math.round(scaled);
+      }
+    }
+
+    return { ...b, priceChangeSincePct: pct, entryMarketCapUsd };
+  });
 }
 
 /**
