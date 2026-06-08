@@ -8,7 +8,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import {
-  Activity, LayoutDashboard, Crown, Flame, Radio, Star, BookOpen, Search, FlaskConical,
+  Activity, LayoutDashboard, Crown, Flame, Radio, Star, BookOpen, Search, FlaskConical, Bell,
 } from 'lucide-react';
 import * as f from '@/lib/format';
 import { isGatingEnabled } from '@/lib/gating/config';
@@ -28,6 +28,7 @@ const NAV: { group: string; items: NavItem[] }[] = [
   ] },
   { group: 'You', items: [
     { href: '/watchlist', label: 'Watchlist', icon: Star, owner: 'watchlist' },
+    { href: '/alerts', label: 'Alerts', icon: Bell, owner: 'alerts' },
   ] },
   { group: 'Developer', items: [
     { href: '/docs', label: 'API', icon: BookOpen, owner: 'docs' },
@@ -63,6 +64,7 @@ function ownerFor(path: string): string {
   if (path.startsWith('/smart-money')) return 'leaderboard';
   if (path.startsWith('/token')) return 'buying';
   if (path.startsWith('/watchlist')) return 'watchlist';
+  if (path.startsWith('/alerts')) return 'alerts';
   if (path.startsWith('/docs')) return 'docs';
   if (path.startsWith('/live')) return 'live';
   if (path.startsWith('/backtest')) return 'backtest';
@@ -82,6 +84,7 @@ function titleFor(path: string): string {
     return seg ? `Token · ${f.short(seg, 4, 4)}` : 'Token';
   }
   if (path.startsWith('/watchlist')) return 'Watchlist';
+  if (path.startsWith('/alerts')) return 'Alerts';
   if (path.startsWith('/docs')) return 'API Reference';
   if (path.startsWith('/live')) return 'Live';
   if (path.startsWith('/backtest')) return 'Backtest';

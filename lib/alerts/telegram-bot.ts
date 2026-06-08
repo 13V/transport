@@ -23,6 +23,8 @@
 import { sendMessageTo, escapeHtml, type InlineKeyboard } from './notifier';
 import { tokenLinks } from '../trade-links';
 import { getSupabase, isSupabaseConfigured } from '../supabase-client';
+import { getVerifiedWallet } from '../wallet-verify';
+import { holdsAtLeast, isTokenGateConfigured, tgMinAmount } from '../token-gate';
 
 // --- Anti-spam: cap how many chats we fan out to per burst per run. Telegram
 // rate-limits ~30 msg/s for bots; we stay well under and rely on the next cron
@@ -166,6 +168,55 @@ export function matchesSubscription(
   return buyers >= minBuyers && sol >= minSol;
 }
 
+// --- TELEGRAM TOKEN GATE (hold >= TG_GATE_MIN_AMOUNT, default 1M) ---
+//
+// Before sending to a matched chat we look up its VERIFIED wallet and require it
+// to hold at least the threshold. When TOKEN_GATE_MINT is unset the gate is OPEN
+// (holdsAtLeast returns true), so nothing changes pre-launch.
+//
+// `gateDropNotified` tracks chats we've already sent the one-time "balance
+// dropped below 1M — alerts paused" notice to, so a chat below threshold gets
+// exactly one heads-up rather than silence (or repeated spam). Per-process and
+// resets on cold start, which is fine for a courtesy notice. We clear a chat
+// from the set once it passes the gate again, so a re-fund re-arms the notice.
+const gateDropNotified = new Set<string>();
+
+/**
+ * Decide whether a chat may receive alerts under the token gate, and send the
+ * one-time "paused" notice on the first failure. Returns true when allowed.
+ */
+async function passesTelegramGate(chatId: string): Promise<boolean> {
+  // Gate open until a mint is configured — everyone passes, nothing to notify.
+  if (!isTokenGateConfigured()) return true;
+
+  const verified = await getVerifiedWallet({ chatId }).catch(() => null);
+  const wallet = verified?.wallet ?? null;
+
+  // Unverified chats can't be balance-checked → gated out (silently; they were
+  // told to /verify when they tried to use a gated feature).
+  if (!wallet) return false;
+
+  const min = tgMinAmount();
+  const ok = await holdsAtLeast(wallet, min).catch(() => false);
+  if (ok) {
+    gateDropNotified.delete(chatId); // re-arm the notice for future drops
+    return true;
+  }
+
+  // First failure since last pass → one-time courtesy notice.
+  if (!gateDropNotified.has(chatId)) {
+    gateDropNotified.add(chatId);
+    const fmtMin = min.toLocaleString('en-US');
+    await sendToChat(
+      chatId,
+      `⏸️ <b>Alerts paused.</b>\nYour verified wallet's balance dropped below ` +
+        `<b>${escapeHtml(fmtMin)}</b> tokens, so smart-money alerts are on hold. ` +
+        `Top back up to resume — no action needed once you're over the line again.`
+    ).catch(() => undefined);
+  }
+  return false;
+}
+
 /**
  * Fan a high-conviction burst out to every subscriber whose filters match it.
  * Each matched chat gets a punchy HTML message + an inline_keyboard of trade
@@ -213,6 +264,11 @@ export async function broadcastBurst(burst: BurstForBroadcast): Promise<{ sent: 
     let sent = 0;
     for (const sub of targets) {
       try {
+        // TOKEN GATE: only deliver to chats whose verified wallet still holds
+        // >= the threshold (open no-op when TOKEN_GATE_MINT is unset).
+        const allowed = await passesTelegramGate(sub.chat_id);
+        if (!allowed) continue;
+
         const ok = await sendToChat(sub.chat_id, html, keyboard);
         if (ok) sent++;
       } catch (err) {

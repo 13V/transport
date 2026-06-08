@@ -11,7 +11,7 @@
  * rather than throwing, so the rest of the app is unaffected.
  */
 
-import { createHash, timingSafeEqual } from 'crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 
 import { getSupabase, isSupabaseConfigured } from './supabase-client';
 
@@ -44,6 +44,48 @@ export function secretsEqual(a: string, b: string): boolean {
   const bufB = Buffer.from(b, 'utf8');
   if (bufA.length !== bufB.length) return false;
   return timingSafeEqual(bufA, bufB);
+}
+
+/**
+ * Provision a NEW api key and store ONLY its hash (never the plaintext). Returns
+ * the raw token to hand to the caller exactly once, plus the stored hash and the
+ * expiry. Used by the pay-per-period flow (app/api/access/verify-payment) after
+ * an on-chain payment is verified.
+ *
+ * @param opts.tier        key tier (default 'pro').
+ * @param opts.ownerId     attribution (e.g. payer wallet / email).
+ * @param opts.label       human label.
+ * @param opts.expiresInDays  TTL; the row's expires_at = now + this (default 7).
+ *
+ * Throws only if Supabase is unconfigured (callers gate on that first).
+ */
+export async function provisionApiKey(opts: {
+  tier?: Tier;
+  ownerId?: string | null;
+  label?: string | null;
+  expiresInDays?: number;
+}): Promise<{ rawKey: string; keyHash: string; expiresAt: string }> {
+  if (!isSupabaseConfigured()) {
+    throw new Error('Supabase not configured — cannot provision api key');
+  }
+  const rawKey = `sk_live_${randomBytes(24).toString('hex')}`;
+  const keyHash = hashApiKey(rawKey);
+  const days = Number.isFinite(opts.expiresInDays) && (opts.expiresInDays as number) > 0
+    ? Math.floor(opts.expiresInDays as number)
+    : 7;
+  const expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+
+  const supabase = getSupabase();
+  const { error } = await supabase.from('api_keys').insert({
+    key: keyHash,
+    owner_id: opts.ownerId ?? null,
+    tier: (opts.tier ?? 'pro'),
+    label: opts.label ?? 'paid (1 SOL/period)',
+    expires_at: expiresAt,
+  });
+  if (error) throw new Error(`provisionApiKey insert failed: ${error.message}`);
+
+  return { rawKey, keyHash, expiresAt };
 }
 
 export interface ApiKeyResult {
@@ -103,11 +145,20 @@ export async function validateApiKey(req: Request): Promise<ApiKeyResult> {
     const supabase = getSupabase();
     const { data, error } = await supabase
       .from('api_keys')
-      .select('key, tier, owner_id')
+      .select('key, tier, owner_id, expires_at')
       .eq('key', keyHash)
       .maybeSingle();
 
     if (error || !data) return none;
+
+    // Expiry enforcement (migration 0017): a NULL expires_at means "never
+    // expires" (back-compat with manually-provisioned keys); a past timestamp
+    // rejects the key as if it were unknown. Paid keys carry now + API_PERIOD.
+    const expiresAt = (data as any).expires_at;
+    if (expiresAt) {
+      const exp = Date.parse(String(expiresAt));
+      if (Number.isFinite(exp) && exp <= Date.now()) return none;
+    }
 
     // Defense in depth: confirm the stored hash matches in constant time. The
     // `eq` filter already constrains this, but a direct secret comparison must

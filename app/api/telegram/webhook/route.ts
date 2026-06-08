@@ -32,7 +32,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { sendToChat } from '../../../../lib/alerts/telegram-bot';
-import { tgApi } from '../../../../lib/alerts/notifier';
+import { tgApi, escapeHtml } from '../../../../lib/alerts/notifier';
 import { getSupabase, isSupabaseConfigured } from '../../../../lib/supabase-client';
 import { getBurstStats } from '../../../../lib/indexer/burst-outcomes';
 
@@ -139,6 +139,8 @@ async function handleMessage(message: any): Promise<void> {
       return cmdStop(chat);
     case 'status':
       return cmdStatus(chat);
+    case 'verify':
+      return cmdVerify(chat);
     default:
       await sendToChat(chat, 'Unknown command. Send /start to see what I can do.');
   }
@@ -184,6 +186,7 @@ async function cmdStart(chat: string): Promise<void> {
     '/filters minbuyers=4 minsol=2 holding=on — tune your alerts\n' +
     '/watch &lt;wallet&gt; · /unwatch &lt;wallet&gt; — track specific wallets\n' +
     '/mute · /unmute — pause / resume\n' +
+    '/verify — link a wallet to unlock gated alerts\n' +
     '/status — your prefs + the measured hit-rate\n' +
     '/stop — unsubscribe';
   await sendToChat(chat, html);
@@ -360,6 +363,28 @@ async function cmdStop(chat: string): Promise<void> {
     return;
   }
   await sendToChat(chat, '👋 Unsubscribed. Send /start anytime to come back.');
+}
+
+/**
+ * /verify — reply with a deep link to the web sign page carrying this chat_id.
+ *
+ * On that page the user connects their Solana wallet (Phantom via window.solana)
+ * and SIGNS a challenge message; the server verifies the ed25519 signature and
+ * binds the wallet to this chat. Once the verified wallet holds >= the Telegram
+ * threshold (TG_GATE_MIN_AMOUNT, default 1M), alerts flow. Non-custodial: the
+ * user only signs a message — no funds, no private keys leave their wallet.
+ */
+async function cmdVerify(chat: string): Promise<void> {
+  await ensureSub(chat);
+  const base = (process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000').replace(/\/+$/, '');
+  const url = `${base}/access?chat_id=${encodeURIComponent(chat)}`;
+  const html =
+    '🔐 <b>Verify your wallet</b>\n\n' +
+    'Open the secure page below, connect your Solana wallet, and sign the ' +
+    'one-line message (this proves ownership — it never moves funds or touches ' +
+    'your keys). Once your wallet holds the required balance, alerts unlock here.\n\n' +
+    `<a href="${escapeHtml(url)}">Tap to verify →</a>`;
+  await sendToChat(chat, html);
 }
 
 async function cmdStatus(chat: string): Promise<void> {

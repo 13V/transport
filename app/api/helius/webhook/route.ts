@@ -29,6 +29,7 @@ import { readCooldowns, writeCooldowns } from '../../../../lib/alerts/cooldowns'
 import { sendAlert, escapeHtml } from '../../../../lib/alerts/notifier';
 import { sendWebPushToAll, sendWebPushToOwner } from '../../../../lib/push';
 import { tokenLinks } from '../../../../lib/trade-links';
+import { evaluateWatchRules, type EvalRule } from '../../../../lib/watch-eval';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 30;
@@ -42,6 +43,8 @@ const BURST_COOLDOWN_KEY = 'alert_cooldowns_burst';
 const SELL_BURST_COOLDOWN_KEY = 'alert_cooldowns_sell_burst';
 // Per-user watchlist push de-dup, keyed `${owner}:${mint}` -> last-push ms.
 const WATCH_COOLDOWN_KEY = 'alert_cooldowns_watch';
+// Custom watch-rule push de-dup, keyed `${owner}:${mint}:${ruleId}` -> last ms.
+const RULE_COOLDOWN_KEY = 'alert_cooldowns_rule';
 
 function envInt(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -125,6 +128,11 @@ async function runBurstAlerts(touchedMints: string[]): Promise<void> {
     // broadcast bar), since each such user explicitly opted into that wallet.
     // Runs off the SAME detected bursts; one watchlists query per batch.
     await runWatchlistPush(bursts, now);
+
+    // CUSTOM WATCH-RULE PUSH — evaluate each owner's user-defined alert rules
+    // (watch_rules) against the SAME detected bursts and push any matches. Uses
+    // its own cooldown blob + the web-push sender only. Wrapped + no-throw.
+    await runWatchRules(bursts, now);
 
     // QUALITY GATE — higher bar than the feed.
     const qualified = bursts.filter((b: LiveBurst) => {
@@ -369,6 +377,122 @@ async function runWatchlistPush(bursts: LiveBurst[], now: number): Promise<void>
     if (stamped) await writeCooldowns(WATCH_COOLDOWN_KEY, cooldowns);
   } catch (error) {
     console.error('[HELIUS WEBHOOK] watchlist push step failed:', (error as Error).message);
+  }
+}
+
+/**
+ * CUSTOM WATCH-RULE PUSH: evaluate each owner's user-defined alert rules
+ * (watch_rules) against the detected BUY bursts via lib/watch-eval, then push
+ * the matches through the EXISTING web-push sender (owner-scoped). One
+ * watch_rules query per webhook batch (only rules for owners whose wallets — or
+ * whose "any wallet" rules — could match are worth loading, but a single scan of
+ * all rules is cheap and simplest; we filter in-memory). holdingOnly rules use
+ * the owner's watchlist as the holding set. De-duped per (owner, mint, ruleId)
+ * via a dedicated cooldown blob, separate from the broadcast + watchlist blobs.
+ * Wrapped so any failure is swallowed — alerting must never affect ingestion.
+ */
+async function runWatchRules(bursts: LiveBurst[], now: number): Promise<void> {
+  try {
+    if (bursts.length === 0 || !isSupabaseConfigured()) return;
+
+    const supabase = getSupabase();
+
+    // Load all candidate rules. Rules with an explicit wallet filter only matter
+    // if one of their wallets is in this batch's bursts; "any wallet" rules
+    // (empty wallets[]) always matter. To keep this to ONE query we fetch all
+    // rules and filter in lib/watch-eval — rule counts are small per deployment.
+    const { data: ruleRows, error: ruleErr } = await supabase
+      .from('watch_rules')
+      .select('id, owner, label, wallets, min_buyers, min_sol, holding_only, channels, muted');
+    if (ruleErr || !ruleRows || ruleRows.length === 0) return;
+
+    const rules: EvalRule[] = (ruleRows as Record<string, unknown>[]).map((r) => ({
+      id: typeof r.id === 'string' ? r.id : null,
+      owner: typeof r.owner === 'string' ? r.owner : '',
+      label: typeof r.label === 'string' && r.label ? r.label : null,
+      wallets: Array.isArray(r.wallets) ? (r.wallets as unknown[]).filter((w): w is string => typeof w === 'string') : [],
+      minBuyers: Number.isFinite(Number(r.min_buyers)) ? Number(r.min_buyers) : 3,
+      minSol: Number.isFinite(Number(r.min_sol)) ? Number(r.min_sol) : 0,
+      holdingOnly: Boolean(r.holding_only),
+      channels: Array.isArray(r.channels)
+        ? (r.channels as unknown[]).filter((c): c is string => typeof c === 'string')
+        : ['push'],
+      muted: Boolean(r.muted),
+    })).filter((r) => r.owner);
+    if (rules.length === 0) return;
+
+    // holdingOnly support: build owner -> watched-wallet set, but only for owners
+    // that actually have a holdingOnly rule (avoids loading watchlists we won't
+    // use). Best-effort; missing watchlists make holdingOnly fail-open (see
+    // lib/watch-eval).
+    let holdings: Map<string, Set<string>> | undefined;
+    const holdingOwners = Array.from(
+      new Set(rules.filter((r) => r.holdingOnly).map((r) => r.owner))
+    );
+    if (holdingOwners.length > 0) {
+      try {
+        const { data: wlRows } = await supabase
+          .from('watchlists')
+          .select('owner_id, address')
+          .in('owner_id', holdingOwners);
+        holdings = new Map();
+        for (const r of (wlRows ?? []) as { owner_id: string; address: string }[]) {
+          if (!r.owner_id || !r.address) continue;
+          let set = holdings.get(r.owner_id);
+          if (!set) {
+            set = new Set();
+            holdings.set(r.owner_id, set);
+          }
+          set.add(r.address);
+        }
+      } catch {
+        // watchlists missing → holdingOnly rules fail-open in watch-eval.
+        holdings = undefined;
+      }
+    }
+
+    // Pure evaluation → list of (owner, mint, rule) push notifications.
+    const evalBursts = bursts.map((b) => ({
+      mint: b.mint,
+      symbol: b.symbol,
+      buyers: b.buyers,
+      solTotal: b.solTotal,
+      wallets: b.wallets ?? [],
+    }));
+    const notifications = evaluateWatchRules(evalBursts, rules, holdings);
+    if (notifications.length === 0) return;
+
+    const cooldownMs = envInt('ALERT_RULE_COOLDOWN_MIN', 30) * 60_000;
+    const cooldowns = await readCooldowns(RULE_COOLDOWN_KEY);
+    let stamped = false;
+
+    for (const n of notifications) {
+      const ckey = `${n.owner}:${n.mint}:${n.ruleId ?? 'anon'}`;
+      const last = cooldowns[ckey];
+      if (typeof last === 'number' && now - last < cooldownMs) continue;
+      // Stamp first so a retry/duplicate in the same batch can't double-send.
+      cooldowns[ckey] = now;
+      stamped = true;
+
+      const symbol = n.symbol ? `$${n.symbol}` : `${n.mint.slice(0, 6)}…`;
+      const label = n.ruleLabel ? `${n.ruleLabel}: ` : '';
+      try {
+        await sendWebPushToOwner(n.owner, {
+          title: `🔔 ${label}${symbol}`,
+          body:
+            `${n.buyers} smart wallet${n.buyers === 1 ? '' : 's'} bought ` +
+            `${fmtSol(n.solTotal)} SOL` +
+            (n.matchedWallet ? ` (incl. ${shortWallet(n.matchedWallet)})` : ''),
+          url: `/token/${n.mint}`,
+        });
+      } catch (error) {
+        console.error('[HELIUS WEBHOOK] watch-rule push failed for', n.owner, (error as Error).message);
+      }
+    }
+
+    if (stamped) await writeCooldowns(RULE_COOLDOWN_KEY, cooldowns);
+  } catch (error) {
+    console.error('[HELIUS WEBHOOK] watch-rule step failed:', (error as Error).message);
   }
 }
 
