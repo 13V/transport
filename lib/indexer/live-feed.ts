@@ -207,6 +207,19 @@ async function computeLiveFeed(p: BuildLiveFeedParams): Promise<LiveFeedResult> 
  * back through the entry→now price ratio, so "$entry → $now" renders coherently
  * regardless of which current-price source was used.
  *
+ * FRESHNESS (the staleness fix): the displayed CURRENT marketCapUsd/priceUsd come
+ * from getTokenMeta's DexScreener snapshot, which is cached up to ~120s — so a
+ * token that just ran $38k→$60k kept showing the stale $38k. The on-chain
+ * last-trade price (lastBuyPriceSol) refreshes per ingested trade (~10s fresh,
+ * free, no extra API). So for a LISTED token we treat the on-chain last buy as
+ * the freshest CURRENT price and RESCALE the DexScreener mcap/price onto it by
+ * the SOL-price ratio (current_onchain / dex_oracle_price). This keeps the exact
+ * same circulating-supply + SOL/USD basis the card already uses — only the price
+ * factor changes — so the displayed current mcap, the % and the derived entry
+ * mcap all share ONE basis and can never disagree in direction. The override is
+ * applied only when the on-chain price meaningfully differs from the (staler)
+ * oracle snapshot, so a settled token isn't perturbed by quote noise.
+ *
  * FULLY RESILIENT: the oracle call is best-effort (any failure falls back to the
  * on-chain price); bursts without a usable entry price are returned unchanged.
  */
@@ -247,7 +260,31 @@ export async function annotateLivePriceChange(bursts: LiveBurst[]): Promise<Live
       b.lastBuyPriceSol != null && Number.isFinite(b.lastBuyPriceSol) && b.lastBuyPriceSol > 0
         ? b.lastBuyPriceSol
         : null;
-    const current = listed ? (oraclePrice as number) : onchain;
+
+    // FRESHNESS OVERRIDE (the staleness fix): for a LISTED token, the on-chain
+    // last-trade price is ~10s fresh while the DexScreener oracle/mcap snapshot is
+    // up to ~120s stale. When the two disagree by more than a small noise band we
+    // trust the fresher on-chain price as the CURRENT price and rescale every
+    // DexScreener-basis figure onto it below. Both prices are SOL/token from the
+    // same chain, so the ratio is dimensionless and the supply/SOL-USD basis is
+    // untouched. A tiny tolerance avoids re-pricing a settled token on quote jitter.
+    const FRESH_OVERRIDE_TOLERANCE = 0.01; // 1% — ignore sub-noise differences
+    let priceFactor = 1; // current_price / oracle_price (DexScreener basis → current)
+    let current: number | null;
+    if (listed) {
+      const oraclePx = oraclePrice as number;
+      if (
+        onchain != null &&
+        Math.abs(onchain - oraclePx) / oraclePx > FRESH_OVERRIDE_TOLERANCE
+      ) {
+        current = onchain;
+        priceFactor = onchain / oraclePx;
+      } else {
+        current = oraclePx;
+      }
+    } else {
+      current = onchain;
+    }
 
     if (current == null) {
       return { ...b, priceChangeSincePct: null, priceChangeSource: null, entryMarketCapUsd: null };
@@ -256,27 +293,53 @@ export async function annotateLivePriceChange(bursts: LiveBurst[]): Promise<Live
     const pct = Math.round(((current - entry) / entry) * 100 * 100) / 100;
     const source: 'dexscreener' | 'onchain' = listed ? 'dexscreener' : 'onchain';
 
+    // Rescale the DISPLAYED current mcap/price (DexScreener snapshot) onto the
+    // fresh current price so the card stops showing a stale figure. priceFactor is
+    // 1 in the non-override path (current === oracle), so this is a no-op then and
+    // the previously-tested behaviour is byte-identical. Only the price ratio is
+    // applied — circulating supply and SOL/USD basis are unchanged — so the
+    // current mcap, the % and the entry mcap all stay one consistent source.
+    let marketCapUsd = b.marketCapUsd;
+    let priceUsd = b.priceUsd;
+    if (listed && priceFactor !== 1) {
+      if (b.marketCapUsd != null && Number.isFinite(b.marketCapUsd) && b.marketCapUsd > 0) {
+        const m = b.marketCapUsd * priceFactor;
+        if (Number.isFinite(m) && m > 0) marketCapUsd = Math.round(m);
+      }
+      if (b.priceUsd != null && Number.isFinite(b.priceUsd) && b.priceUsd > 0) {
+        const p = b.priceUsd * priceFactor;
+        if (Number.isFinite(p) && p > 0) priceUsd = p;
+      }
+    }
+
     // Entry market cap is ONLY derived for the DexScreener (listed) path: scale
-    // the current DexScreener mcap back by the DexScreener entry→now price ratio,
-    // so the % and the "$entry → $now" pair share one source and always agree in
-    // direction. For the on-chain fallback we leave it null — scaling a
-    // DexScreener mcap by an on-chain ratio is exactly the source mismatch we're
-    // eliminating, so the card shows the on-chain % WITHOUT a USD pair.
+    // the FRESH current mcap back by the entry→now price ratio, so the % and the
+    // "$entry → $now" pair share one source and always agree in direction. For the
+    // on-chain fallback we leave it null — scaling a DexScreener mcap by an
+    // on-chain ratio is exactly the source mismatch we're eliminating, so the card
+    // shows the on-chain % WITHOUT a USD pair.
     let entryMarketCapUsd: number | null = null;
     if (
       listed &&
-      b.marketCapUsd != null &&
-      Number.isFinite(b.marketCapUsd) &&
-      b.marketCapUsd > 0 &&
+      marketCapUsd != null &&
+      Number.isFinite(marketCapUsd) &&
+      marketCapUsd > 0 &&
       current > 0
     ) {
-      const scaled = (b.marketCapUsd * entry) / current;
+      const scaled = (marketCapUsd * entry) / current;
       if (Number.isFinite(scaled) && scaled > 0) {
         entryMarketCapUsd = Math.round(scaled);
       }
     }
 
-    return { ...b, priceChangeSincePct: pct, priceChangeSource: source, entryMarketCapUsd };
+    return {
+      ...b,
+      marketCapUsd,
+      priceUsd,
+      priceChangeSincePct: pct,
+      priceChangeSource: source,
+      entryMarketCapUsd,
+    };
   });
 }
 
