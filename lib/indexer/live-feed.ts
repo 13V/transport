@@ -232,30 +232,39 @@ export async function annotateLivePriceChange(bursts: LiveBurst[]): Promise<Live
     if (entry == null) {
       // No on-chain entry price → leave the computed fields null (card falls back
       // to its OHLCV-derived path / "—" exactly as before).
-      return { ...b, priceChangeSincePct: null, entryMarketCapUsd: null };
+      return { ...b, priceChangeSincePct: null, priceChangeSource: null, entryMarketCapUsd: null };
     }
 
-    // Current price: DexScreener oracle first, else the latest on-chain buy.
+    // CURRENT PRICE — ONE source per token so the % and the USD mcap pair can't
+    // disagree in direction (the "$55k → $24k but +0.0%" bug came from mixing
+    // DexScreener mcap with an on-chain %). Prefer the DexScreener oracle (listed
+    // token); fall back to the latest on-chain buy only when DexScreener has no
+    // price (fresh/un-listed). The chosen source is recorded so the entry mcap is
+    // ONLY derived in the DexScreener case.
     const oraclePrice = oracle.get(b.mint);
+    const listed = oraclePrice != null && Number.isFinite(oraclePrice) && oraclePrice > 0;
     const onchain =
       b.lastBuyPriceSol != null && Number.isFinite(b.lastBuyPriceSol) && b.lastBuyPriceSol > 0
         ? b.lastBuyPriceSol
         : null;
-    const current =
-      oraclePrice != null && Number.isFinite(oraclePrice) && oraclePrice > 0
-        ? oraclePrice
-        : onchain;
+    const current = listed ? (oraclePrice as number) : onchain;
 
     if (current == null) {
-      return { ...b, priceChangeSincePct: null, entryMarketCapUsd: null };
+      return { ...b, priceChangeSincePct: null, priceChangeSource: null, entryMarketCapUsd: null };
     }
 
     const pct = Math.round(((current - entry) / entry) * 100 * 100) / 100;
+    const source: 'dexscreener' | 'onchain' = listed ? 'dexscreener' : 'onchain';
 
-    // Entry market cap: scale the current mcap back by the price ratio. Only when
-    // a current marketCapUsd is known (DexScreener-listed); otherwise null.
+    // Entry market cap is ONLY derived for the DexScreener (listed) path: scale
+    // the current DexScreener mcap back by the DexScreener entry→now price ratio,
+    // so the % and the "$entry → $now" pair share one source and always agree in
+    // direction. For the on-chain fallback we leave it null — scaling a
+    // DexScreener mcap by an on-chain ratio is exactly the source mismatch we're
+    // eliminating, so the card shows the on-chain % WITHOUT a USD pair.
     let entryMarketCapUsd: number | null = null;
     if (
+      listed &&
       b.marketCapUsd != null &&
       Number.isFinite(b.marketCapUsd) &&
       b.marketCapUsd > 0 &&
@@ -267,7 +276,7 @@ export async function annotateLivePriceChange(bursts: LiveBurst[]): Promise<Live
       }
     }
 
-    return { ...b, priceChangeSincePct: pct, entryMarketCapUsd };
+    return { ...b, priceChangeSincePct: pct, priceChangeSource: source, entryMarketCapUsd };
   });
 }
 

@@ -156,19 +156,50 @@ export async function getSmartMoneyBuys(
     // full curation gate in JS.
     const statCols =
       'wallet, realized_pnl, roi_pct, invested_sol, win_rate, total_trades, tokens_traded, last_trade_at, seeded';
-    // PostgREST caps a single response at ~1000 rows, so a bare select silently
-    // clamps the verified set once it grows past that — starving the buy flow of
-    // the full broadened smart set. Page through with .range() (stable .order so
-    // pagination is deterministic) up to a sane cap.
-    const statRead = await fetchAllRows(
-      () =>
-        supabase
-          .from('wallet_stats')
-          .select(statCols)
-          .eq('verified', true)
-          .order('score', { ascending: false }),
-      { cap: envInt('SMART_SET_MAX', 5000) }
-    );
+    // PUSH THE CHEAP GATE INTO SQL FIRST (mirrors app/api/status/route.ts's
+    // buildGate). The OLD query fetched the top-SMART_SET_MAX verified rows BY
+    // SCORE and only filtered to smart in JS — so once the verified set exceeds
+    // the cap, genuine (mostly lower-ROI A-tier) smart wallets ranked below the
+    // cap were dropped before they were ever tested, starving the buy flow of
+    // ~hundreds of real smart wallets. Applying the gate's cheap numeric floors
+    // in SQL shrinks the prefiltered set to ~the smart total (~2k) so the cap
+    // (still a pagination backstop) rarely binds; the JS isSmartWallet confirm
+    // below applies the bot/suspect/maxWinRate nuance not expressible in SQL.
+    const buildGate = () => {
+      let qb = supabase
+        .from('wallet_stats')
+        .select(statCols)
+        .eq('verified', true)
+        .not('roi_pct', 'is', null)
+        .gte('roi_pct', criteria.minRoiPct)
+        .gte('realized_pnl', criteria.minPnlSol)
+        .gte('total_trades', criteria.minTrades)
+        .gte('tokens_traded', criteria.minTokens);
+      if (criteria.minInvestedSol > 0) {
+        qb = qb.gte('invested_sol', criteria.minInvestedSol);
+      }
+      if (criteria.maxIdleDays > 0) {
+        const cutoff = new Date(now - criteria.maxIdleDays * 86_400_000).toISOString();
+        qb = qb.gte('last_trade_at', cutoff);
+      }
+      return qb.order('score', { ascending: false });
+    };
+    let statRead = await fetchAllRows(buildGate, { cap: envInt('SMART_SET_MAX', 5000) });
+
+    // DEGRADED / pre-migration fallback (as /api/status does): if the roi_pct /
+    // invested_sol columns (or the gate filters) aren't available, fall back to
+    // the original top-N-by-score + JS-only filtering so the buy flow keeps working.
+    if (statRead.error) {
+      statRead = await fetchAllRows(
+        () =>
+          supabase
+            .from('wallet_stats')
+            .select(statCols)
+            .eq('verified', true)
+            .order('score', { ascending: false }),
+        { cap: envInt('SMART_SET_MAX', 5000) }
+      );
+    }
 
     // If verified/roi_pct columns are missing (or any other query error),
     // degrade to an empty result rather than crashing the endpoint.

@@ -153,10 +153,25 @@ export interface LiveBurst {
    */
   priceChangeSincePct?: number | null;
   /**
+   * Which source drove priceChangeSincePct (and therefore entryMarketCapUsd):
+   *  - 'dexscreener': the live DexScreener oracle priced the token, so BOTH the %
+   *    and the entry→now USD mcap pair come from one source and agree in
+   *    direction/magnitude. The card may render the "$entry → $now" pair.
+   *  - 'onchain': DexScreener has no current price (un-listed/fresh token); the %
+   *    is from the on-chain firstBuy→lastBuy prices and there is NO trustworthy
+   *    USD mcap (entryMarketCapUsd stays null) — the card shows the % WITHOUT a
+   *    fabricated/source-mismatched USD pair.
+   * null when no % could be computed. CONSISTENCY GUARANTEE: the % sign and any
+   * USD mcap arrow shown always agree because they share this single source.
+   */
+  priceChangeSource?: 'dexscreener' | 'onchain' | null;
+  /**
    * Server-computed entry (first-buy) market cap in USD, derived by scaling the
-   * current marketCapUsd back by the entry→now price ratio. Lets the card show
-   * "$entry → $now" even when the % came from the on-chain fallback. null when
-   * the current mcap or price ratio is unavailable. Filled by computeLiveFeed.
+   * current marketCapUsd back by the entry→now price ratio. ONLY populated when
+   * priceChangeSource is 'dexscreener' (so the % and the USD pair come from the
+   * SAME source and can't disagree in direction). null for the on-chain fallback
+   * — we never scale a DexScreener mcap by an on-chain ratio (that mismatch was
+   * the "$55k → $24k but +0.0%" bug). Filled by computeLiveFeed.
    */
   entryMarketCapUsd?: number | null;
   // Additional TokenMeta enrichment (filled by the route; safe-optional in case
@@ -460,19 +475,51 @@ async function resolveSmartSet(): Promise<SmartSet> {
     // passed as null — the suspect-win-rate rule then falls back to totalTrades.
     const statCols =
       'wallet, score, realized_pnl, roi_pct, invested_sol, win_rate, total_trades, tokens_traded, last_trade_at, seeded, profit_factor, consistency';
-    // PostgREST caps a single response at ~1000 rows, so a bare select silently
-    // clamps the verified set to ~1k once it grows past that — starving the live
-    // feed/alerts of the full broadened smart set. Page through with .range()
-    // (stable .order('score') so pagination is deterministic) up to a sane cap.
-    const statRead = await fetchAllRows(
-      () =>
-        supabase
-          .from('wallet_stats')
-          .select(statCols)
-          .eq('verified', true)
-          .order('score', { ascending: false }),
-      { cap: envInt('SMART_SET_MAX', 5000) }
-    );
+    // PUSH THE CHEAP GATE INTO SQL FIRST (mirrors app/api/status/route.ts's
+    // buildGate). The OLD query fetched the top-SMART_SET_MAX verified rows BY
+    // SCORE and only filtered to smart in JS — so once the verified set exceeds
+    // the cap, genuine (mostly lower-ROI A-tier) smart wallets ranked below the
+    // cap were dropped before they were ever tested, starving the feed/alerts of
+    // ~hundreds of real smart wallets. By applying the gate's cheap numeric
+    // floors in SQL the prefiltered set is ~the smart total (~2k), so the cap
+    // (which still backstops pagination) rarely binds. The JS isSmartWallet
+    // confirm below still applies the bot/suspect/maxWinRate nuance not
+    // expressible in SQL, so the final set is byte-identical to the gate.
+    const buildGate = () => {
+      let qb = supabase
+        .from('wallet_stats')
+        .select(statCols)
+        .eq('verified', true)
+        .not('roi_pct', 'is', null)
+        .gte('roi_pct', criteria.minRoiPct)
+        .gte('realized_pnl', criteria.minPnlSol)
+        .gte('total_trades', criteria.minTrades)
+        .gte('tokens_traded', criteria.minTokens);
+      if (criteria.minInvestedSol > 0) {
+        qb = qb.gte('invested_sol', criteria.minInvestedSol);
+      }
+      if (criteria.maxIdleDays > 0) {
+        const cutoff = new Date(now - criteria.maxIdleDays * 86_400_000).toISOString();
+        qb = qb.gte('last_trade_at', cutoff);
+      }
+      return qb.order('score', { ascending: false });
+    };
+    let statRead = await fetchAllRows(buildGate, { cap: envInt('SMART_SET_MAX', 5000) });
+
+    // DEGRADED / pre-migration fallback (as /api/status does): if the roi_pct /
+    // invested_sol columns (or the gate filters) aren't available, fall back to
+    // the original top-N-by-score + JS-only filtering so the feed keeps working.
+    if (statRead.error) {
+      statRead = await fetchAllRows(
+        () =>
+          supabase
+            .from('wallet_stats')
+            .select(statCols)
+            .eq('verified', true)
+            .order('score', { ascending: false }),
+        { cap: envInt('SMART_SET_MAX', 5000) }
+      );
+    }
 
     if (statRead.error || !statRead.data) return empty;
 
