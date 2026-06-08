@@ -53,6 +53,26 @@ const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 /** How long a built feed result is reused before recomputation. */
 export const RESULT_TTL_MS = 2_000;
 
+/**
+ * SHORT freshness window for the live-burst current price/market cap.
+ *
+ * The displayed CURRENT price/mcap must be the AUTHORITATIVE full-market
+ * DexScreener figure (it reflects BUYS *and* SELLS, so a dumping token reads
+ * down — unlike the on-chain last-BUY price, which only tracks buys and
+ * overstates a token that sold off after the buys). DexScreener's only flaw was
+ * its ~120s global cache lagging fast moves. So the live surface force-refreshes
+ * any DexScreener entry older than this (~15s) — applied ONLY here (via the
+ * getTokenMeta / oracle maxAgeMs overrides), NOT to the global TTL, so the rest
+ * of the app's DexScreener load is unchanged.
+ *
+ * Call-volume: the feed caps visible bursts (~30-50) and DexScreener batches 30
+ * mints/call, so a full refresh is ~1-2 calls. Behind the ~2s buildLiveFeed
+ * result cache a refresh fires at most once per ~15s per distinct mint set, i.e.
+ * ~2 calls / 15s ≈ <10 calls/min from getTokenMeta plus a like amount from the
+ * SOL oracle — comfortably within DexScreener's limits.
+ */
+export const LIVE_PRICE_MAX_AGE_MS = 15_000;
+
 interface CacheEntry {
   value: LiveFeedResult;
   at: number;
@@ -125,7 +145,14 @@ async function computeLiveFeed(p: BuildLiveFeedParams): Promise<LiveFeedResult> 
     // Skip the per-mint getTokenLargestAccounts RPC here: topHolderPct is a
     // per-card nicety on the FEED hot path, and that extra Helius call bypasses
     // the daily budget. The token DETAIL page still requests it (default on).
-    const meta = await getTokenMeta(bursts.map((b) => b.mint), { includeTopHolder: false });
+    const meta = await getTokenMeta(bursts.map((b) => b.mint), {
+      includeTopHolder: false,
+      // Demand a ~15s-fresh DexScreener snapshot for the live-burst surface so
+      // the displayed price/mcap tracks the real market (buys AND sells) within
+      // ~15-20s, instead of the ~120s global cache. Scoped to this enrichment
+      // only — the global TTL is untouched (see LIVE_PRICE_MAX_AGE_MS).
+      maxAgeMs: LIVE_PRICE_MAX_AGE_MS,
+    });
     bursts = bursts.map((b) => {
       const m = meta.get(b.mint);
       if (!m) return b;
@@ -159,11 +186,11 @@ async function computeLiveFeed(p: BuildLiveFeedParams): Promise<LiveFeedResult> 
 
   // LIVE entry→now price change. The burst card's hero % and the "$entry → $now"
   // market-cap pair must update every poll AND cover fresh pre-graduation
-  // pump.fun tokens that DexScreener/GeckoTerminal can't price yet. The on-chain
-  // trades the burst is built on always carry a real SOL price, so:
-  //   - entry price  = firstBuyPriceSol (the burst's first on-chain buy)
-  //   - current price = DexScreener oracle (preferred, fresh) ELSE the burst's
-  //     most-recent on-chain buy price (lastBuyPriceSol) — moves as buys land.
+  // pump.fun tokens that DexScreener/GeckoTerminal can't price yet.
+  //   - entry price   = firstBuyPriceSol (the burst's first on-chain buy)
+  //   - current price = the SHORT-TTL DexScreener oracle (authoritative, reflects
+  //     buys AND sells, ~15s fresh) for LISTED tokens; ELSE the burst's most-recent
+  //     on-chain TRADE price (any side) for un-listed fresh tokens.
   // This recomputes here on every (cache-missed) feed build, so the % is never
   // frozen at first detection. Fully resilient: the oracle is optional, and any
   // failure simply leaves the on-chain fallback in place.
@@ -196,29 +223,35 @@ async function computeLiveFeed(p: BuildLiveFeedParams): Promise<LiveFeedResult> 
  * market cap, so the card's hero % moves every poll and covers fresh tokens.
  *
  * Current price is resolved per mint with a clear precedence:
- *   1. DexScreener SOL oracle (fetchTokenPricesSol) — fresh, listed tokens.
- *   2. The burst's own most-recent on-chain buy price (lastBuyPriceSol) — the
- *      only price available for pre-graduation pump.fun tokens DexScreener /
- *      GeckoTerminal haven't indexed yet. It advances as new smart buys land,
- *      so the % still moves.
+ *   1. DexScreener SOL oracle (fetchTokenPricesSol) — the AUTHORITATIVE
+ *      full-market price for any LISTED token. It reflects BUYS *and* SELLS, so a
+ *      token that smart money bought then dumped reads DOWN, not stuck at its
+ *      last-buy peak. Fetched with a SHORT freshness window (LIVE_PRICE_MAX_AGE_MS
+ *      ~15s) so it tracks fast moves in BOTH directions without the ~120s global
+ *      cache lag — the only flaw the oracle ever had.
+ *   2. FALLBACK (un-listed/fresh pump.fun only): the burst's most-recent on-chain
+ *      TRADE price (lastTradePriceSol — buy OR sell), so the % still reflects
+ *      sells; it falls back to lastBuyPriceSol only when no any-side price exists.
+ *      This is the ONLY price available before DexScreener indexes the token.
  * Entry price is always the burst's first on-chain buy (firstBuyPriceSol).
  *
- * entryMarketCapUsd is derived by scaling the (DexScreener) current marketCapUsd
- * back through the entry→now price ratio, so "$entry → $now" renders coherently
- * regardless of which current-price source was used.
+ * WHY the on-chain LAST-BUY is no longer the current price for LISTED tokens:
+ * lastBuyPriceSol only advances on BUYS, so for a token that sold off after the
+ * smart buys it stays pinned at the peak and OVERSTATES the current mcap (e.g.
+ * showing $84.6k when the market is really ~$44k). The full-market DexScreener
+ * price is the correct authority; we just make it fresh.
  *
- * FRESHNESS (the staleness fix): the displayed CURRENT marketCapUsd/priceUsd come
- * from getTokenMeta's DexScreener snapshot, which is cached up to ~120s — so a
- * token that just ran $38k→$60k kept showing the stale $38k. The on-chain
- * last-trade price (lastBuyPriceSol) refreshes per ingested trade (~10s fresh,
- * free, no extra API). So for a LISTED token we treat the on-chain last buy as
- * the freshest CURRENT price and RESCALE the DexScreener mcap/price onto it by
- * the SOL-price ratio (current_onchain / dex_oracle_price). This keeps the exact
- * same circulating-supply + SOL/USD basis the card already uses — only the price
- * factor changes — so the displayed current mcap, the % and the derived entry
- * mcap all share ONE basis and can never disagree in direction. The override is
- * applied only when the on-chain price meaningfully differs from the (staler)
- * oracle snapshot, so a settled token isn't perturbed by quote noise.
+ * entryMarketCapUsd is derived (DexScreener path only) by scaling the current
+ * marketCapUsd back through the entry→now price ratio, so the current mcap, the %
+ * and the "$entry → $now" pair all share ONE DexScreener basis and can never
+ * disagree in direction (the % sign and the mcap arrow / multiplier always agree).
+ * For the on-chain fallback entryMarketCapUsd stays null — scaling a DexScreener
+ * mcap by an on-chain ratio is exactly the source mismatch we eliminate.
+ *
+ * FRESHNESS: the displayed current marketCapUsd/priceUsd come from getTokenMeta's
+ * DexScreener snapshot, now force-refreshed to ~15s on the live surface (see the
+ * computeLiveFeed enrichment) — so it already tracks the real market up AND down;
+ * no on-chain rescale of a listed token's mcap is needed or done.
  *
  * FULLY RESILIENT: the oracle call is best-effort (any failure falls back to the
  * on-chain price); bursts without a usable entry price are returned unchanged.
@@ -226,12 +259,15 @@ async function computeLiveFeed(p: BuildLiveFeedParams): Promise<LiveFeedResult> 
 export async function annotateLivePriceChange(bursts: LiveBurst[]): Promise<LiveBurst[]> {
   if (bursts.length === 0) return bursts;
 
-  // One batched SOL-price oracle read for the whole feed (cached ~60s). Prefer
-  // it as the live current price; fall back to on-chain when a mint isn't listed.
+  // One batched SOL-price oracle read for the whole feed, force-refreshed to the
+  // short live window (~15s) so a LISTED token's current price is the real
+  // full-market price (buys AND sells) and never lags a dump. Best-effort: any
+  // failure falls back to the on-chain price below.
   let oracle = new Map<string, number>();
   try {
     oracle = await fetchTokenPricesSol(
-      Array.from(new Set(bursts.map((b) => b.mint).filter(Boolean)))
+      Array.from(new Set(bursts.map((b) => b.mint).filter(Boolean))),
+      { maxAgeMs: LIVE_PRICE_MAX_AGE_MS }
     );
   } catch {
     oracle = new Map();
@@ -249,43 +285,29 @@ export async function annotateLivePriceChange(bursts: LiveBurst[]): Promise<Live
     }
 
     // CURRENT PRICE — ONE source per token so the % and the USD mcap pair can't
-    // disagree in direction (the "$55k → $24k but +0.0%" bug came from mixing
-    // DexScreener mcap with an on-chain %). Prefer the DexScreener oracle (listed
-    // token); fall back to the latest on-chain buy only when DexScreener has no
-    // price (fresh/un-listed). The chosen source is recorded so the entry mcap is
-    // ONLY derived in the DexScreener case.
-    const oraclePrice = oracle.get(b.mint);
-    const listed = oraclePrice != null && Number.isFinite(oraclePrice) && oraclePrice > 0;
-    const onchain =
+    // disagree in direction. For a LISTED token the authority is the (fresh)
+    // DexScreener oracle, which reflects buys AND sells — so a dumping token reads
+    // down. ONLY when DexScreener can't price the token (fresh/un-listed) do we
+    // fall back to the on-chain price, preferring the most-recent TRADE of ANY
+    // side (lastTradePriceSol) so the fallback also reflects sells, then last-buy.
+    const lastTrade =
+      b.lastTradePriceSol != null &&
+      Number.isFinite(b.lastTradePriceSol) &&
+      b.lastTradePriceSol > 0
+        ? b.lastTradePriceSol
+        : null;
+    const lastBuy =
       b.lastBuyPriceSol != null && Number.isFinite(b.lastBuyPriceSol) && b.lastBuyPriceSol > 0
         ? b.lastBuyPriceSol
         : null;
+    const onchain = lastTrade ?? lastBuy;
 
-    // FRESHNESS OVERRIDE (the staleness fix): for a LISTED token, the on-chain
-    // last-trade price is ~10s fresh while the DexScreener oracle/mcap snapshot is
-    // up to ~120s stale. When the two disagree by more than a small noise band we
-    // trust the fresher on-chain price as the CURRENT price and rescale every
-    // DexScreener-basis figure onto it below. Both prices are SOL/token from the
-    // same chain, so the ratio is dimensionless and the supply/SOL-USD basis is
-    // untouched. A tiny tolerance avoids re-pricing a settled token on quote jitter.
-    const FRESH_OVERRIDE_TOLERANCE = 0.01; // 1% — ignore sub-noise differences
-    let priceFactor = 1; // current_price / oracle_price (DexScreener basis → current)
-    let current: number | null;
-    if (listed) {
-      const oraclePx = oraclePrice as number;
-      if (
-        onchain != null &&
-        Math.abs(onchain - oraclePx) / oraclePx > FRESH_OVERRIDE_TOLERANCE
-      ) {
-        current = onchain;
-        priceFactor = onchain / oraclePx;
-      } else {
-        current = oraclePx;
-      }
-    } else {
-      current = onchain;
-    }
+    const oraclePrice = oracle.get(b.mint);
+    const listed = oraclePrice != null && Number.isFinite(oraclePrice) && oraclePrice > 0;
 
+    // LISTED → DexScreener oracle is the current price (no on-chain override, the
+    // dump-overstatement bug). UN-LISTED → on-chain last-trade fallback.
+    const current: number | null = listed ? (oraclePrice as number) : onchain;
     if (current == null) {
       return { ...b, priceChangeSincePct: null, priceChangeSource: null, entryMarketCapUsd: null };
     }
@@ -293,27 +315,14 @@ export async function annotateLivePriceChange(bursts: LiveBurst[]): Promise<Live
     const pct = Math.round(((current - entry) / entry) * 100 * 100) / 100;
     const source: 'dexscreener' | 'onchain' = listed ? 'dexscreener' : 'onchain';
 
-    // Rescale the DISPLAYED current mcap/price (DexScreener snapshot) onto the
-    // fresh current price so the card stops showing a stale figure. priceFactor is
-    // 1 in the non-override path (current === oracle), so this is a no-op then and
-    // the previously-tested behaviour is byte-identical. Only the price ratio is
-    // applied — circulating supply and SOL/USD basis are unchanged — so the
-    // current mcap, the % and the entry mcap all stay one consistent source.
-    let marketCapUsd = b.marketCapUsd;
-    let priceUsd = b.priceUsd;
-    if (listed && priceFactor !== 1) {
-      if (b.marketCapUsd != null && Number.isFinite(b.marketCapUsd) && b.marketCapUsd > 0) {
-        const m = b.marketCapUsd * priceFactor;
-        if (Number.isFinite(m) && m > 0) marketCapUsd = Math.round(m);
-      }
-      if (b.priceUsd != null && Number.isFinite(b.priceUsd) && b.priceUsd > 0) {
-        const p = b.priceUsd * priceFactor;
-        if (Number.isFinite(p) && p > 0) priceUsd = p;
-      }
-    }
+    // The displayed current mcap/price come from getTokenMeta's now-short-TTL
+    // DexScreener snapshot (already ~15s fresh, full-market), so they are left
+    // as-is — no on-chain rescale, which is what overstated dumps before.
+    const marketCapUsd = b.marketCapUsd;
+    const priceUsd = b.priceUsd;
 
     // Entry market cap is ONLY derived for the DexScreener (listed) path: scale
-    // the FRESH current mcap back by the entry→now price ratio, so the % and the
+    // the current mcap back by the entry→now price ratio, so the % and the
     // "$entry → $now" pair share one source and always agree in direction. For the
     // on-chain fallback we leave it null — scaling a DexScreener mcap by an
     // on-chain ratio is exactly the source mismatch we're eliminating, so the card

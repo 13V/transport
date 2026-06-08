@@ -438,6 +438,16 @@ export interface GetTokenMetaOptions {
   // When false, skips the extra getTokenLargestAccounts RPC per mint so a
   // large enrichment batch can stay within its request budget. Defaults on.
   includeTopHolder?: boolean;
+  /**
+   * Override the cache freshness window for THIS call (ms). A cached entry is
+   * only served when it is younger than this; older entries are force-refreshed
+   * from DexScreener/Helius. Used ONLY by the LIVE-burst enrichment to demand a
+   * ~15-20s-fresh price/marketCap (which reflects BUYS *and* SELLS — so a dumping
+   * token reads down, not stuck at its last-buy peak), WITHOUT lowering the
+   * module-wide TTL_MS that the rest of the app (token page etc.) relies on.
+   * Capped at TTL_MS — a larger value never refreshes less often than the base.
+   */
+  maxAgeMs?: number;
 }
 
 export async function getTokenMeta(
@@ -447,11 +457,18 @@ export async function getTokenMeta(
   const result = new Map<string, TokenMeta>();
   const now = Date.now();
 
+  // Effective freshness window: a caller may demand fresher than the base TTL
+  // (the live feed wants ~15s), but never staler than TTL_MS.
+  const maxAge =
+    options?.maxAgeMs != null && Number.isFinite(options.maxAgeMs) && options.maxAgeMs > 0
+      ? Math.min(options.maxAgeMs, TTL_MS)
+      : TTL_MS;
+
   const unique = Array.from(new Set(mints.filter((m) => typeof m === 'string' && m)));
   const toFetch: string[] = [];
   for (const mint of unique) {
     const entry = CACHE.get(mint);
-    if (entry && now - entry.ts < TTL_MS) result.set(mint, entry.meta);
+    if (entry && now - entry.ts < maxAge) result.set(mint, entry.meta);
     else toFetch.push(mint);
   }
   if (toFetch.length === 0) return result;

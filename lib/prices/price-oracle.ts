@@ -128,15 +128,35 @@ async function fetchChunk(mints: string[]): Promise<DexPair[]> {
   }
 }
 
+export interface FetchTokenPricesOptions {
+  /**
+   * Override the cache freshness window for THIS call (ms). A cached entry is
+   * only served when it is younger than this; older entries are force-refetched.
+   * Used by the LIVE-burst surface to demand a ~15-20s-fresh current price
+   * (which tracks BUYS *and* SELLS), without lowering the module-wide
+   * CACHE_TTL_MS that the rest of the app relies on. Capped at CACHE_TTL_MS — a
+   * larger value would never refresh more often than the base TTL anyway.
+   */
+  maxAgeMs?: number;
+}
+
 /**
  * Current SOL-denominated price for each mint. Missing/illiquid/USD-only-with-
  * no-reference mints are omitted from the Map rather than returned as 0.
  */
 export async function fetchTokenPricesSol(
-  mints: string[]
+  mints: string[],
+  options?: FetchTokenPricesOptions
 ): Promise<Map<string, number>> {
   const out = new Map<string, number>();
   const now = Date.now();
+
+  // Effective freshness window: the caller may demand fresher than the base TTL
+  // (e.g. the live feed wants ~15s), but never staler than CACHE_TTL_MS.
+  const maxAge =
+    options?.maxAgeMs != null && Number.isFinite(options.maxAgeMs) && options.maxAgeMs > 0
+      ? Math.min(options.maxAgeMs, CACHE_TTL_MS)
+      : CACHE_TTL_MS;
 
   // Dedupe and serve fresh cache hits; collect the rest for fetching.
   const toFetch: string[] = [];
@@ -145,7 +165,7 @@ export async function fetchTokenPricesSol(
     if (!mint || seen.has(mint)) continue;
     seen.add(mint);
     const cached = priceCache.get(mint);
-    if (cached && now - cached.at < CACHE_TTL_MS) {
+    if (cached && now - cached.at < maxAge) {
       out.set(mint, cached.priceSol);
     } else {
       toFetch.push(mint);
