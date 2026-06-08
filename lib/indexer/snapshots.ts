@@ -29,7 +29,7 @@
  */
 
 import { getSupabase, isSupabaseConfigured } from '../supabase-client';
-import { getSmartCriteria, isSmartWallet } from './curation';
+import { getBroadSmartCriteria, isSmartWallet } from './curation';
 
 /** How many top-scored verified wallets to consider before curation. */
 const READ_LIMIT = 500;
@@ -73,7 +73,8 @@ export async function snapshotLeaderboard(): Promise<{ captured: number }> {
     return { captured: 0 };
   }
 
-  const criteria = getSmartCriteria();
+  // INCLUSION uses the BROAD gate so the snapshot covers the broadened set.
+  const criteria = getBroadSmartCriteria();
   const now = Date.now();
 
   // Filter to smart-money, then rank by score desc among the survivors.

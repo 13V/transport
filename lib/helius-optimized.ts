@@ -13,6 +13,7 @@
 
 import axios from 'axios';
 import { initHelius } from './helius-client';
+import { guardHeliusPage, recordSpend } from './indexer/helius-budget';
 import {
   getTransactionCache,
   getHolderCache,
@@ -48,6 +49,12 @@ let metrics: OptimizationMetrics = {
 
 const heliusCircuitBreaker = new CircuitBreaker(5, 60000, 2);
 
+// Per-RPC credit estimate for the daily budget guard — mirrors helius-client.ts
+// so this optimized path is bounded by the SAME global cap (helius-budget.ts)
+// and can't bypass it (H-3). Charging a flat estimate keeps the many small
+// getTransaction/getSignaturesForAddress calls accounted for.
+const RPC_CREDIT_EST = 10;
+
 /**
  * Get Helius RPC URL
  */
@@ -64,6 +71,13 @@ async function heliusRpc(method: string, params: any[] = []): Promise<any> {
     throw new Error('Circuit breaker open: too many recent failures');
   }
 
+  // Global daily-budget circuit breaker: once the Helius credit cap is reached,
+  // fail closed so this optimized path can't keep spending past the cap. Callers
+  // (getAddressTransactionsOptimized, batchGet*) catch and degrade to []/null.
+  if (!(await guardHeliusPage(RPC_CREDIT_EST))) {
+    throw new Error('Helius daily credit cap reached');
+  }
+
   try {
     const response = await axios.post(getHeliusUrl(), {
       jsonrpc: '2.0',
@@ -78,6 +92,7 @@ async function heliusRpc(method: string, params: any[] = []): Promise<any> {
     }
 
     heliusCircuitBreaker.recordSuccess();
+    await recordSpend(RPC_CREDIT_EST); // call succeeded -> record the spend
     return response.data.result;
   } catch (error) {
     heliusCircuitBreaker.recordFailure();

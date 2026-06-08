@@ -15,8 +15,10 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabase, isSupabaseConfigured } from '../../../lib/supabase-client';
-import { getSmartCriteria, isSmartWallet } from '../../../lib/indexer/curation';
+import { isSmartBroad, smartTier } from '../../../lib/indexer/curation';
 import { classifyWallet } from '../../../lib/indexer/wallet-tags';
+import { validateApiKey } from '../../../lib/api-keys';
+import { clientIp } from '../../../lib/rate-limit';
 
 /**
  * Read the precomputed leaderboard straight from wallet_stats (fast, <100ms).
@@ -41,7 +43,7 @@ async function readLeaderboardFromDb(
     'wallet, score, realized_pnl, win_rate, consistency, total_trades, tokens_traded, last_trade_at, updated_at';
   const extRead = await supabase
     .from('wallet_stats')
-    .select(`${baseColumns}, seeded, roi_pct, invested_sol, verified, funded_by`)
+    .select(`${baseColumns}, seeded, roi_pct, invested_sol, profit_factor, verified, funded_by`)
     .order('score', { ascending: false })
     .range(offset, offset + limit - 1);
 
@@ -62,11 +64,31 @@ async function readLeaderboardFromDb(
 
   const rows = data ?? [];
   const totalWallets = count ?? rows.length;
-  const criteria = getSmartCriteria();
   const now = Date.now();
 
   return {
-    leaderboard: rows.map((r: any, i: number) => ({
+    leaderboard: rows.map((r: any, i: number) => {
+      // Build the curation stat once so the broad smart flag and the S/A tier are
+      // derived from identical inputs.
+      const stat = {
+        realizedPnl: Number(r.realized_pnl),
+        roiPct: r.roi_pct == null ? null : Number(r.roi_pct),
+        investedSol: r.invested_sol == null ? null : Number(r.invested_sol),
+        winRate: Number(r.win_rate),
+        // Edge floors read these; map null DB values to null so a disabled
+        // floor (0) lets them pass and an enabled floor rejects only unscored
+        // wallets, matching the indexer gate (lib/indexer/live-bursts.ts).
+        profitFactor: r.profit_factor == null ? null : Number(r.profit_factor),
+        consistency: r.consistency == null ? null : Number(r.consistency),
+        // No realized_events column on wallet_stats; pass null so the
+        // suspect-win-rate rule falls back to totalTrades (as live-bursts does).
+        realizedEvents: null,
+        totalTrades: Number(r.total_trades),
+        tokensTraded: Number(r.tokens_traded),
+        lastTradeAt: r.last_trade_at,
+        seeded: Boolean(r.seeded),
+      };
+      return {
       rank: offset + i + 1,
       address: r.wallet,
       score: Number(r.score),
@@ -89,21 +111,12 @@ async function readLeaderboardFromDb(
         totalTrades: Number(r.total_trades),
         tokensTraded: Number(r.tokens_traded),
       }),
-      smart: isSmartWallet(
-        {
-          realizedPnl: Number(r.realized_pnl),
-          roiPct: r.roi_pct == null ? null : Number(r.roi_pct),
-          investedSol: r.invested_sol == null ? null : Number(r.invested_sol),
-          winRate: Number(r.win_rate),
-          totalTrades: Number(r.total_trades),
-          tokensTraded: Number(r.tokens_traded),
-          lastTradeAt: r.last_trade_at,
-          seeded: Boolean(r.seeded),
-        },
-        criteria,
-        now
-      ),
-    })),
+      // INCLUSION uses the BROAD gate so the smart inventory grows; smartTier
+      // (S = elite, A = broad-only) keeps the elite set identifiable.
+      smart: isSmartBroad(stat, now),
+      smartTier: smartTier(stat, now),
+      };
+    }),
     totalWallets,
     pagination: {
       offset,
@@ -130,7 +143,8 @@ export interface LeaderboardResponse {
     tokensHeld: number;
     updatedAt: string; // ISO 8601
     seeded?: boolean; // manually-trusted wallet (SEED_WALLETS / committed list)
-    smart?: boolean; // clears the smart-money quality gate (curation.ts)
+    smart?: boolean; // clears the BROAD smart-money inclusion gate (curation.ts)
+    smartTier?: 'S' | 'A' | null; // smart curation tier: S=elite, A=broad-only, null=not smart
     roiPct?: number | null; // accurate all-time ROI% (verified wallets only)
     verified?: boolean; // deep-scanned: numbers are accurate all-time
     fundedBy?: string | null; // smart wallet that funded this one (SOL transfer)
@@ -218,15 +232,19 @@ if (typeof globalThis !== 'undefined') {
   }, CLEANUP_INTERVAL);
 }
 
-function getClientIdentifier(request: NextRequest): string {
-  // Check for API key (authenticated)
-  const apiKey = request.headers.get('x-api-key');
-  if (apiKey) {
-    return `api-key:${apiKey}`;
+/**
+ * Rate-limit identity. ONLY a request whose x-api-key actually validates against
+ * the api_keys store is treated as authenticated and keyed by its (validated)
+ * key. Everyone else — including requests carrying an unvalidated x-api-key — is
+ * keyed by the TRUSTED client IP, never by a client-supplied header, so an
+ * attacker can't claim the authenticated tier or evade the limiter by varying
+ * the header value.
+ */
+function getClientIdentifier(request: NextRequest, validatedApiKey: string | null): string {
+  if (validatedApiKey) {
+    return `api-key:${validatedApiKey}`;
   }
-
-  // Fall back to IP address (public)
-  return request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
+  return clientIp(request);
 }
 
 function checkRateLimit(
@@ -298,9 +316,24 @@ export async function GET(
   { params }: { params: Record<string, string | string[]> }
 ): Promise<NextResponse<LeaderboardResponse | WalletDetailsResponse | HistoryResponse | ErrorResponse>> {
   try {
-    // Get client identifier and check rate limit
-    const clientId = getClientIdentifier(request);
-    const isAuthenticated = request.headers.has('x-api-key');
+    // Authenticate: a request is "authenticated" (1000/min tier) ONLY if its
+    // x-api-key actually validates against the api_keys store — the mere
+    // presence of the header is NOT trusted. The validator reads the key from
+    // Authorization/?key=, so present the x-api-key value as a Bearer token.
+    const apiKeyHeader = request.headers.get('x-api-key');
+    let validatedApiKey: string | null = null;
+    if (apiKeyHeader) {
+      const probe = new Request(request.url, {
+        headers: { authorization: `Bearer ${apiKeyHeader}` },
+      });
+      const result = await validateApiKey(probe);
+      if (result.valid) validatedApiKey = apiKeyHeader;
+    }
+    const isAuthenticated = validatedApiKey != null;
+
+    // Get client identifier and check rate limit. Unauthenticated requests are
+    // keyed by the TRUSTED client IP, never the client-supplied header.
+    const clientId = getClientIdentifier(request, validatedApiKey);
     const rateLimitCheck = checkRateLimit(clientId, isAuthenticated);
 
     if (!rateLimitCheck.allowed) {

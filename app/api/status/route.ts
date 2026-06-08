@@ -11,7 +11,7 @@
 
 import { NextResponse } from 'next/server';
 import { getSupabase, isSupabaseConfigured } from '../../../lib/supabase-client';
-import { getSmartCriteria, isSmartWallet } from '../../../lib/indexer/curation';
+import { getBroadSmartCriteria, isSmartWallet } from '../../../lib/indexer/curation';
 import { fetchAllRows } from '../../../lib/db-paginate';
 
 export const dynamic = 'force-dynamic';
@@ -46,7 +46,9 @@ export async function GET() {
   }
 
   const supabase = getSupabase();
-  const criteria = getSmartCriteria();
+  // INCLUSION uses the BROAD gate so the reported smart total matches the
+  // broadened inventory surfaced everywhere else (leaderboard, live feed, …).
+  const criteria = getBroadSmartCriteria();
   const now = Date.now();
 
   // Last cron runs (bookkeeping written by the indexer / refine passes), plus the
@@ -54,7 +56,7 @@ export async function GET() {
   const { data: stateRows } = await supabase
     .from('indexer_state')
     .select('key, value, updated_at')
-    .in('key', ['last_run', 'last_seed_run', 'last_webhook_at']);
+    .in('key', ['last_run', 'last_seed_run', 'last_webhook_at', 'last_link_tracking']);
   const state: Record<string, unknown> = {};
   for (const r of stateRows ?? []) state[(r as any).key] = (r as any).value;
 
@@ -224,6 +226,7 @@ export async function GET() {
       generatedAt: new Date().toISOString(),
       lastIndexRun: state.last_run ?? null,
       lastRefineRun: state.last_seed_run ?? null,
+      lastLinkRun: state.last_link_tracking ?? null,
       lastWebhookAt,
       lastTradeAt,
       migrationApplied,
@@ -242,6 +245,7 @@ export async function GET() {
         listAddresses: '/api/smart-money/list?format=addresses',
         listCsv: '/api/smart-money/list?format=csv',
         leaderboard: '/smart-money',
+        trackLinks: '/api/cron/track-links',
       },
     },
     // CDN-cache for pollers: the status endpoint is public and frequently hit by

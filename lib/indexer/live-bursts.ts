@@ -25,7 +25,7 @@
 
 import { createHash } from 'crypto';
 import { getSupabase, isSupabaseConfigured } from '../supabase-client';
-import { getSmartCriteria, isSmartWallet } from './curation';
+import { getBroadSmartCriteria, isSmartWallet } from './curation';
 import { buildClusters } from './clusters';
 import { tierFromScore } from '../format';
 import { readSnapshot, writeSnapshot } from './smart-set-cache';
@@ -414,7 +414,9 @@ async function resolveSmartSet(): Promise<SmartSet> {
 
   try {
     const supabase = getSupabase();
-    const criteria = getSmartCriteria();
+    // INCLUSION uses the BROAD gate so more potential burst participants (and the
+    // Helius-synced webhook set, which is derived from this same set) are covered.
+    const criteria = getBroadSmartCriteria();
     const now = Date.now();
 
     // Only verified (deep-scanned) wallets have trustworthy stats; apply the

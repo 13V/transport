@@ -19,10 +19,25 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabase, isSupabaseConfigured } from '../../../../lib/supabase-client';
 import { getPublicVapidKey } from '../../../../lib/push';
+import { rateLimit, clientIp } from '../../../../lib/rate-limit';
 
 export const dynamic = 'force-dynamic';
 
 const NO_STORE = { 'Cache-Control': 'no-store' };
+
+// Per-IP write cap (near-term abuse mitigation; identity is a self-asserted
+// owner id, so the IP limiter is the cheap guardrail on the mutating path).
+const WRITE_RL_MAX = 60;
+
+/** Returns a 429 response when the per-IP write budget is exhausted, else null. */
+function writeRateLimited(request: NextRequest): NextResponse | null {
+  const rl = rateLimit('push-subscribe-write', clientIp(request), WRITE_RL_MAX);
+  if (rl.ok) return null;
+  return NextResponse.json(
+    { error: 'Rate limit exceeded' },
+    { status: 429, headers: { ...NO_STORE, 'Retry-After': String(rl.retryAfter) } }
+  );
+}
 
 // Owner is the same stable per-device id as the watchlist (UUID or, later, a
 // wallet address). Optional on a subscription — endpoint is the real key.
@@ -67,6 +82,9 @@ async function readBody(request: NextRequest): Promise<Record<string, unknown>> 
 
 /** POST — upsert a subscription for this device. */
 export async function POST(request: NextRequest) {
+  const limited = writeRateLimited(request);
+  if (limited) return limited;
+
   const body = await readBody(request);
   const sub = parseSubscription(body.subscription);
   if (!sub) {
@@ -101,6 +119,9 @@ export async function POST(request: NextRequest) {
 
 /** DELETE — remove a subscription by endpoint. */
 export async function DELETE(request: NextRequest) {
+  const limited = writeRateLimited(request);
+  if (limited) return limited;
+
   const body = await readBody(request);
   const endpoint = body.endpoint;
   if (typeof endpoint !== 'string' || !/^https?:\/\//.test(endpoint)) {

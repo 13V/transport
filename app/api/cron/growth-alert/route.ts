@@ -21,7 +21,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { cronAuthFails } from '../../../../lib/cron-auth';
 import { getSupabase, isSupabaseConfigured } from '../../../../lib/supabase-client';
-import { getSmartCriteria } from '../../../../lib/indexer/curation';
+import { getBroadSmartCriteria } from '../../../../lib/indexer/curation';
 import { sendAlert } from '../../../../lib/alerts/notifier';
 
 export const dynamic = 'force-dynamic';
@@ -51,7 +51,8 @@ export async function GET(request: NextRequest) {
 
   try {
     const supabase = getSupabase();
-    const c = getSmartCriteria();
+    // Smart milestone counts the BROAD inclusion set (matches /api/status).
+    const c = getBroadSmartCriteria();
     const now = Date.now();
 
     // --- current totals ---

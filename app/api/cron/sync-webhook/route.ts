@@ -68,8 +68,9 @@ function sameWebhookUrl(a: string | undefined, b: string): boolean {
  * scan and instead shares the cached resolution (often a 0-query cache hit).
  *
  * EQUIVALENCE: getSmartWalletSet().wallets is the set of wallets for which
- * isSmartWallet(...) holds under getSmartCriteria() — exactly the gate the old
- * scan applied in JS. The only implementation nuance: the old scan prefiltered
+ * isSmartWallet(...) holds under getBroadSmartCriteria() — the BROAD inclusion
+ * gate (S + A tiers), so Helius now monitors the broadened smart set. The only
+ * implementation nuance: the old scan prefiltered
  * the query by `roi_pct not null` + gte thresholds, while resolveSmartSet
  * prefilters by `verified=true`; for non-seeded wallets these select the same
  * population because isSmartWallet itself requires roi_pct != null (= verified)

@@ -18,11 +18,26 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabase, isSupabaseConfigured } from '../../../lib/supabase-client';
+import { rateLimit, clientIp } from '../../../lib/rate-limit';
 
 // Writes — never cache.
 export const dynamic = 'force-dynamic';
 
 const NO_STORE = { 'Cache-Control': 'no-store' };
+
+// Per-IP write cap (near-term abuse mitigation; identity is a self-asserted
+// owner id, so the IP limiter is the cheap guardrail on the mutating path).
+const WRITE_RL_MAX = 60;
+
+/** Returns a 429 response when the per-IP write budget is exhausted, else null. */
+function writeRateLimited(request: NextRequest): NextResponse | null {
+  const rl = rateLimit('watchlist-write', clientIp(request), WRITE_RL_MAX);
+  if (rl.ok) return null;
+  return NextResponse.json(
+    { error: 'Rate limit exceeded' },
+    { status: 429, headers: { ...NO_STORE, 'Retry-After': String(rl.retryAfter) } }
+  );
+}
 
 // base58-ish: Solana addresses are 32-44 chars from the base58 alphabet
 // (no 0, O, I, l). Owner ids are UUIDs or, later, wallet addresses — keep them
@@ -78,6 +93,9 @@ async function readBody(request: NextRequest): Promise<{ owner: unknown; address
 
 /** POST — upsert one address for the owner. */
 export async function POST(request: NextRequest) {
+  const limited = writeRateLimited(request);
+  if (limited) return limited;
+
   const { owner, address } = await readBody(request);
   if (!isValidOwner(owner) || !isValidAddress(address)) {
     return NextResponse.json({ error: 'Invalid owner or address' }, { status: 400, headers: NO_STORE });
@@ -101,6 +119,9 @@ export async function POST(request: NextRequest) {
 
 /** DELETE — remove one address for the owner. */
 export async function DELETE(request: NextRequest) {
+  const limited = writeRateLimited(request);
+  if (limited) return limited;
+
   const { owner, address } = await readBody(request);
   if (!isValidOwner(owner) || !isValidAddress(address)) {
     return NextResponse.json({ error: 'Invalid owner or address' }, { status: 400, headers: NO_STORE });

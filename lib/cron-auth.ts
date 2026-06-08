@@ -11,12 +11,13 @@
  *      `CRON_SECRET` env value — the #1 cause. We `.trim()` the env secret
  *      (and every presented value) before comparing.
  *
- *   2. The secret can be presented ANY of these ways (each constant-time,
+ *   2. The secret can be presented EITHER of these ways (each constant-time,
  *      length-guarded compared against the trimmed secret):
  *        a. `Authorization: Bearer <secret>`  (Vercel Cron sends this)
  *        b. `Authorization: <secret>`         (raw header, no `Bearer ` prefix)
- *        c. `?secret=<secret>` or `?cron_secret=<secret>` query param — lets a
- *           mobile user authenticate by editing the URL, no header tooling needed.
+ *
+ *      The secret is read ONLY from the Authorization header — never from a
+ *      query string — so it can't leak into access logs / referrers.
  *
  * Returns `true` when auth FAILS (caller should reject with 401), `false` when
  * the request is authorized.
@@ -52,13 +53,11 @@ export function cronAuthFails(request: NextRequest): boolean {
   const auth = request.headers.get('authorization');
   if (auth) {
     // Accept both `Bearer <secret>` and a raw `<secret>` Authorization header.
+    // The secret is intentionally NOT accepted via query string — that would
+    // leak CRON_SECRET into access logs / proxy logs / referrer headers.
     candidates.push(auth.startsWith('Bearer ') ? auth.slice('Bearer '.length) : auth);
     candidates.push(auth);
   }
-
-  const params = request.nextUrl.searchParams;
-  const fromQuery = params.get('secret') ?? params.get('cron_secret');
-  if (fromQuery) candidates.push(fromQuery);
 
   // Authorized if ANY presented value matches the (trimmed) secret.
   for (const candidate of candidates) {
