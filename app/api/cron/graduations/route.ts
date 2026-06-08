@@ -11,9 +11,26 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import { timingSafeEqual } from 'crypto';
 import { runGraduationScan } from '../../../../lib/indexer/run-graduation-scan';
 
 export const dynamic = 'force-dynamic';
+
+/**
+ * Cron auth — FAILS CLOSED. Returns true (= reject) when CRON_SECRET is unset OR
+ * the Authorization header does not match `Bearer <secret>`. Constant-time,
+ * length-guarded compare.
+ */
+function cronAuthFails(request: NextRequest): boolean {
+  const secret = process.env.CRON_SECRET;
+  if (!secret) return true;
+  const auth = request.headers.get('authorization') ?? '';
+  const a = Buffer.from(auth);
+  const b = Buffer.from(`Bearer ${secret}`);
+  if (a.length !== b.length) return true;
+  return !timingSafeEqual(a, b);
+}
+
 export const maxDuration = 60;
 
 function clampParam(raw: string | null, min: number, max: number): number | undefined {
@@ -24,12 +41,8 @@ function clampParam(raw: string | null, min: number, max: number): number | unde
 }
 
 export async function GET(request: NextRequest) {
-  const secret = process.env.CRON_SECRET;
-  if (secret) {
-    const auth = request.headers.get('authorization');
-    if (auth !== `Bearer ${secret}`) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+  if (cronAuthFails(request)) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
   // Per-call overrides so the cron driver can dial bulk-ingest volume.

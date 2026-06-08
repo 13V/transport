@@ -180,7 +180,11 @@ function scoreFromAccurate(p: {
 export async function runSeedIndexer(opts: SeedIndexerOptions = {}): Promise<SeedIndexerResult> {
   const start = Date.now();
   const maxWallets = opts.maxWallets ?? envInt('SEED_MAX_WALLETS', 30);
-  const maxTxsPerWallet = opts.maxTxsPerWallet ?? envInt('SEED_MAX_TXS', 250);
+  // Deep enough that most wallets get a COMPLETE all-time scan (so verification
+  // is meaningful); only genuinely huge-history wallets come back incomplete and
+  // are left verified=false for a later, deeper pass. Was 250, which truncated
+  // any wallet with >250 swaps and fabricated inflated win rates / ROI.
+  const maxTxsPerWallet = opts.maxTxsPerWallet ?? envInt('SEED_MAX_TXS', 1000);
   const timeBudgetMs = opts.timeBudgetMs ?? envInt('SEED_TIME_BUDGET_MS', 50_000);
 
   const base = {

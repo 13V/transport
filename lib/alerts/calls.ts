@@ -92,9 +92,43 @@ function fmtPct(n: number): string {
   return `${r >= 0 ? '+' : ''}${r}%`;
 }
 
-/** Display ticker: $SYM when known, else a short mint. */
+/**
+ * Sanitize an attacker-controlled, on-chain token symbol/name before it is
+ * posted to X / Telegram from our verified account. Token metadata is fully
+ * attacker-controlled, and the X path posts the plain text VERBATIM (no HTML
+ * escaping), so a malicious symbol could inject @-mentions, links, newlines, or
+ * control chars into our authored posts. We:
+ *   - strip control chars + collapse all whitespace (no newlines/tabs),
+ *   - drop @-mentions and #-hashtags (no riding our reach),
+ *   - drop URL-like substrings (http(s)://, www., bare domains like foo.com/io),
+ *   - allowlist to a safe charset (alphanumerics, space, and a few separators),
+ *   - hard-cap the length.
+ * Returns '' when nothing safe remains, so callers fall back to the mint.
+ */
+const MAX_SYMBOL_LEN = 24;
+
+function sanitizeTokenText(raw: string | null | undefined): string {
+  let s = String(raw ?? '');
+  // Remove control chars (incl. newlines, tabs) and zero-width/format chars.
+  // eslint-disable-next-line no-control-regex
+  s = s.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\ufeff]/g, ' ');
+  // Strip anything URL-like: schemes, www., and bare domain tokens.
+  s = s.replace(/\b(?:https?:\/\/|www\.)\S*/gi, ' ');
+  s = s.replace(/\b[a-z0-9-]+\.[a-z]{2,}(?:\/\S*)?/gi, ' ');
+  // Drop @mentions and #hashtags entirely (the marker and its handle/tag).
+  s = s.replace(/[@#＠＃]\S*/g, ' ');
+  // Allowlist a safe charset; everything else becomes a space.
+  s = s.replace(/[^A-Za-z0-9 ._-]/g, ' ');
+  // Collapse runs of whitespace and trim separators from the ends.
+  s = s.replace(/\s+/g, ' ').replace(/^[ ._-]+|[ ._-]+$/g, '').trim();
+  if (s.length > MAX_SYMBOL_LEN) s = s.slice(0, MAX_SYMBOL_LEN).trim();
+  return s;
+}
+
+/** Display ticker: $SYM when known and safe, else a short mint. */
 function ticker(symbol: string | null, mint: string): string {
-  if (symbol && symbol.trim()) return `$${symbol.replace(/^\$/, '').trim()}`;
+  const safe = sanitizeTokenText((symbol ?? '').replace(/^\$/, ''));
+  if (safe) return `$${safe}`;
   return `${mint.slice(0, 4)}…${mint.slice(-4)}`;
 }
 

@@ -11,9 +11,40 @@
  * rather than throwing, so the rest of the app is unaffected.
  */
 
+import { createHash, timingSafeEqual } from 'crypto';
+
 import { getSupabase, isSupabaseConfigured } from './supabase-client';
 
 export type Tier = 'free' | 'pro';
+
+/**
+ * Hash an API key for at-rest storage/lookup. We store ONLY the SHA-256 hash of
+ * each key in `api_keys.key` (never the plaintext), so a read of the table — even
+ * if RLS were ever bypassed — yields nothing usable. validateApiKey() hashes the
+ * presented key and looks it up by this hash, so the wire format is unchanged.
+ *
+ * Provision/rotate by inserting the HASH, not the raw token:
+ *   insert into api_keys (key, ...) values (encode(digest('<raw>','sha256'),'hex'), ...);
+ * or hash existing rows in place once (requires pgcrypto):
+ *   create extension if not exists pgcrypto;
+ *   update api_keys set key = encode(digest(key,'sha256'),'hex')
+ *     where key !~ '^[0-9a-f]{64}$';   -- skip already-hashed rows (idempotent)
+ */
+export function hashApiKey(raw: string): string {
+  return createHash('sha256').update(raw, 'utf8').digest('hex');
+}
+
+/**
+ * Constant-time equality for two hex-encoded secrets of equal length. Falls back
+ * to a non-matching result on any length mismatch (timingSafeEqual throws on
+ * differing lengths) without leaking timing about how far the prefix matched.
+ */
+export function secretsEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a, 'utf8');
+  const bufB = Buffer.from(b, 'utf8');
+  if (bufA.length !== bufB.length) return false;
+  return timingSafeEqual(bufA, bufB);
+}
 
 export interface ApiKeyResult {
   valid: boolean;
@@ -65,14 +96,24 @@ export async function validateApiKey(req: Request): Promise<ApiKeyResult> {
   if (!isSupabaseConfigured()) return none;
 
   try {
+    // We store only the SHA-256 hash of each key, so look up by hash — the
+    // plaintext key never touches the database.
+    const keyHash = hashApiKey(key);
+
     const supabase = getSupabase();
     const { data, error } = await supabase
       .from('api_keys')
       .select('key, tier, owner_id')
-      .eq('key', key)
+      .eq('key', keyHash)
       .maybeSingle();
 
     if (error || !data) return none;
+
+    // Defense in depth: confirm the stored hash matches in constant time. The
+    // `eq` filter already constrains this, but a direct secret comparison must
+    // not short-circuit on the first differing byte.
+    const storedHash = String((data as any).key ?? '');
+    if (!secretsEqual(storedHash, keyHash)) return none;
 
     const rawTier = String((data as any).tier || 'free').toLowerCase();
     const tier: Tier = rawTier === 'pro' ? 'pro' : 'free';
@@ -82,7 +123,7 @@ export async function validateApiKey(req: Request): Promise<ApiKeyResult> {
     void supabase
       .from('api_keys')
       .update({ last_used_at: new Date().toISOString() })
-      .eq('key', key)
+      .eq('key', keyHash)
       .then(
         () => undefined,
         () => undefined

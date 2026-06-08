@@ -31,7 +31,7 @@ function heliusBase(): string | null {
  */
 export async function fetchWalletSwapHistory(
   wallet: string,
-  maxTxs = 250
+  maxTxs = 1000
 ): Promise<{ trades: Trade[]; complete: boolean }> {
   const base = heliusBase();
   if (!base) {
@@ -44,9 +44,11 @@ export async function fetchWalletSwapHistory(
   const trades: Trade[] = [];
   let before: string | undefined;
   let fetched = 0;
-  // True only if we exhausted the wallet's history (or hit maxTxs / an empty
-  // page) naturally. Set false if the budget cap or a fetch error cut us short,
-  // so callers don't persist partial PnL as if it were the full record.
+  // True only if we genuinely exhausted the wallet's history (an empty or
+  // short final page). Set false if we stopped early — budget cap, a fetch
+  // error, OR hitting maxTxs while the last page was still full (more history
+  // almost certainly exists) — so callers don't persist partial PnL/ROI as if
+  // it were the full all-time record, or verify a wallet on a truncated scan.
   let complete = true;
 
   while (fetched < maxTxs) {
@@ -93,7 +95,16 @@ export async function fetchWalletSwapHistory(
 
     fetched += txs.length;
     before = txs[txs.length - 1]?.signature;
-    if (!before || txs.length < limit) break; // last page — complete
+    if (!before || txs.length < limit) break; // short/final page — true exhaustion
+
+    // The page was full and a cursor remains, so more history exists. If that
+    // means we're now about to stop only because we hit maxTxs, this is a
+    // TRUNCATED scan, not a complete one — flag it so the caller re-scans later
+    // at greater depth rather than scoring/verifying on partial history.
+    if (fetched >= maxTxs) {
+      complete = false;
+      break;
+    }
   }
 
   return { trades, complete };

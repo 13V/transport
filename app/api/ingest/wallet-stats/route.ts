@@ -15,14 +15,25 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import { timingSafeEqual } from 'crypto';
 import { getSupabase, isSupabaseConfigured } from '../../../../lib/supabase-client';
 
 export const dynamic = 'force-dynamic';
 
+/**
+ * Auth — FAILS CLOSED. Returns true ONLY when CRON_SECRET is set AND the
+ * Authorization header equals `Bearer <secret>` (constant-time, length-guarded).
+ * An unset secret means NO ONE is authorized — this endpoint writes wallet
+ * stats, so an unauthenticated caller could inject fabricated numbers.
+ */
 function authed(request: NextRequest): boolean {
   const secret = process.env.CRON_SECRET;
-  if (!secret) return true;
-  return request.headers.get('authorization') === `Bearer ${secret}`;
+  if (!secret) return false; // fail closed
+  const auth = request.headers.get('authorization') ?? '';
+  const a = Buffer.from(auth);
+  const b = Buffer.from(`Bearer ${secret}`);
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }
 
 function num(name: string, fallback: number): number {

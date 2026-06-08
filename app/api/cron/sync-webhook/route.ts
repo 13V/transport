@@ -19,6 +19,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import { timingSafeEqual } from 'crypto';
 import { getSupabase, isSupabaseConfigured } from '../../../../lib/supabase-client';
 import { getSmartWalletSet } from '../../../../lib/indexer/live-bursts';
 import {
@@ -35,6 +36,21 @@ export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
 
 const WEBHOOK_ID_KEY = 'helius_webhook_id';
+
+/**
+ * Cron auth — FAILS CLOSED. Returns true (= reject) when CRON_SECRET is unset OR
+ * the Authorization header doesn't match `Bearer <secret>`. Constant-time,
+ * length-guarded compare.
+ */
+function cronAuthFails(request: NextRequest): boolean {
+  const secret = process.env.CRON_SECRET;
+  if (!secret) return true;
+  const auth = request.headers.get('authorization') ?? '';
+  const a = Buffer.from(auth);
+  const b = Buffer.from(`Bearer ${secret}`);
+  if (a.length !== b.length) return true;
+  return !timingSafeEqual(a, b);
+}
 
 /**
  * Compare two receiver URLs for "same webhook target". Helius stores the URL it
@@ -94,13 +110,9 @@ async function resolveSmartAddresses(): Promise<{ addresses: string[]; error: st
 }
 
 export async function GET(request: NextRequest) {
-  // CRON_SECRET auth — only enforced when the secret is configured.
-  const secret = process.env.CRON_SECRET;
-  if (secret) {
-    const auth = request.headers.get('authorization');
-    if (auth !== `Bearer ${secret}`) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+  // CRON_SECRET auth — FAILS CLOSED (unset secret or mismatch → 401).
+  if (cronAuthFails(request)) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
   const noStore = { headers: { 'Cache-Control': 'no-store' } };

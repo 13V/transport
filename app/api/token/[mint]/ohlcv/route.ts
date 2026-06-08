@@ -15,6 +15,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import axios from 'axios';
 import { getTokenMeta } from '../../../../../lib/token-meta';
+import { rateLimit, clientIp } from '../../../../../lib/rate-limit';
 
 export const revalidate = 60;
 export const maxDuration = 30;
@@ -31,10 +32,23 @@ const TF: Record<string, { timeframe: 'minute' | 'hour' | 'day'; aggregate: numb
 
 interface Candle { t: number; o: number; h: number; l: number; c: number; v: number }
 
+// Per-IP cap: 60/min. A single-mint chart resolves one pool + one OHLCV pull on
+// GeckoTerminal, so it's lighter than the batch route. 60/min leaves generous
+// headroom for a user opening several token charts while still capping abuse.
+const RL_MAX = 60;
+
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ mint: string }> }
 ) {
+  const rl = rateLimit('ohlcv-single', clientIp(request), RL_MAX);
+  if (!rl.ok) {
+    return NextResponse.json(
+      { error: 'Rate limit exceeded' },
+      { status: 429, headers: { 'Retry-After': String(rl.retryAfter) } }
+    );
+  }
+
   const { mint } = await params;
   const sp = request.nextUrl.searchParams;
   const tfKey = (sp.get('tf') || '1h').toLowerCase();

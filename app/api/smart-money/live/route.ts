@@ -21,8 +21,15 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { buildLiveFeed } from '../../../../lib/indexer/live-feed';
+import { rateLimit, clientIp } from '../../../../lib/rate-limit';
 
 export const dynamic = 'force-dynamic';
+
+// Per-IP cap: 60/min. The client polls this ~every 3s (~20/min); 60/min is 3×
+// that, so normal polling (incl. an occasional manual refresh) never trips it,
+// while a hammering loop is cut off. Reads are served from a shared ~2s feed
+// cache, so this mainly guards the request-handling path itself.
+const RL_MAX = 60;
 
 function clampInt(raw: string | null, fallback: number, min: number, max: number): number {
   const v = parseInt(raw || '', 10);
@@ -46,6 +53,14 @@ function parseSince(raw: string | null): number | null {
 }
 
 export async function GET(request: NextRequest) {
+  const rl = rateLimit('sm-live', clientIp(request), RL_MAX);
+  if (!rl.ok) {
+    return NextResponse.json(
+      { error: 'Rate limit exceeded' },
+      { status: 429, headers: { 'Retry-After': String(rl.retryAfter) } }
+    );
+  }
+
   const { searchParams } = request.nextUrl;
   const windowSec = clampInt(searchParams.get('windowSec'), 30, 5, 300);
   const minBuyers = clampInt(searchParams.get('minBuyers'), 3, 2, 20);

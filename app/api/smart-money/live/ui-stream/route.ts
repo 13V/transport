@@ -29,9 +29,21 @@
 import { NextRequest } from 'next/server';
 import { buildLiveFeed } from '../../../../../lib/indexer/live-feed';
 import type { LiveBurst } from '../../../../../lib/indexer/live-bursts';
+import { rateLimit, concurrencyLimit, clientIp } from '../../../../../lib/rate-limit';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
+
+// SSE rate limiting (per IP, two dimensions):
+//  - RECONNECT RATE: each connection lives ~50s then the browser reconnects ~3s
+//    later → ~1 connect/min in normal use. 12/min leaves wide headroom for tab
+//    refreshes / brief network blips while stopping a reconnect storm.
+//  - CONCURRENCY: a normal client holds exactly ONE EventSource. Cap at 3 so a
+//    few tabs work, but a client can't pin open dozens of long-lived streams
+//    (each runs a 2.5s DB-cache tick for ~50s).
+const SSE_RECONNECT_MAX = 12;
+const SSE_CONCURRENCY_MAX = 3;
+const SSE_RETRY_AFTER_SEC = 10;
 
 function clampInt(raw: string | null, fallback: number, min: number, max: number): number {
   const v = parseInt(raw || '', 10);
@@ -53,6 +65,27 @@ const HEARTBEAT_MS = 10_000;
 const RECONNECT_MS = 3_000;
 
 export async function GET(request: NextRequest) {
+  const ip = clientIp(request);
+
+  // Reconnect-rate guard first (cheap, fixed-window).
+  const rr = rateLimit('sm-ui-stream-connect', ip, SSE_RECONNECT_MAX);
+  if (!rr.ok) {
+    return new Response(JSON.stringify({ error: 'Rate limit exceeded' }), {
+      status: 429,
+      headers: { 'Content-Type': 'application/json', 'Retry-After': String(rr.retryAfter) },
+    });
+  }
+
+  // Concurrency guard: cap simultaneous open streams per IP. The slot is held for
+  // the life of the connection and released in cleanup().
+  const slot = concurrencyLimit('sm-ui-stream', ip, SSE_CONCURRENCY_MAX, SSE_RETRY_AFTER_SEC);
+  if (!slot.ok) {
+    return new Response(JSON.stringify({ error: 'Too many concurrent streams' }), {
+      status: 429,
+      headers: { 'Content-Type': 'application/json', 'Retry-After': String(slot.retryAfter) },
+    });
+  }
+
   const { searchParams } = request.nextUrl;
   const windowSec = clampInt(searchParams.get('windowSec'), 30, 5, 300);
   const minBuyers = clampInt(searchParams.get('minBuyers'), 3, 2, 20);
@@ -80,6 +113,8 @@ export async function GET(request: NextRequest) {
       const cleanup = () => {
         if (closed) return;
         closed = true;
+        // Free the per-IP concurrency slot so a legit reconnect isn't blocked.
+        slot.release();
         if (tickTimer) clearInterval(tickTimer);
         if (heartbeatTimer) clearInterval(heartbeatTimer);
         if (endTimer) clearTimeout(endTimer);
@@ -175,8 +210,11 @@ export async function GET(request: NextRequest) {
     },
 
     cancel() {
-      // Reader/connection torn down — timers are cleared by the abort handler
-      // wired in start(); nothing else to do here.
+      // Reader/connection torn down — timers are cleared (and the concurrency
+      // slot released) by the abort handler wired in start(). As a belt-and-
+      // suspenders against a cancel without an abort, release the slot here too;
+      // release() is idempotent.
+      slot.release();
     },
   });
 

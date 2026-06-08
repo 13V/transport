@@ -21,6 +21,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import axios from 'axios';
 import { getTokenMeta } from '../../../../../lib/token-meta';
+import { rateLimit, clientIp } from '../../../../../lib/rate-limit';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 30;
@@ -136,7 +137,21 @@ async function mapLimit(
   await Promise.all(runners);
 }
 
+// Per-IP cap. This is the most expensive read (fans out up to 50 mints ×
+// GeckoTerminal/Helius per call), so it's the tightest of the four. The client
+// polls this ~every 3s (~20/min) for ONE param-set; we set 40/min — 2× normal
+// usage so a legit poller is never blocked, while a hammering loop is cut off.
+const RL_MAX = 40;
+
 export async function GET(request: NextRequest) {
+  const rl = rateLimit('ohlcv-batch', clientIp(request), RL_MAX);
+  if (!rl.ok) {
+    return NextResponse.json(
+      { error: 'Rate limit exceeded' },
+      { status: 429, headers: { 'Retry-After': String(rl.retryAfter) } }
+    );
+  }
+
   const sp = request.nextUrl.searchParams;
   const tfKey = (sp.get('tf') || '1h').toLowerCase();
   const tf = TF[tfKey] ? tfKey : '1h';

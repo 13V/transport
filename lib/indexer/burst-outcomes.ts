@@ -8,11 +8,16 @@
  * (getBurstStats) powers the header stat and social proof ("median +X% 1h,
  * Y% hit rate") so the feed can demonstrably show it calls winners.
  *
- * CRITICAL — NO FABRICATION: every measured number comes from real price
- * history (GeckoTerminal candle closes/highs) compared against a real spot
- * baseline (price_at_burst) stamped at first sight. If a horizon hasn't elapsed,
- * or no candle exists near that timestamp, or the baseline is missing, that leg
- * stays NULL. We never interpolate, guess, or carry a value forward.
+ * CRITICAL — UNIT CONSISTENCY + NO FABRICATION: every price in a burst's outcome
+ * (price_at_burst, price_15m/1h/24h, peak_price_24h) comes from the SAME source
+ * and SAME unit — GeckoTerminal USD candles for ONE pool (the highest-liquidity
+ * pool for the mint). The baseline price_at_burst is NOT a SOL spot price stamped
+ * at persist time; it is the USD candle close at/nearest the burst's window_end,
+ * derived in measureBursts on the first measurement pass and reused thereafter.
+ * This keeps baseline and horizon prices on the same USD scale so ret_* is real.
+ * If a horizon hasn't elapsed, or no candle exists near that timestamp, or the
+ * baseline can't be derived, that leg stays NULL. We never interpolate, guess,
+ * carry a value forward, or mix SOL and USD.
  *
  * Everything degrades gracefully: an unconfigured Supabase, a missing table, or
  * a GeckoTerminal outage yields a no-op (counts of 0 / empty stats) rather than
@@ -20,8 +25,7 @@
  */
 
 import { getSupabase, isSupabaseConfigured } from '../supabase-client';
-import { getLiveBursts, type LiveBurst } from './live-bursts';
-import { fetchTokenPricesSol } from '../prices/price-oracle';
+import { getLiveBursts } from './live-bursts';
 
 const GT = 'https://api.geckoterminal.com/api/v2';
 const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
@@ -50,14 +54,20 @@ interface Candle {
 /**
  * Detect the current live buy bursts and upsert them by their stable content
  * hash `id`. A still-growing burst (same id, more buyers/SOL) refreshes the
- * existing row; a brand-new burst inserts and gets its measurement baseline
- * (`price_at_burst`) stamped ONCE from real spot price.
+ * existing row; a brand-new burst inserts. No price baseline is stamped here —
+ * `price_at_burst` is derived later in measureBursts from the SAME USD candle
+ * series used for the horizons (so baseline and measurements share one unit).
  *
- * The growing fields (buyers / buyer_wallets / sol_total / window_end / tiers /
- * sample_buyers / all_buyers / symbol) are always overwritten with the latest
- * values via the upsert. `price_at_burst` and `first_seen` are NOT in the update
- * payload, so an upsert that hits an existing row leaves the original
- * baseline/first-seen intact — only the very first insert sets them. Likewise
+ * MONOTONIC GROWTH (bug H1): a burst's accumulation fields must never shrink.
+ * The 2h getLiveBursts lookback can no longer see a burst's early buys once they
+ * age out, so a naive upsert would OVERWRITE buyers / buyer_wallets / sol_total /
+ * window_start downward. We therefore MERGE each incoming burst against the
+ * existing row: keep MAX(buyers, buyer_wallets, sol_total), the EARLIEST
+ * window_start, the LATEST window_end, and the UNION (capped) of all_buyers —
+ * a burst can only ever ratchet UP from its recorded peak.
+ *
+ * `price_at_burst` and `first_seen` are NOT written here, so an upsert that hits
+ * an existing row leaves the derived baseline / first-seen intact. Likewise
  * `posted_call`/`posted_result` are never written here (they default false and
  * are flipped solely by the auto-post agent), so this cron can't un-post a call.
  *
@@ -72,73 +82,74 @@ export async function persistBursts(): Promise<{ persisted: number }> {
     const { bursts } = await getLiveBursts({ hours: 2, limit: 200 });
     if (bursts.length === 0) return { persisted: 0 };
 
-    // Which ids already exist? Their baseline must NOT be re-stamped, and we only
-    // need spot prices for the genuinely new ones.
+    // Read the existing rows' GROWING fields so we can merge monotonically and
+    // never shrink a burst below its recorded peak.
     const ids = bursts.map((b) => b.id);
-    const existing = new Set<string>();
+    const existingById = new Map<string, ExistingGrowth>();
     const existRead = await supabase
       .from('live_bursts')
-      .select('id')
+      .select(
+        'id, buyers, buyer_wallets, sol_total, window_start, window_end, all_buyers'
+      )
       .in('id', ids);
     if (existRead.error) {
       console.error('[BURSTS] persist read failed:', existRead.error.message);
       return { persisted: 0 };
     }
-    for (const r of existRead.data ?? []) existing.add(String((r as any).id));
-
-    // Stamp baselines only for new bursts. Prefer the burst's own priceUsd if
-    // present; otherwise fetch real SOL spot. Missing price => baseline stays
-    // NULL (the leg simply can't be measured later — never faked).
-    const newBursts = bursts.filter((b) => !existing.has(b.id));
-    const baselineByMint = new Map<string, number>();
-    const needSpot = newBursts
-      .filter((b) => !(typeof b.priceUsd === 'number' && b.priceUsd > 0))
-      .map((b) => b.mint);
-    if (needSpot.length > 0) {
-      try {
-        const spot = await fetchTokenPricesSol(Array.from(new Set(needSpot)));
-        for (const [mint, p] of spot) baselineByMint.set(mint, p);
-      } catch {
-        /* leave baselines unset for unfetched mints */
-      }
+    for (const r of (existRead.data ?? []) as any[]) {
+      existingById.set(String(r.id), {
+        buyers: numOrNull(r.buyers),
+        buyer_wallets: numOrNull(r.buyer_wallets),
+        sol_total: numOrNull(r.sol_total),
+        window_start: r.window_start ? String(r.window_start) : null,
+        window_end: r.window_end ? String(r.window_end) : null,
+        all_buyers: Array.isArray(r.all_buyers)
+          ? (r.all_buyers as unknown[]).map((x) => String(x))
+          : [],
+      });
     }
 
-    const baselineFor = (b: LiveBurst): number | null => {
-      if (typeof b.priceUsd === 'number' && b.priceUsd > 0) return b.priceUsd;
-      const p = baselineByMint.get(b.mint);
-      return typeof p === 'number' && p > 0 ? p : null;
-    };
-
-    // Build upsert rows. For NEW bursts include the baseline columns; for
-    // existing ones omit them so onConflict update keeps the original baseline.
+    // Build upsert rows, merging each burst monotonically against any existing
+    // row. price_at_burst / first_seen are deliberately omitted so the derived
+    // baseline survives the conflict update.
     const rows = bursts.map((b) => {
-      const base: Record<string, unknown> = {
+      const prev = existingById.get(b.id);
+
+      // Growing numeric fields only ever ratchet UP.
+      const buyers = maxDefined(b.buyers, prev?.buyers);
+      const buyerWallets = maxDefined(b.buyerWallets, prev?.buyer_wallets);
+      const solTotal = maxDefined(b.solTotal, prev?.sol_total);
+
+      // window_start = EARLIEST seen; window_end = LATEST seen.
+      const windowStart = earliestIso(b.windowStart, prev?.window_start);
+      const windowEnd = latestIso(b.windowEnd, prev?.window_end);
+
+      // all_buyers = capped UNION of the prior set and the incoming set, so the
+      // distinct-buyer attribution set never loses wallets that aged out.
+      const allBuyers = unionCapped(
+        prev?.all_buyers ?? [],
+        b.allBuyers ?? [],
+        ALL_BUYERS_CAP
+      );
+
+      return {
         id: b.id,
         mint: b.mint,
         side: b.side ?? 'buy',
         symbol: b.symbol ?? null,
-        window_start: b.windowStart,
-        window_end: b.windowEnd,
-        buyers: b.buyers,
-        buyer_wallets: b.buyerWallets,
-        sol_total: b.solTotal,
+        window_start: windowStart,
+        window_end: windowEnd,
+        buyers,
+        buyer_wallets: buyerWallets,
+        sol_total: solTotal,
         sample_buyers: b.sampleBuyers ?? [],
         tiers: (b.tiers ?? []).map((t) => t ?? ''),
-        // Growing field: refresh the full (capped) distinct buyer set as the
-        // burst accumulates, for per-wallet attribution. NOTE: posted_call /
-        // posted_result are intentionally NOT written here — they default false
-        // on insert and are owned by the auto-post agent, so this growth upsert
-        // never clobbers them.
-        all_buyers: b.allBuyers ?? [],
-      };
-      if (!existing.has(b.id)) {
-        base.price_at_burst = baselineFor(b);
-      }
-      return base;
+        all_buyers: allBuyers,
+      } as Record<string, unknown>;
     });
 
-    // Upsert by id. Supabase upsert overwrites all provided columns on conflict;
-    // since existing-burst rows omit price_at_burst/first_seen, those survive.
+    // Upsert by id. Since the rows omit price_at_burst/first_seen, those survive
+    // the conflict update; all written fields are pre-merged to be monotonic.
     const { error } = await supabase
       .from('live_bursts')
       .upsert(rows, { onConflict: 'id' });
@@ -154,14 +165,82 @@ export async function persistBursts(): Promise<{ persisted: number }> {
   }
 }
 
+/** Existing-row growing fields read for the monotonic merge. */
+interface ExistingGrowth {
+  buyers: number | null;
+  buyer_wallets: number | null;
+  sol_total: number | null;
+  window_start: string | null;
+  window_end: string | null;
+  all_buyers: string[];
+}
+
+/** Cap on the persisted distinct-buyer union (mirrors live-bursts MAX_ALL_BUYERS). */
+const ALL_BUYERS_CAP = 500;
+
+function numOrNull(v: unknown): number | null {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Larger of an incoming value and a prior value, ignoring nullish operands. */
+function maxDefined(incoming: number | null | undefined, prev: number | null | undefined): number | null {
+  const a = typeof incoming === 'number' && Number.isFinite(incoming) ? incoming : null;
+  const b = typeof prev === 'number' && Number.isFinite(prev) ? prev : null;
+  if (a == null) return b;
+  if (b == null) return a;
+  return Math.max(a, b);
+}
+
+/** Earliest of two ISO timestamps (nullish operands ignored). */
+function earliestIso(incoming: string | null | undefined, prev: string | null | undefined): string | null {
+  const a = parseIso(incoming);
+  const b = parseIso(prev);
+  if (a == null) return prev ?? incoming ?? null;
+  if (b == null) return incoming ?? null;
+  return a <= b ? (incoming as string) : (prev as string);
+}
+
+/** Latest of two ISO timestamps (nullish operands ignored). */
+function latestIso(incoming: string | null | undefined, prev: string | null | undefined): string | null {
+  const a = parseIso(incoming);
+  const b = parseIso(prev);
+  if (a == null) return prev ?? incoming ?? null;
+  if (b == null) return incoming ?? null;
+  return a >= b ? (incoming as string) : (prev as string);
+}
+
+function parseIso(v: string | null | undefined): number | null {
+  if (!v) return null;
+  const t = new Date(v).getTime();
+  return Number.isFinite(t) ? t : null;
+}
+
+/** Distinct union of two string arrays, preserving prior-first order, capped. */
+function unionCapped(prev: string[], incoming: string[], cap: number): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const arr of [prev, incoming]) {
+    for (const v of arr) {
+      if (!v || seen.has(v)) continue;
+      seen.add(v);
+      out.push(v);
+      if (out.length >= cap) return out;
+    }
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // MEASURE
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve a token's top GeckoTerminal Solana pool address (the one GT actually
- * has candles for), mirroring app/api/token/[mint]/ohlcv/route.ts. Returns ''
- * when GT has no pools for the mint.
+ * Resolve a token's GeckoTerminal Solana pool to measure against: the pool with
+ * the HIGHEST liquidity (`reserve_in_usd`), not merely the first listed. Using
+ * the deepest pool — and the SAME pool for the baseline and every horizon read —
+ * stops a thin secondary pool's noise from poisoning a burst's outcome. Returns
+ * '' when GT has no usable pool for the mint.
  */
 async function resolvePool(mint: string): Promise<string> {
   if (!BASE58.test(mint)) return '';
@@ -173,10 +252,21 @@ async function resolvePool(mint: string): Promise<string> {
     if (!res.ok) return '';
     const data = await res.json();
     const pools = data?.data;
-    if (Array.isArray(pools) && pools.length) {
-      const addr = pools[0]?.attributes?.address;
-      if (typeof addr === 'string' && BASE58.test(addr)) return addr;
+    if (!Array.isArray(pools) || pools.length === 0) return '';
+
+    let bestAddr = '';
+    let bestLiq = -Infinity;
+    for (const p of pools) {
+      const addr = p?.attributes?.address;
+      if (typeof addr !== 'string' || !BASE58.test(addr)) continue;
+      const liq = Number(p?.attributes?.reserve_in_usd);
+      const score = Number.isFinite(liq) ? liq : -Infinity;
+      if (score > bestLiq) {
+        bestLiq = score;
+        bestAddr = addr;
+      }
     }
+    return bestAddr;
   } catch {
     /* no pool */
   }
@@ -216,22 +306,22 @@ async function fetchCandles(
 }
 
 /**
- * Close of the candle NEAREST a target timestamp, but only if a candle exists
- * within `tolMs` of it (so we never pull a wildly-off price for a gap). Returns
- * null when no candle is close enough — that leg then stays unmeasured.
+ * FORWARD-ONLY candle close for a target timestamp: the close of the FIRST
+ * candle at-or-after `targetMs`, but only if that candle is within `tolMs` of
+ * the target (so a gap can't pull a wildly-late price). We never look backward
+ * before the target — that would peek at a price the horizon hasn't reached yet
+ * and bias the baseline/return. Returns null when no forward candle is close
+ * enough; that leg then stays unmeasured (no fabrication).
+ *
+ * `candles` is assumed ascending by time (fetchCandles sorts).
  */
-function closeNear(candles: Candle[], targetMs: number, tolMs: number): number | null {
-  let best: Candle | null = null;
-  let bestDist = Infinity;
+function closeForward(candles: Candle[], targetMs: number, tolMs: number): number | null {
   for (const c of candles) {
-    const d = Math.abs(c.t - targetMs);
-    if (d < bestDist) {
-      bestDist = d;
-      best = c;
-    }
+    if (c.t < targetMs) continue; // forward-only: skip anything before the target
+    if (c.t - targetMs > tolMs) return null; // first forward candle is too far
+    return Number.isFinite(c.c) && c.c > 0 ? c.c : null;
   }
-  if (!best || bestDist > tolMs) return null;
-  return Number.isFinite(best.c) && best.c > 0 ? best.c : null;
+  return null;
 }
 
 /** Highest candle high within [fromMs, toMs], or null if no candle in range. */
@@ -255,10 +345,19 @@ interface BurstRow {
 }
 
 /**
- * Find bursts that have a horizon ELAPSED but its `ret_*` still NULL, then for
- * each read the real candle close nearest that horizon timestamp (and the 24h
- * peak high), compute ret = (priceThen / price_at_burst - 1) * 100, and write
- * the price, ret, peak and measured-at columns for those legs.
+ * Find bursts that have a horizon ELAPSED but its `ret_*` still NULL (or whose
+ * USD baseline has not been derived yet), then for each:
+ *   1. resolve the deepest-liquidity GT pool ONCE and use it for everything;
+ *   2. if `price_at_burst` is missing, derive it from the SAME USD candle series
+ *      as the close of the candle at/nearest `window_end` (forward-only) and
+ *      persist it once — this is the baseline all horizons compare against;
+ *   3. read the forward-only USD close at each due horizon (and the 24h peak
+ *      high), compute ret = (priceThen / price_at_burst - 1) * 100, and write
+ *      the price, ret, peak and measured-at columns for those legs.
+ *
+ * EVERYTHING IS USD: baseline and all horizon prices come from the one pool's
+ * `currency=usd` candles, so ret_* is a true same-unit return (the old code
+ * compared a SOL-per-token spot baseline against USD candles — ~150x wrong).
  *
  * Throttled: processes a bounded batch of bursts per run and paces GeckoTerminal
  * calls to stay under the free-tier rate limit. Anything unmeasurable stays
@@ -277,18 +376,20 @@ export async function measureBursts(opts?: {
     const supabase = getSupabase();
     const now = Date.now();
 
-    // Candidates: a baseline exists, the window closed long enough ago for at
-    // least the shortest horizon, and at least one ret_* leg is still NULL.
-    // (We over-select then filter precisely per horizon below.)
+    // Candidates: the window closed long enough ago for at least the shortest
+    // horizon, AND either the USD baseline still needs deriving OR at least one
+    // ret_* leg is still NULL. (We over-select then filter precisely per horizon
+    // below.) The baseline is NO LONGER a precondition — measureBursts derives it
+    // from the same USD candle series, so a row with a NULL price_at_burst is a
+    // valid candidate (its baseline gets stamped on this pass).
     const oldestNeeded = new Date(now - HORIZONS[0].ms).toISOString();
     const read = await supabase
       .from('live_bursts')
       .select(
         'id, mint, price_at_burst, window_end, ret_15m, ret_1h, ret_24h'
       )
-      .not('price_at_burst', 'is', null)
       .lte('window_end', oldestNeeded)
-      .or('ret_15m.is.null,ret_1h.is.null,ret_24h.is.null')
+      .or('price_at_burst.is.null,ret_15m.is.null,ret_1h.is.null,ret_24h.is.null')
       .order('window_end', { ascending: true })
       .limit(maxBursts);
 
@@ -303,12 +404,13 @@ export async function measureBursts(opts?: {
     let measured = 0;
 
     for (const row of rows) {
-      const baseline = row.price_at_burst;
-      if (!(typeof baseline === 'number' && baseline > 0)) continue;
       const endMs = new Date(row.window_end).getTime();
       if (!Number.isFinite(endMs)) continue;
 
-      // Which legs are due (elapsed) AND not yet measured?
+      const haveBaseline =
+        typeof row.price_at_burst === 'number' && row.price_at_burst > 0;
+
+      // Which horizon legs are due (elapsed) AND not yet measured?
       const dueLegs = HORIZONS.filter((h) => {
         const elapsed = now - endMs >= h.ms;
         const retNull =
@@ -317,16 +419,22 @@ export async function measureBursts(opts?: {
           (h.key === '24h' && row.ret_24h == null);
         return elapsed && retNull;
       });
-      if (dueLegs.length === 0) continue;
 
+      // Nothing to do if the baseline is already set and no leg is due.
+      if (haveBaseline && dueLegs.length === 0) continue;
+
+      // ONE pool for baseline + every horizon — the deepest-liquidity pool — so
+      // a thin secondary pool can never poison this burst's outcome.
       const pool = await resolvePool(row.mint);
       if (!pool) continue; // no real candles available — leave NULL
+      await sleep(250); // pace GT calls (pool lookup)
 
-      // Fetch a fine grid for 15m/1h legs (5-min candles, ~20h) and, if a 24h
-      // leg is due, hourly candles too (covers the 24h reach + peak window).
+      // Fetch a fine grid for the baseline + 15m/1h legs (5-min candles, ~20h)
+      // and, if a 24h leg is due, hourly candles too (covers the 24h reach + the
+      // peak window). All candles are USD (currency=usd in fetchCandles).
       const need24h = dueLegs.some((l) => l.key === '24h');
       const fine = await fetchCandles(pool, 'minute', 5, 240);
-      await sleep(250); // pace GT calls
+      await sleep(250);
       let hourly: Candle[] = [];
       if (need24h) {
         hourly = await fetchCandles(pool, 'hour', 1, 168);
@@ -336,25 +444,45 @@ export async function measureBursts(opts?: {
       const update: Record<string, unknown> = {};
       const nowIso = new Date().toISOString();
 
+      // Derive the USD baseline ONCE: the forward-only close of the candle
+      // at/nearest window_end from the SAME pool/series the horizons read. This
+      // is what makes baseline and measurements unit-consistent (both USD) and
+      // removes the post-hoc SOL-spot timing bias. Prefer the fine grid; fall
+      // back to hourly if that's all we have for this burst.
+      let baseline = haveBaseline ? (row.price_at_burst as number) : null;
+      if (baseline == null) {
+        const derived =
+          closeForward(fine, endMs, 10 * MIN) ??
+          (hourly.length ? closeForward(hourly, endMs, 90 * MIN) : null);
+        if (derived != null && derived > 0) {
+          baseline = derived;
+          update.price_at_burst = derived;
+        }
+      }
+
+      // Without a baseline we can't compute any return — leave everything NULL
+      // for now (it stays a candidate and we retry once candles exist).
+      if (!(typeof baseline === 'number' && baseline > 0)) continue;
+
       for (const leg of dueLegs) {
         const targetMs = endMs + leg.ms;
         // Tolerance scales with the horizon's candle granularity.
         if (leg.key === '15m') {
-          const price = closeNear(fine, targetMs, 10 * MIN);
+          const price = closeForward(fine, targetMs, 10 * MIN);
           if (price != null) {
             update.price_15m = price;
             update.ret_15m = (price / baseline - 1) * 100;
             update.measured_15m_at = nowIso;
           }
         } else if (leg.key === '1h') {
-          const price = closeNear(fine, targetMs, 20 * MIN);
+          const price = closeForward(fine, targetMs, 20 * MIN);
           if (price != null) {
             update.price_1h = price;
             update.ret_1h = (price / baseline - 1) * 100;
             update.measured_1h_at = nowIso;
           }
         } else if (leg.key === '24h') {
-          const price = closeNear(hourly, targetMs, 90 * MIN);
+          const price = closeForward(hourly, targetMs, 90 * MIN);
           const peak = peakHigh(hourly, endMs, targetMs);
           if (price != null) {
             update.price_24h = price;
