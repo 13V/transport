@@ -47,6 +47,11 @@ interface Burst {
   // fallback when the client OHLCV series has no candles. Optional/nullable so an
   // older snapshot simply renders the prior behaviour.
   priceChangeSincePct?: number | null;
+  // Which source drove priceChangeSincePct: 'dexscreener' (listed → entry→now USD
+  // mcap pair is consistent and renderable) or 'onchain' (un-listed → show the %
+  // only, no USD pair). null when no server % was computed. Guarantees the hero %
+  // sign and any mcap arrow always agree (same source).
+  priceChangeSource?: 'dexscreener' | 'onchain' | null;
   entryMarketCapUsd?: number | null;
   finalized?: boolean;
   // Wave 2 enrichment — all optional; render only when present, never fabricate.
@@ -334,6 +339,32 @@ const DOT_NEUTRAL = '#6A7184'; // grey  — before first successful fetch
 function usdCompact(n: number | null | undefined): string | null {
   if (n == null || !Number.isFinite(n)) return null;
   return `$${f.compact(n)}`;
+}
+
+// A "% since first buy" can be enormous for tokens caught at bonding-curve entry
+// (e.g. +264691.3%). A six-digit percent reads as noise, so for LARGE gains we
+// render the equivalent MULTIPLIER instead (e.g. 2598×), which is the form
+// traders actually use. Small/medium moves keep the familiar signed %.
+//   pct >= LARGE_GAIN_PCT  → "<n>×"  (n = 1 + pct/100, e.g. +500% → 6×)
+//   otherwise              → "▲/▼ +x.x%"
+// Nothing is fabricated or hidden — it's the same number, in the readable form.
+const LARGE_GAIN_PCT = 1000; // ≥ +1000% (≥ 11×) renders as a multiplier
+// Compact "×" label: whole number ≥100× (2598×), one decimal below (3.9×).
+function formatMultiple(mult: number): string {
+  return mult >= 100 ? `${Math.round(mult)}×` : `${mult.toFixed(1)}×`;
+}
+function formatSinceMove(pct: number | null | undefined): {
+  text: string;
+  up: boolean;
+  isMultiple: boolean;
+} | null {
+  if (pct == null || !Number.isFinite(pct)) return null;
+  const up = pct >= 0;
+  if (pct >= LARGE_GAIN_PCT) {
+    const mult = 1 + pct / 100;
+    return { text: formatMultiple(mult), up: true, isMultiple: true };
+  }
+  return { text: f.pct(pct), up, isMultiple: false };
 }
 
 // Parse an ISO timestamp into epoch ms (or null) for the ms-based formatters.
@@ -1790,15 +1821,58 @@ export default function LiveFeed() {
     const veryNew = createdMs != null && now - createdMs < VERY_NEW_MS;
     const isLive = b.finalized === false;
 
-    // --- Wave 3: price sparkline + "% since first buy" from OHLCV series. ---
+    // --- Wave 3: price sparkline (visual only — the hero % no longer derives
+    //     from this series; see the SINGLE-SOURCE block below). ---
     const series = ohlcv[b.mint];
     const closes = series?.closes ?? [];
     const hasSpark = closes.length >= 2;
     const sparkUp = hasSpark ? closes[closes.length - 1] >= closes[0] : true;
     const sparkColor = sparkUp ? CHART_COLORS.POS : CHART_COLORS.NEG;
-    // % since first burst buy: baseline = close nearest windowStart.
+
+    // --- HERO % + "$entry → $now" mcap: ONE CONSISTENT SOURCE per token. ---
+    //
+    // The "$55k → $24k but +0.0% green" bug came from the hero % and the mcap
+    // pair being derived from DIFFERENT sources (OHLCV % vs DexScreener mcap) that
+    // could disagree in direction. The server now computes BOTH from one source
+    // (annotateLivePriceChange) and tags which one via priceChangeSource:
+    //   - 'dexscreener' (listed): % AND entryMarketCapUsd come from DexScreener →
+    //     render the % and the consistent "$entry → $now" USD pair.
+    //   - 'onchain' (un-listed/fresh pump.fun): % is from on-chain firstBuy→lastBuy
+    //     prices and there is NO trustworthy USD mcap → render the % WITHOUT a
+    //     fabricated/source-mismatched USD pair.
+    // We use the server value whenever present (so the % and the mcap arrow ALWAYS
+    // share a source) and only fall back to the OHLCV-derived % when the server
+    // produced nothing — and in that OHLCV-fallback case we likewise suppress the
+    // mcap pair, since its source would no longer be guaranteed to match.
     let sinceFirst: number | null = null;
-    if (series && series.times.length === series.closes.length && series.closes.length >= 2 && startMs != null) {
+    let mcAtEntryLabel: string | null = null;
+    let mcMultiple: number | null = null;
+
+    if (b.priceChangeSincePct != null && Number.isFinite(b.priceChangeSincePct)) {
+      // SERVER (single-source) path — authoritative for direction consistency.
+      sinceFirst = b.priceChangeSincePct;
+      if (
+        b.priceChangeSource === 'dexscreener' &&
+        b.marketCapUsd != null &&
+        Number.isFinite(b.marketCapUsd) &&
+        b.entryMarketCapUsd != null &&
+        Number.isFinite(b.entryMarketCapUsd) &&
+        b.entryMarketCapUsd > 0
+      ) {
+        // entryMarketCapUsd and marketCapUsd are both DexScreener-derived, so the
+        // pair's arrow is guaranteed to agree with sinceFirst's sign.
+        mcAtEntryLabel = usdCompact(b.entryMarketCapUsd);
+        mcMultiple = b.marketCapUsd / b.entryMarketCapUsd;
+      }
+    } else if (
+      series &&
+      series.times.length === series.closes.length &&
+      series.closes.length >= 2 &&
+      startMs != null
+    ) {
+      // OHLCV fallback (no server %): baseline = close nearest windowStart. We do
+      // NOT render the mcap pair here — without the server's single-source mcap we
+      // can't guarantee the arrow matches this %, which is exactly the bug.
       let bestI = -1;
       let bestD = Infinity;
       for (let i = 0; i < series.times.length; i++) {
@@ -1812,32 +1886,10 @@ export default function LiveFeed() {
       }
     }
 
-    // FALLBACK: fresh pre-graduation pump.fun tokens have no GeckoTerminal candles
-    // (the OHLCV series is empty → sinceFirst null). The server computes a LIVE
-    // entry→now % from DexScreener-or-on-chain trade prices that DOES cover them
-    // and refreshes each poll, so use it whenever the OHLCV path produced nothing.
-    if (sinceFirst == null && b.priceChangeSincePct != null && Number.isFinite(b.priceChangeSincePct)) {
-      sinceFirst = b.priceChangeSincePct;
-    }
-
-    // --- HERO: "% since first buy" is the visual hero (22px mono ▲/▼). ---
-    const sinceUp = sinceFirst != null && sinceFirst >= 0;
-
-    // --- MC entry → now framing ("$12k → $47k (3.9×)"). Both fields required. ---
-    let mcAtEntryLabel: string | null = null;
-    let mcMultiple: number | null = null;
-    if (b.marketCapUsd != null && Number.isFinite(b.marketCapUsd) && sinceFirst != null) {
-      // Prefer the server's entry market cap (derived from the same entry→now
-      // price ratio) when present; otherwise derive it from the % as before.
-      const mcAtEntry =
-        b.entryMarketCapUsd != null && Number.isFinite(b.entryMarketCapUsd) && b.entryMarketCapUsd > 0
-          ? b.entryMarketCapUsd
-          : b.marketCapUsd / (1 + sinceFirst / 100);
-      if (Number.isFinite(mcAtEntry) && mcAtEntry > 0) {
-        mcAtEntryLabel = usdCompact(mcAtEntry);
-        mcMultiple = b.marketCapUsd / mcAtEntry;
-      }
-    }
+    // --- HERO: large gains render as a multiplier (e.g. 2598×); small/medium as a
+    //     normal signed %. Keeps bonding-curve-entry cards readable. ---
+    const sinceMove = formatSinceMove(sinceFirst);
+    const sinceUp = sinceMove ? sinceMove.up : false;
 
     // --- AVERAGE APE SIZE per smart wallet. avgSol = solTotal / buyers; show in
     //     USD when the SOL price is known, else in SOL. Only when buyers>0; never
@@ -2001,14 +2053,15 @@ export default function LiveFeed() {
                 {b.name && <span className="bf-name">{b.name}</span>}
                 <span className="bf-age">{f.ago(endMs)}</span>
               </div>
-              {/* HERO: % since first buy (the "early or chasing?" signal). */}
+              {/* HERO: % since first buy (the "early or chasing?" signal). Large
+                  gains show as a multiplier (2598×) instead of a six-digit %. */}
               <div className="bf-decision">
-                {sinceFirst != null ? (
+                {sinceMove != null ? (
                   <span
                     className={`bf-since-hero ${sinceUp ? 'pos' : 'neg'}`}
                     title="Price change since this burst's first buy — still early or already gone?"
                   >
-                    {sinceUp ? '▲' : '▼'} {f.pct(sinceFirst)}
+                    {sinceMove.isMultiple ? '▲ ' : sinceUp ? '▲ ' : '▼ '}{sinceMove.text}
                   </span>
                 ) : (
                   <span className="bf-since-hero dim" title="Price change since first buy — awaiting price data">
@@ -2020,7 +2073,7 @@ export default function LiveFeed() {
                   <span className="bf-mc-flow" title="Market cap at the burst's first buy → now">
                     {mcAtEntryLabel} → {mcap}
                     {mcMultiple != null && Number.isFinite(mcMultiple) && mcMultiple >= 1.05 && (
-                      <span className="bf-mc-mult"> ({mcMultiple.toFixed(1)}×)</span>
+                      <span className="bf-mc-mult"> ({formatMultiple(mcMultiple)})</span>
                     )}
                   </span>
                 ) : mcap ? (
