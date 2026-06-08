@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { initHelius, getTokenMetadata, getTopHolders } from '@/lib/helius-client';
+import { initHelius, getTokenMetadata, getTopHolders, isHeliusBudgetExhausted } from '@/lib/helius-client';
 import { detectCreator } from '@/lib/detectors/creator';
 import { detectClusters } from '@/lib/detectors/clustering';
 import { detectSnipers } from '@/lib/detectors/snipers';
@@ -162,6 +162,15 @@ export async function POST(request: NextRequest): Promise<NextResponse<AnalysisR
       cached: false,
     });
   } catch (error) {
+    // When the daily Helius credit cap is reached, surface a dedicated 503 with
+    // a clear body instead of a misleading 404 ("Token not found"/"no holders")
+    // or a generic 500 — the token is fine, we're just out of budget for today.
+    if (isHeliusBudgetExhausted(error)) {
+      return NextResponse.json(
+        { success: false, error: 'Helius daily budget exhausted' },
+        { status: 503, headers: { 'Retry-After': '3600' } }
+      );
+    }
     console.error('Analysis error:', error);
     const errorMsg = error instanceof Error ? error.message : 'Analysis failed';
     return NextResponse.json(

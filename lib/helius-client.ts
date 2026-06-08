@@ -43,12 +43,23 @@ function getHeliusEnhancedUrl(): string {
 // as the indexer/swap fetchers (lib/indexer/helius-budget.ts).
 const RPC_CREDIT_EST = 10;
 
+// Message thrown by the budget guard (and mirrored here) when the daily Helius
+// credit cap is reached. Exported so callers (e.g. /api/analyze) can tell a
+// budget-exhaustion failure apart from a genuine not-found and surface a clear
+// 503 instead of a misleading 404.
+export const HELIUS_BUDGET_EXHAUSTED_MESSAGE = 'Helius daily credit cap reached';
+
+/** True when `err` is the daily-budget-cap-reached error from the guard. */
+export function isHeliusBudgetExhausted(err: unknown): boolean {
+  return err instanceof Error && err.message === HELIUS_BUDGET_EXHAUSTED_MESSAGE;
+}
+
 async function heliusRpc(method: string, params: any[] = [], retries = 3): Promise<any> {
   // Global daily-budget circuit breaker: once the Helius credit cap is reached,
   // fail closed so /api/analyze can't keep spending. Callers already degrade
   // gracefully (return []/null) on a thrown error.
   if (!(await guardHeliusPage(RPC_CREDIT_EST))) {
-    throw new Error('Helius daily credit cap reached');
+    throw new Error(HELIUS_BUDGET_EXHAUSTED_MESSAGE);
   }
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
@@ -120,6 +131,9 @@ export async function getTopHolders(mint: string, limit = 100): Promise<HolderDa
 
     return holders;
   } catch (error) {
+    // Let a daily-budget-cap exhaustion propagate so callers can distinguish it
+    // from "token has no holders" (an empty list) and return a clear 503.
+    if (isHeliusBudgetExhausted(error)) throw error;
     console.error('Error fetching holders:', error);
     return [];
   }
@@ -240,6 +254,9 @@ export async function getTokenMetadata(mint: string) {
       created: Date.now(),
     };
   } catch (error) {
+    // Let a daily-budget-cap exhaustion propagate so callers can distinguish it
+    // from "token not found" (null) and return a clear 503 instead of a 404.
+    if (isHeliusBudgetExhausted(error)) throw error;
     console.error('Error fetching token metadata:', error);
     return null;
   }

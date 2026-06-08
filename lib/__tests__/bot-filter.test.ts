@@ -70,8 +70,10 @@ describe('detectBot', () => {
   });
 
   it('is conservative: high win rate on a small sample is NOT flagged', () => {
+    // Below the tightened extreme-winrate floor (30 trades): a 100% win rate on
+    // a sample this small is statistically unremarkable and must NOT be flagged.
     const r = detectBot({
-      totalTrades: 30,
+      totalTrades: 20,
       tokensTraded: 10,
       roiPct: 50,
       winRate: 1,

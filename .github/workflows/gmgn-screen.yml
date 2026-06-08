@@ -10,15 +10,30 @@ name: GMGN screen
 #        CRON_SECRET    - only if transport has CRON_SECRET set
 #   2. Repo variable (or hardcode below):
 #        TRANSPORT_URL  - e.g. https://transport-topaz-eight.vercel.app
-#   3. Fill in the "Install gmgn-cli" step with however gmgn-cli is installed on
-#      your machine (npm global, a release binary, go install, etc.). It is not
-#      in this repo, so CI cannot guess it.
+# gmgn-cli is installed from npm in the "Install gmgn-cli" step below, so CI can
+# run this workflow on demand via the "Run workflow" button (workflow_dispatch).
 
-# Manual-only until gmgn-cli is available (e.g. on a VPS). Re-enable the
-# schedule below once the "Install gmgn-cli" step is filled in and secrets are
-# set, otherwise scheduled runs would fail on the placeholder install step.
+# This workflow is MANUAL-ONLY (workflow_dispatch) by default and can be
+# triggered from the Actions tab. The scheduled trigger is intentionally left
+# commented out — see the activation checklist directly above the `schedule:`
+# block before enabling it.
 on:
   workflow_dispatch: {}
+  # =====================================================================
+  # TO ACTIVATE SCHEDULED RUNS, FIRST DO ALL OF THE FOLLOWING, THEN
+  # UNCOMMENT THE `schedule:` BLOCK BELOW:
+  #
+  #   1. Add these GitHub repo Secrets (Settings -> Secrets and variables
+  #      -> Actions -> Repository secrets):
+  #        GMGN_API_KEY   - API key gmgn-cli authenticates with
+  #        CRON_SECRET    - must match transport's CRON_SECRET (if set)
+  #        TRANSPORT_URL  - e.g. https://transport-topaz-eight.vercel.app
+  #
+  # WHY THIS IS GATED: enabling the schedule BEFORE the secrets exist would
+  # produce failing scheduled runs every 2h (and the failure-notification
+  # emails that come with them). Add the secrets first, verify a manual
+  # run via "Run workflow", THEN uncomment the schedule below.
+  # =====================================================================
   # schedule:
   #   - cron: '20 */2 * * *' # every 2h, offset from the other jobs
 
@@ -36,12 +51,9 @@ jobs:
         with:
           node-version: '20'
 
-      # TODO: replace with the real install for your gmgn-cli.
-      # Example (npm global):   npm i -g gmgn-cli
-      # Example (release binary): curl -L <url> -o gmgn-cli && chmod +x gmgn-cli && sudo mv gmgn-cli /usr/local/bin/
+      # gmgn-cli is published on npm; install it globally so `gmgn` is on PATH.
       - name: Install gmgn-cli
-        run: |
-          echo "TODO: install gmgn-cli here" && exit 1
+        run: npm install -g gmgn-cli@1.4.3
 
       - name: Screen backlog via GMGN
         env:

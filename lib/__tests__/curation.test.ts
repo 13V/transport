@@ -4,14 +4,19 @@ import type { CuratableStat, SmartCriteria } from '../indexer/curation';
 const NOW = new Date('2026-06-05T00:00:00Z').getTime();
 
 // Default criteria matching getSmartCriteria() defaults (no env overrides).
+// These mirror the tightened defaults in lib/indexer/curation.ts.
 const baseCriteria: SmartCriteria = {
-  minRoiPct: 0,
-  minPnlSol: 1,
-  minInvestedSol: 0,
-  minTrades: 10,
-  minTokens: 3,
+  minRoiPct: 30,
+  minPnlSol: 2,
+  minInvestedSol: 5,
+  minTrades: 30,
+  minTokens: 10,
   maxWinRate: 1,
-  maxIdleDays: 45,
+  minConsistency: 0,
+  minProfitFactor: 0,
+  suspectWinRate: 0.95,
+  suspectMinEvents: 30,
+  maxIdleDays: 90,
 };
 
 // A stat that comfortably clears every default bar.
@@ -21,8 +26,8 @@ function goodStat(overrides: Partial<CuratableStat> = {}): CuratableStat {
     roiPct: 120,
     investedSol: 40,
     winRate: 0.4,
-    totalTrades: 25,
-    tokensTraded: 8,
+    totalTrades: 40,
+    tokensTraded: 15,
     lastTradeAt: new Date(NOW - 2 * 86_400_000), // 2 days ago
     seeded: false,
     ...overrides,
@@ -55,7 +60,8 @@ describe('isSmartWallet', () => {
     // invested 150 >= 100 → passes
     expect(isSmartWallet(goodStat({ investedSol: 150 }), criteria, NOW)).toBe(true);
     // when off (0), low invested is irrelevant
-    expect(isSmartWallet(goodStat({ investedSol: 0 }), baseCriteria, NOW)).toBe(true);
+    const off: SmartCriteria = { ...baseCriteria, minInvestedSol: 0 };
+    expect(isSmartWallet(goodStat({ investedSol: 0 }), off, NOW)).toBe(true);
   });
 
   it('seeded wallet always passes, regardless of other failing fields', () => {
@@ -73,10 +79,10 @@ describe('isSmartWallet', () => {
   });
 
   it('idle wallet (old lastTradeAt beyond maxIdleDays) → rejected', () => {
-    const idle = goodStat({ lastTradeAt: new Date(NOW - 60 * 86_400_000) }); // 60 > 45
+    const idle = goodStat({ lastTradeAt: new Date(NOW - 100 * 86_400_000) }); // 100 > 90
     expect(isSmartWallet(idle, baseCriteria, NOW)).toBe(false);
     // just inside the window passes
-    const fresh = goodStat({ lastTradeAt: new Date(NOW - 44 * 86_400_000) });
+    const fresh = goodStat({ lastTradeAt: new Date(NOW - 89 * 86_400_000) });
     expect(isSmartWallet(fresh, baseCriteria, NOW)).toBe(true);
   });
 
@@ -94,6 +100,10 @@ describe('isSmartWallet', () => {
       'SMART_MIN_TRADES',
       'SMART_MIN_TOKENS',
       'SMART_MAX_WIN_RATE',
+      'SMART_MIN_CONSISTENCY',
+      'SMART_MIN_PROFIT_FACTOR',
+      'SMART_SUSPECT_WIN_RATE',
+      'SMART_SUSPECT_MIN_EVENTS',
       'SMART_MAX_IDLE_DAYS',
     ]) {
       delete process.env[k];
