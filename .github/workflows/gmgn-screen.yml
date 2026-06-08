@@ -4,38 +4,24 @@ name: GMGN screen
 # GMGN's precomputed PnL for backlog wallets, then POSTs results to transport so
 # the expensive Helius deep-scan only verifies the promising ones.
 #
-# REQUIRED before this works:
-#   1. Repo secrets (Settings -> Secrets and variables -> Actions):
-#        GMGN_API_KEY   - key gmgn-cli uses
-#        CRON_SECRET    - only if transport has CRON_SECRET set
-#   2. Repo variable (or hardcode below):
-#        TRANSPORT_URL  - e.g. https://transport-topaz-eight.vercel.app
-# gmgn-cli is installed from npm in the "Install gmgn-cli" step below, so CI can
-# run this workflow on demand via the "Run workflow" button (workflow_dispatch).
+# REQUIRED for this to succeed (scheduled AND manual runs):
+#   1. Repo secrets (Settings -> Secrets and variables -> Actions -> Repository secrets):
+#        GMGN_API_KEY   - API key gmgn-cli authenticates with
+#        CRON_SECRET    - must match transport's CRON_SECRET (if set)
+#   2. TRANSPORT_URL defaults to the prod URL below; override via repo variable
+#      `TRANSPORT_URL` if your deployment differs.
+#
+# gmgn-cli is installed from npm in the "Install gmgn-cli" step, so CI has the
+# binary GMGN screening needs.
 
-# This workflow is MANUAL-ONLY (workflow_dispatch) by default and can be
-# triggered from the Actions tab. The scheduled trigger is intentionally left
-# commented out — see the activation checklist directly above the `schedule:`
-# block before enabling it.
 on:
   workflow_dispatch: {}
-  # =====================================================================
-  # TO ACTIVATE SCHEDULED RUNS, FIRST DO ALL OF THE FOLLOWING, THEN
-  # UNCOMMENT THE `schedule:` BLOCK BELOW:
-  #
-  #   1. Add these GitHub repo Secrets (Settings -> Secrets and variables
-  #      -> Actions -> Repository secrets):
-  #        GMGN_API_KEY   - API key gmgn-cli authenticates with
-  #        CRON_SECRET    - must match transport's CRON_SECRET (if set)
-  #        TRANSPORT_URL  - e.g. https://transport-topaz-eight.vercel.app
-  #
-  # WHY THIS IS GATED: enabling the schedule BEFORE the secrets exist would
-  # produce failing scheduled runs every 2h (and the failure-notification
-  # emails that come with them). Add the secrets first, verify a manual
-  # run via "Run workflow", THEN uncomment the schedule below.
-  # =====================================================================
-  # schedule:
-  #   - cron: '20 */2 * * *' # every 2h, offset from the other jobs
+  # Scheduled every 2h (offset from the other jobs). Note: schedules only run
+  # from the DEFAULT branch. Runs will FAIL until GMGN_API_KEY and CRON_SECRET
+  # are added as repo secrets (see header) — add them before/at merge to avoid
+  # failure-notification emails.
+  schedule:
+    - cron: '20 */2 * * *' # every 2h, offset from the other jobs
 
 concurrency:
   group: gmgn-screen
