@@ -1,10 +1,10 @@
 import type { Metadata } from 'next';
-import { Key, ShieldCheck, Clock } from 'lucide-react';
+import { Key, ShieldCheck, Clock, Compass, Lock, Send, Bell, Copy } from 'lucide-react';
 
 export const metadata: Metadata = {
-  title: 'API Reference | Smart Money',
+  title: 'Docs | Smart Money',
   description:
-    'Public API reference for the smart-money tool: leaderboards, wallet scoring, token traders, and pipeline status.',
+    'Documentation hub for the smart-money tool: what it is and how it measures outcomes, access tiers, the Telegram bot, alerts, copy-trade, and the public API reference.',
 };
 
 const BASE_URL = 'https://transport-topaz-eight.vercel.app/api';
@@ -386,6 +386,336 @@ const ENDPOINTS: EndpointDoc[] = [
   },
 ];
 
+// ---------------------------------------------------------------------------
+// GUIDE SECTIONS — product / methodology / access / bot / alerts / copy-trade.
+// Anchored .doc-section blocks added ABOVE the API reference. Server-rendered,
+// no client hooks — plain markup + anchors reusing the existing CSS tokens.
+// ---------------------------------------------------------------------------
+
+interface GuideNavItem {
+  id: string;
+  label: string;
+  icon: React.ComponentType<{ size?: number }>;
+}
+
+const GUIDE_NAV: GuideNavItem[] = [
+  { id: 'overview', label: 'Overview', icon: Compass },
+  { id: 'access', label: 'Access & tiers', icon: Lock },
+  { id: 'telegram', label: 'Telegram bot', icon: Send },
+  { id: 'alerts', label: 'Alerts & watch rules', icon: Bell },
+  { id: 'copy-trade', label: 'Copy-trade', icon: Copy },
+];
+
+function SectionHead({
+  icon: Icon,
+  title,
+  sub,
+}: {
+  icon: React.ComponentType<{ size?: number }>;
+  title: string;
+  sub: string;
+}) {
+  return (
+    <div className="row gap-12 wrap">
+      <span className="stat-ic accent"><Icon size={15} /></span>
+      <div className="stack">
+        <b>{title}</b>
+        <span className="faint" style={{ fontSize: 12.5 }}>{sub}</span>
+      </div>
+    </div>
+  );
+}
+
+const P: React.CSSProperties = { margin: 0, fontSize: 13.5 };
+const LABEL: React.CSSProperties = {
+  fontSize: 11,
+  textTransform: 'uppercase',
+  letterSpacing: '.05em',
+  fontWeight: 600,
+};
+
+function OverviewSection() {
+  return (
+    <section className="doc-section" id="doc-overview">
+      <div className="card card-pad stack gap-12">
+        <SectionHead
+          icon={Compass}
+          title="Overview"
+          sub="Real-time smart-money burst detection, with every call measured."
+        />
+        <p className="muted" style={P}>
+          This tool watches what curated <b>smart-money</b> wallets do on Solana
+          in real time and surfaces <b>buy bursts</b> — moments where multiple
+          proven wallets pile into the same token inside a short window, before it
+          trends. It pairs the live feed with honest, measured outcomes so you can
+          judge the edge for yourself.
+        </p>
+
+        <div className="stack gap-8" style={{ marginTop: 6 }}>
+          <span className="faint" style={LABEL}>How it works (and our honesty stance)</span>
+          <ul className="muted" style={{ margin: 0, paddingLeft: 18, fontSize: 13.5, lineHeight: 1.6 }}>
+            <li>
+              <b>Bursts</b> = ≥N distinct verified entities buying the same token
+              in a short window (default 3 buyers / 30s; tunable per query and per
+              alert).
+            </li>
+            <li>
+              <b>Entity clustering</b> collapses one actor&apos;s many wallets into
+              a single entity via the funding graph, so a burst counts distinct
+              players — not the same whale splitting across wallets.
+            </li>
+            <li>
+              <b>Accurate PnL.</b> Wallets are <b>FIFO-replayed</b> over their
+              on-chain swap history for accurate all-time realized PnL, ROI%, win
+              rate, and consistency (SOL-denominated).
+            </li>
+            <li>
+              <b>Every call is measured.</b> Each burst&apos;s outcome is tracked
+              against real price history and published — wins <i>and</i> losses.
+              See the{' '}
+              <a className="endpoint" style={{ textDecoration: 'underline' }} href="/backtest">
+                /backtest
+              </a>{' '}
+              page for the measured hit-rates and returns.
+            </li>
+          </ul>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function AccessSection() {
+  const tiers: { tier: string; gate: string; how: string; env: string }[] = [
+    {
+      tier: 'Free',
+      gate: 'No key — open',
+      how: 'Web feeds + read-only polling API (incl. live bursts with ?since= cursor).',
+      env: '—',
+    },
+    {
+      tier: 'Telegram alerts',
+      gate: 'Hold ≥ 1,000,000 gate tokens',
+      how: 'DM alerts from the bot. Bind a wallet with /verify, then sign to prove ownership.',
+      env: 'TG_GATE_MIN_AMOUNT',
+    },
+    {
+      tier: 'Web premium',
+      gate: 'Hold ≥ 500,000 worth',
+      how: 'Unlocks copy-trade SOL presets in the web app. Sign to prove ownership.',
+      env: 'TOKEN_GATE_MIN_AMOUNT',
+    },
+    {
+      tier: 'API / SSE',
+      gate: 'Pay per period',
+      how: 'Pay API_PRICE_SOL SOL on-chain to the treasury → an expiring API key is auto-minted (push SSE + higher limits).',
+      env: 'API_PRICE_SOL · API_PERIOD_DAYS',
+    },
+  ];
+  return (
+    <section className="doc-section" id="doc-access">
+      <div className="card card-pad stack gap-12">
+        <SectionHead
+          icon={Lock}
+          title="Access & tiers"
+          sub="Non-custodial throughout — you sign to prove ownership; you never hand over funds or keys."
+        />
+
+        <div style={{ overflowX: 'auto' }}>
+          <table className="docs-table" style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
+            <thead>
+              <tr>
+                {['Tier', 'Gate', 'What you get', 'Env key'].map((h) => (
+                  <th key={h} className="faint" style={{ ...LABEL, textAlign: 'left', padding: '6px 12px 6px 0', borderBottom: '1px solid var(--border)' }}>
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {tiers.map((t) => (
+                <tr key={t.tier}>
+                  <td style={{ padding: '8px 12px 8px 0', borderBottom: '1px solid var(--border)', verticalAlign: 'top' }}>
+                    <b>{t.tier}</b>
+                  </td>
+                  <td className="muted" style={{ padding: '8px 12px 8px 0', borderBottom: '1px solid var(--border)', verticalAlign: 'top' }}>
+                    {t.gate}
+                  </td>
+                  <td className="muted" style={{ padding: '8px 12px 8px 0', borderBottom: '1px solid var(--border)', verticalAlign: 'top' }}>
+                    {t.how}
+                  </td>
+                  <td style={{ padding: '8px 0', borderBottom: '1px solid var(--border)', verticalAlign: 'top' }}>
+                    <code className="mono faint" style={{ fontSize: 11.5 }}>{t.env}</code>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="stack gap-8" style={{ marginTop: 6 }}>
+          <span className="faint" style={LABEL}>Non-custodial flows</span>
+          <p className="muted" style={P}>
+            For the <b>hold-gates</b> (Telegram + web premium) you connect a Solana
+            wallet and <b>sign a one-line challenge</b> to prove you own it — no
+            funds move and no keys leave your wallet. The server reads your real
+            on-chain gate-token balance and unlocks if you&apos;re over the
+            threshold. For <b>API access</b> you pay{' '}
+            <code className="mono">API_PRICE_SOL</code> SOL <b>directly to the
+            treasury on-chain</b>; the payment is verified on-chain (the net
+            lamports into the treasury), redeemed once, and a <b>hashed,
+            expiring</b> key is minted and shown to you a single time. Manage all
+            of this on the{' '}
+            <a className="endpoint" style={{ textDecoration: 'underline' }} href="/access">
+              /access
+            </a>{' '}
+            page.
+          </p>
+        </div>
+
+        <div className="stack gap-8" style={{ marginTop: 6 }}>
+          <span className="faint" style={LABEL}>Honesty note — gating is config-gated</span>
+          <p className="muted" style={P}>
+            Until the operator configures monetization, the gates are{' '}
+            <b>open</b> and payment is <b>disabled</b>. Specifically: while{' '}
+            <code className="mono">TOKEN_GATE_MINT</code> is unset the hold-gates
+            return open (everyone is treated as premium / alert-eligible), and
+            while <code className="mono">TREASURY_WALLET</code> is unset API
+            payments are unavailable. The{' '}
+            <a className="endpoint" style={{ textDecoration: 'underline' }} href="/access">
+              /access
+            </a>{' '}
+            page mirrors this, showing &quot;monetization not yet configured&quot;
+            for any tier that isn&apos;t live yet.
+          </p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function TelegramSection() {
+  const cmds: [string, string][] = [
+    ['/start', 'Registers your chat and shows the welcome + the measured 24h hit-rate. Run it first.'],
+    ['/watch <wallet>', "Always alert when this Solana wallet joins a burst, regardless of your filters (up to 20 watched)."],
+    ['/unwatch <wallet>', 'Remove a wallet from your watchlist.'],
+    ['/filters minbuyers=.. minsol=.. holding=on|off', 'Tune your alert thresholds: minimum distinct buyers (int), minimum SOL in the burst (number), and holding-only on/off.'],
+    ['/mute', 'Pause all alerts (settings kept).'],
+    ['/unmute', 'Resume alerts.'],
+    ['/status', 'Show your current prefs plus the measured 24h edge (bursts, hit-rate, median return).'],
+    ['/verify', 'Deep-link to /access?chat_id=… to bind a wallet for the gated alert tier (see below).'],
+    ['/stop', 'Delete your subscription entirely. Send /start to come back.'],
+  ];
+  return (
+    <section className="doc-section" id="doc-telegram">
+      <div className="card card-pad stack gap-12">
+        <SectionHead
+          icon={Send}
+          title="Telegram bot"
+          sub="Get a DM the moment smart money piles into a token — with one-tap Ape buttons."
+        />
+        <p className="muted" style={P}>
+          <b>Getting started:</b> open the bot in Telegram and send{' '}
+          <code className="mono">/start</code>. You&apos;re registered instantly and
+          each alert ships with one-tap trade buttons (Axiom / GMGN / BullX /
+          Photon / Jupiter) that open the swap in your own wallet.
+        </p>
+
+        <div className="stack gap-8" style={{ marginTop: 6 }}>
+          <span className="faint" style={LABEL}>Commands</span>
+          {cmds.map(([cmd, desc]) => (
+            <div key={cmd} className="row gap-12 wrap" style={{ fontSize: 12.5, alignItems: 'baseline' }}>
+              <code className="mono" style={{ color: 'var(--text)', minWidth: 150 }}>{cmd}</code>
+              <span className="faint" style={{ flex: 1, minWidth: 220 }}>{desc}</span>
+            </div>
+          ))}
+        </div>
+
+        <div className="stack gap-8" style={{ marginTop: 6 }}>
+          <span className="faint" style={LABEL}>Verifying for gated alerts</span>
+          <p className="muted" style={P}>
+            <code className="mono">/verify</code> replies with a deep link to{' '}
+            <code className="mono">/access?chat_id=&lt;your chat&gt;</code>. On that
+            page you connect a Solana wallet and <b>sign</b> a one-line message
+            (ownership proof only — no funds, no keys), which binds the wallet to
+            your chat. Once that wallet holds at least the Telegram threshold
+            (<code className="mono">TG_GATE_MIN_AMOUNT</code>, default 1,000,000),
+            gated alerts flow. If the balance later drops below the threshold,
+            alerts pause until it&apos;s topped back up. (While{' '}
+            <code className="mono">TOKEN_GATE_MINT</code> is unconfigured the gate
+            is open and alerts flow without a hold.)
+          </p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function AlertsSection() {
+  return (
+    <section className="doc-section" id="doc-alerts">
+      <div className="card card-pad stack gap-12">
+        <SectionHead
+          icon={Bell}
+          title="Alerts & watch rules"
+          sub="On-site browser-push alerts for bursts that match your own rules."
+        />
+        <p className="muted" style={P}>
+          The{' '}
+          <a className="endpoint" style={{ textDecoration: 'underline' }} href="/alerts">
+            /alerts
+          </a>{' '}
+          page lets you create custom <b>watch rules</b> that fire a browser{' '}
+          <b>web-push</b> notification when a smart-money burst matches. Each rule
+          has:
+        </p>
+        <ul className="muted" style={{ margin: 0, paddingLeft: 18, fontSize: 13.5, lineHeight: 1.6 }}>
+          <li><b>Wallets</b> — optional; if set, the burst must include one of them (empty = any wallet).</li>
+          <li><b>Min buyers</b> — minimum distinct buyers in the burst.</li>
+          <li><b>Min SOL</b> — minimum cumulative SOL value of the burst.</li>
+          <li><b>Holding-only</b> — only fire for wallets already on your watchlist.</li>
+        </ul>
+        <p className="muted" style={P}>
+          Push is the delivery channel on this page (rules are keyed to your
+          device). Each rule can be <b>muted</b> individually to pause it without
+          deleting it. Telegram delivery is handled separately by the bot above.
+        </p>
+      </div>
+    </section>
+  );
+}
+
+function CopyTradeSection() {
+  return (
+    <section className="doc-section" id="doc-copy-trade">
+      <div className="card card-pad stack gap-12">
+        <SectionHead
+          icon={Copy}
+          title="Copy-trade"
+          sub="One-click trading from alerts and feeds — fully non-custodial."
+        />
+        <p className="muted" style={P}>
+          The <b>Copy</b> / <b>Ape</b> button builds a <b>prefilled swap deep
+          link</b> (Axiom / GMGN / Jupiter, with our referral codes) and opens it
+          in a new tab so you complete the trade in <b>your own wallet</b>. Nothing
+          is signed or sent server-side, and we never hold keys or funds.
+        </p>
+        <p className="muted" style={P}>
+          <b>Web-premium users</b> get quick <b>SOL amount presets</b> (0.1 / 0.5
+          / 1 / 5), saved per source-wallet, that are carried into the deep link so
+          the size is prefilled. Free users get the one-click button without
+          presets.
+        </p>
+        <p className="faint" style={{ ...P, fontSize: 12.5 }}>
+          <ShieldCheck size={11} style={{ verticalAlign: 'middle' }} /> Custodial
+          auto-execution is <b>not enabled</b> — the engine is scaffolded but
+          disabled, so no trade is ever placed on your behalf.
+        </p>
+      </div>
+    </section>
+  );
+}
+
 function EndpointCard({ e }: { e: EndpointDoc }) {
   return (
     <section className="doc-section" id={`doc-${e.id}`}>
@@ -426,7 +756,12 @@ export default function DocsPage() {
   return (
     <div className="view stack gap-24">
       <div className="page-head">
-        <div className="sub">Read-only, public, cache-friendly JSON — no key required. Real-time push (SSE) is a pro-key surface.</div>
+        <div className="sub">
+          The documentation hub: what the tool is and how it measures every call,
+          access tiers, the Telegram bot, alerts, copy-trade — plus the full
+          read-only API reference. Public, cache-friendly JSON needs no key;
+          real-time push (SSE) is a pro-key surface.
+        </div>
         <div className="page-head-actions">
           <span className="net-pill"><span className="net-dot live" /> All systems operational</span>
         </div>
@@ -436,6 +771,14 @@ export default function DocsPage() {
         <aside className="docs-aside">
           <div className="docs-aside-inner stack gap-12">
             <span className="faint" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '.06em', fontWeight: 600 }}>
+              Guide
+            </span>
+            {GUIDE_NAV.map((g) => (
+              <a key={g.id} className="doc-nav-link" href={`#doc-${g.id}`}>
+                <g.icon size={13} /> {g.label}
+              </a>
+            ))}
+            <span className="faint" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '.06em', fontWeight: 600, marginTop: 6 }}>
               Endpoints
             </span>
             {ENDPOINTS.map((e) => (
@@ -450,11 +793,17 @@ export default function DocsPage() {
         </aside>
 
         <div className="stack gap-16">
-          <div className="card card-pad" style={{ background: 'linear-gradient(150deg, rgba(109,118,245,0.08), transparent)' }}>
+          <OverviewSection />
+          <AccessSection />
+          <TelegramSection />
+          <AlertsSection />
+          <CopyTradeSection />
+
+          <div className="card card-pad" style={{ marginTop: 8, background: 'linear-gradient(150deg, rgba(109,118,245,0.08), transparent)' }}>
             <div className="row gap-12 wrap">
               <span className="stat-ic accent"><Key size={15} /></span>
               <div className="stack">
-                <b>Base URL</b>
+                <b>API reference · Base URL</b>
                 <code className="mono faint" style={{ fontSize: 12.5 }}>{BASE_URL}</code>
               </div>
               <span className="spacer" />

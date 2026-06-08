@@ -31,7 +31,7 @@ const NAV: { group: string; items: NavItem[] }[] = [
     { href: '/alerts', label: 'Alerts', icon: Bell, owner: 'alerts' },
   ] },
   { group: 'Developer', items: [
-    { href: '/docs', label: 'API', icon: BookOpen, owner: 'docs' },
+    { href: '/docs', label: 'Docs', icon: BookOpen, owner: 'docs' },
   ] },
 ];
 
@@ -85,7 +85,7 @@ function titleFor(path: string): string {
   }
   if (path.startsWith('/watchlist')) return 'Watchlist';
   if (path.startsWith('/alerts')) return 'Alerts';
-  if (path.startsWith('/docs')) return 'API Reference';
+  if (path.startsWith('/docs')) return 'Docs';
   if (path.startsWith('/live')) return 'Live';
   if (path.startsWith('/backtest')) return 'Backtest';
   return 'Smart Money';
