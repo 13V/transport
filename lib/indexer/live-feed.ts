@@ -41,7 +41,13 @@ export interface LiveFeedResult {
   count: number;
   nextCursor: string | null;
   bursts: LiveBurst[];
+  /** SOL price in USD at build time, for client-side USD conversions (e.g.
+   *  average ape size per burst). Undefined when unavailable — never fabricated. */
+  solPriceUsd?: number;
 }
+
+/** Wrapped-SOL mint, used to read the live SOL/USD price from getTokenMeta. */
+const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 
 /** How long a built feed result is reused before recomputation. */
 export const RESULT_TTL_MS = 2_000;
@@ -152,7 +158,21 @@ async function computeLiveFeed(p: BuildLiveFeedParams): Promise<LiveFeedResult> 
   // the bursts are returned unchanged (fields stay undefined).
   bursts = await annotateSmartSells(bursts, hours);
 
-  return { ...result, count: bursts.length, nextCursor, bursts };
+  // ONE SOL/USD price read per feed build, for client USD conversions (avg ape
+  // size). getTokenMeta is batched + ~2min cached, so this is effectively free.
+  // Fully resilient: any failure leaves solPriceUsd undefined (never fabricated).
+  let solPriceUsd: number | undefined;
+  try {
+    const solMeta = await getTokenMeta([WSOL_MINT]);
+    const price = solMeta.get(WSOL_MINT)?.priceUsd;
+    if (typeof price === 'number' && Number.isFinite(price) && price > 0) {
+      solPriceUsd = price;
+    }
+  } catch {
+    // ignore — leave solPriceUsd undefined
+  }
+
+  return { ...result, count: bursts.length, nextCursor, bursts, solPriceUsd };
 }
 
 /**

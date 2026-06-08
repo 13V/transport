@@ -67,6 +67,8 @@ interface LiveResponse {
   count: number;
   nextCursor?: string | null;
   bursts: Burst[];
+  /** SOL price in USD at build time (for avg-ape-size USD). Undefined if unknown. */
+  solPriceUsd?: number;
 }
 
 // Measured-outcomes proof header payload (GET /api/smart-money/live/stats).
@@ -795,6 +797,9 @@ export default function LiveFeed() {
   const { toggle: toggleWatch } = useWatchlist();
   const [bursts, setBursts] = useState<Burst[]>([]);
   const [generatedAt, setGeneratedAt] = useState<string | null>(null);
+  // Latest SOL/USD price from the feed payload (poll + SSE snapshot), used to
+  // render average ape size in USD. Undefined until known; never fabricated.
+  const [solPriceUsd, setSolPriceUsd] = useState<number | undefined>(undefined);
   const [minBuyers, setMinBuyers] = useState<number>(3);
   const [windowSec, setWindowSec] = useState<number>(30);
   const [minSol, setMinSol] = useState<number>(0);
@@ -953,10 +958,15 @@ export default function LiveFeed() {
   // SNAPSHOT path — REPLACE the burst set with the authoritative current window.
   // Used by the poll fetch and by the SSE `snapshot` event. Self-heals aged-out
   // bursts because anything no longer present is dropped.
-  const applySnapshot = useCallback((next: Burst[], genAt?: string | null) => {
+  const applySnapshot = useCallback((next: Burst[], genAt?: string | null, solUsd?: number) => {
     flagNewIds(next);
     setBursts(next);
     setGeneratedAt(genAt ?? new Date().toISOString());
+    // Keep the latest known SOL/USD price; ignore undefined so a payload missing
+    // it doesn't blank a previously-known value.
+    if (typeof solUsd === 'number' && Number.isFinite(solUsd) && solUsd > 0) {
+      setSolPriceUsd(solUsd);
+    }
     setLastOkAt(Date.now());
     setError(null);
   }, [flagNewIds]);
@@ -990,7 +1000,7 @@ export default function LiveFeed() {
       if (!res.ok) throw new Error('Failed to fetch live feed');
       const json = (await res.json()) as LiveResponse;
       if (!mountedRef.current) return;
-      applySnapshot(json.bursts ?? [], json.generatedAt);
+      applySnapshot(json.bursts ?? [], json.generatedAt, json.solPriceUsd);
     } catch (err) {
       if (!mountedRef.current) return;
       setError(err instanceof Error ? err.message : 'Failed to load live feed');
@@ -1130,7 +1140,7 @@ export default function LiveFeed() {
       if (!mountedRef.current) return;
       try {
         const json = JSON.parse(ev.data) as LiveResponse;
-        applySnapshot(json.bursts ?? [], json.generatedAt);
+        applySnapshot(json.bursts ?? [], json.generatedAt, json.solPriceUsd);
         clearWatchdog();
         markFrame();
         setLoading(false);
@@ -1347,7 +1357,7 @@ export default function LiveFeed() {
     ohlcvFetchingRef.current = true;
     try {
       const mints = stale.slice(0, OHLCV_MAX_MINTS).join(',');
-      const res = await fetch(`/api/token/ohlcv/batch?mints=${encodeURIComponent(mints)}&tf=1h`);
+      const res = await fetch(`/api/token/ohlcv/batch?mints=${encodeURIComponent(mints)}&tf=5m`);
       if (!res.ok) return;
       const json = (await res.json()) as OhlcvBatchResponse;
       if (!mountedRef.current) return;
@@ -1673,6 +1683,24 @@ export default function LiveFeed() {
       }
     }
 
+    // --- AVERAGE APE SIZE per smart wallet. avgSol = solTotal / buyers; show in
+    //     USD when the SOL price is known, else in SOL. Only when buyers>0; never
+    //     fabricate (no price → show the SOL value, which we always have). ---
+    let avgApeLabel: string | null = null;
+    let avgApeTitle: string | null = null;
+    if (b.buyers > 0 && Number.isFinite(b.solTotal)) {
+      const avgSol = b.solTotal / b.buyers;
+      if (Number.isFinite(avgSol) && avgSol > 0) {
+        if (solPriceUsd != null && solPriceUsd > 0) {
+          avgApeLabel = `avg ~${usdCompact(avgSol * solPriceUsd)}`;
+          avgApeTitle = `Average buy size per smart wallet: ${f.sol(avgSol)}◎ (~${usdCompact(avgSol * solPriceUsd)}) across ${b.buyers} wallet${b.buyers === 1 ? '' : 's'}`;
+        } else {
+          avgApeLabel = `avg ${f.sol(avgSol)}◎`;
+          avgApeTitle = `Average buy size per smart wallet: ${f.sol(avgSol)}◎ across ${b.buyers} wallet${b.buyers === 1 ? '' : 's'}`;
+        }
+      }
+    }
+
     // --- ONE safety verdict pill (folds the scattered booleans). ---
     const safetyReasons: string[] = [];
     if (mintLive) safetyReasons.push('Mint authority live');
@@ -1825,6 +1853,23 @@ export default function LiveFeed() {
                 ) : mcap ? (
                   <span className="bf-mc-flow" title="Current market cap">{mcap}</span>
                 ) : null}
+                {/* Average ape size per smart wallet (USD when SOL price known).
+                    Inline-styled (compact, monospace) since globals.css is out of
+                    scope for this change. */}
+                {avgApeLabel && (
+                  <span
+                    className="bf-avg-ape"
+                    title={avgApeTitle || undefined}
+                    style={{
+                      fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+                      fontSize: '11px',
+                      opacity: 0.75,
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {avgApeLabel}
+                  </span>
+                )}
               </div>
             </div>
           </div>
@@ -1905,7 +1950,7 @@ export default function LiveFeed() {
         <div className="bf-right">
           <div className="bf-right-top">
             {hasSpark && (
-              <span className="bf-spark-inline" title="Price, last ~7d (1h candles)">
+              <span className="bf-spark-inline" title="Price, recent (5m candles)">
                 <Sparkline values={closes} width={72} height={22} color={sparkColor} />
               </span>
             )}

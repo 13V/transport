@@ -25,11 +25,19 @@ function stop(e: React.MouseEvent) {
 export function TokenImg({ srcs, radius }: { srcs: string[]; radius: number }) {
   const [i, setI] = useState(0);
   if (i >= srcs.length) return null;
+  const src = srcs[i];
+  // referrerPolicy="no-referrer" was the root cause of logos failing: it strips
+  // the Referer header, which makes DexScreener's image CDN (dd.dexscreener.com)
+  // return 403 (hotlink protection) — and that CDN is the candidate present for
+  // essentially every token. Only apply no-referrer to IPFS gateways (some of
+  // which want it for privacy and don't 403 on it); send a normal referrer to
+  // the CDN / image proxy so they serve the image.
+  const isIpfs = /\/ipfs\//i.test(src) || src.startsWith('ipfs://');
   return (
     // eslint-disable-next-line @next/next/no-img-element
     <img
-      key={srcs[i]}
-      src={srcs[i]}
+      key={src}
+      src={src}
       alt=""
       // Perf: defer offscreen logos, decode off the main thread, and keep these
       // many slow external IPFS/CDN images low-priority so they never compete
@@ -38,7 +46,7 @@ export function TokenImg({ srcs, radius }: { srcs: string[]; radius: number }) {
       loading="lazy"
       decoding="async"
       fetchPriority="low"
-      referrerPolicy="no-referrer"
+      referrerPolicy={isIpfs ? 'no-referrer' : 'strict-origin-when-cross-origin'}
       onError={() => setI((n) => n + 1)}
       // Explicit pixel box (matches the parent TokenMark size via inset:0 +
       // 100%/100%) so the image reserves space and cannot shift layout while it

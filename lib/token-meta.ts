@@ -68,6 +68,26 @@ function chunk<T>(arr: T[], size: number): T[][] {
   return out;
 }
 
+/**
+ * Wrap a raw image URL through the free, no-auth wsrv.nl (weserv) image proxy.
+ *
+ * Why this is the PRIMARY candidate, not a nicety:
+ *  - It fetches the source SERVER-SIDE, so the browser never sends (or omits) a
+ *    Referer/Origin to the origin. That sidesteps DexScreener's CDN hotlink
+ *    protection (dd.dexscreener.com returns 403 when the request has no
+ *    referrer — exactly what `referrerPolicy="no-referrer"` produces) and any
+ *    CORS/referrer quirks on IPFS gateways.
+ *  - It caches + transcodes to a small 64px webp, so slow/cold IPFS gateways are
+ *    served fast from the proxy's edge cache instead of timing out per client.
+ * The raw URL is always kept as a later fallback in case the proxy is down.
+ */
+function proxied(raw?: string): string | undefined {
+  if (!raw || typeof raw !== 'string') return undefined;
+  // wsrv wants the url WITHOUT the scheme (or url-encoded). Encode to be safe.
+  const stripped = raw.replace(/^https?:\/\//, '');
+  return `https://wsrv.nl/?url=${encodeURIComponent(stripped)}&w=64&h=64&fit=cover&output=webp&default=1`;
+}
+
 /** Build candidate URLs for an IPFS/arweave/http image, preferring fast gateways. */
 function imageCandidates(raw?: string): string[] {
   if (!raw || typeof raw !== 'string') return [];
@@ -82,9 +102,10 @@ function imageCandidates(raw?: string): string[] {
   if (ipfsPath) {
     // Multiple independent gateways so a single slow/down gateway can't kill the
     // logo — the client tries them in order and stops at the first that loads.
+    // NOTE: cloudflare-ipfs.com was REMOVED — Cloudflare permanently shut down
+    // their public IPFS gateway (NXDOMAIN now), so it only ever wasted a slot.
     out.push(`https://pump.mypinata.cloud/ipfs/${ipfsPath}`); // what pump.fun itself serves
     out.push(`https://ipfs.io/ipfs/${ipfsPath}`);
-    out.push(`https://cloudflare-ipfs.com/ipfs/${ipfsPath}`);
     out.push(`https://nftstorage.link/ipfs/${ipfsPath}`);
     out.push(`https://dweb.link/ipfs/${ipfsPath}`);
   } else if (raw.startsWith('http://')) {
@@ -164,10 +185,13 @@ async function fetchDexScreener(mints: string[], acc: Map<string, Acc>): Promise
         entry.sells24h = numOrU(pair?.txns?.h24?.sells) ?? entry.sells24h;
         entry.pairCreatedAt = numOrU(pair?.pairCreatedAt) ?? entry.pairCreatedAt;
         const cands: string[] = [];
+        // DexScreener's canonical token-image CDN first (exists for ~every
+        // DexScreener-known token, and since market cap renders the token IS
+        // known). info.imageUrl/base.icon are only present for tokens with a
+        // curated profile, so they come after as extra coverage.
+        cands.push(`https://dd.dexscreener.com/ds-data/tokens/solana/${addr}.png`);
         if (typeof info?.imageUrl === 'string' && info.imageUrl) cands.push(info.imageUrl);
         if (typeof base?.icon === 'string' && base.icon) cands.push(base.icon);
-        // DexScreener's canonical token-image CDN (fast; exists for most tokens).
-        cands.push(`https://dd.dexscreener.com/ds-data/tokens/solana/${addr}.png`);
         entry.cands = [...entry.cands, ...cands];
         // Websites + socials (only present for tokens with a DexScreener profile).
         for (const w of Array.isArray(info?.websites) ? info.websites : []) {
@@ -345,14 +369,40 @@ async function mapWithConcurrency<T, R>(
   await Promise.all(workers);
 }
 
+// Rank a raw candidate URL by source reliability so the chain tries the most
+// dependable origin first. Lower = earlier. This is the REAL fix for ordering:
+// fetchDexScreener and fetchHelius append in parallel (nondeterministic order),
+// so we impose a deterministic, reliability-based order here.
+function sourceRank(url: string): number {
+  if (/cdn\.helius/i.test(url) || /helius-rpc|hgw|helius/i.test(url)) return 0; // Helius-hosted CDN: fastest, most reliable
+  if (/dd\.dexscreener\.com/i.test(url)) return 1;                              // DexScreener token CDN: canonical
+  if (/dexscreener\.com/i.test(url)) return 2;                                  // DexScreener profile image
+  if (/pump\.mypinata\.cloud/i.test(url)) return 3;                             // what pump.fun itself serves
+  if (/\/ipfs\//i.test(url) || /ipfs/i.test(url)) return 4;                     // other IPFS gateways
+  return 5;                                                                      // anything else
+}
+
 function finalize(entry: Acc): TokenMeta {
-  // Ordered, de-duped, empties dropped. Order is preserved by Set insertion:
-  // DexScreener profile image → DexScreener token CDN → Helius CDN → DAS/IPFS
-  // gateways. Cap a little higher than before so a real DAS logo isn't truncated
-  // away just because several IPFS-gateway variants precede it.
-  const icons = Array.from(
+  // De-dupe raw candidates (preserve first-seen), then order by source
+  // reliability (stable sort keeps insertion order within a tier).
+  const rawDeduped = Array.from(
     new Set(entry.cands.filter((c): c is string => typeof c === 'string' && c.trim().length > 0))
-  ).slice(0, 10);
+  );
+  const raw = rawDeduped
+    .map((url, i) => ({ url, i }))
+    .sort((a, b) => sourceRank(a.url) - sourceRank(b.url) || a.i - b.i)
+    .map((x) => x.url);
+
+  // PRIMARY candidates: route the top raw sources through the wsrv.nl image
+  // proxy. This fetches server-side (no browser referrer → no DexScreener-CDN
+  // 403 hotlink block, no IPFS CORS/referrer issues) and serves a fast cached
+  // 64px webp. The RAW urls follow as fallbacks if the proxy itself is down.
+  const proxiedTop = raw
+    .slice(0, 3)
+    .map((u) => proxied(u))
+    .filter((u): u is string => typeof u === 'string' && u.length > 0);
+
+  const icons = Array.from(new Set([...proxiedTop, ...raw])).slice(0, 12);
   // De-dupe links by url, cap to a sensible number.
   const seen = new Set<string>();
   const links: TokenLink[] = [];
