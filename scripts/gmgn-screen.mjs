@@ -12,7 +12,7 @@
  *   TRANSPORT_URL  e.g. https://transport-topaz-eight.vercel.app
  *   CRON_SECRET    matches transport's CRON_SECRET (if set)
  *   GMGN_API_KEY   for gmgn-cli
- *   BATCH          wallets per gmgn-cli call (default 5)
+ *   BATCH          wallets per gmgn-cli call (default 1; see note below)
  *   MAX_WALLETS    cap per run (default 200)
  *   RATE_LIMIT_MS  delay between gmgn-cli calls (default 2500)
  */
@@ -25,7 +25,10 @@ const execFileAsync = promisify(execFile);
 const TRANSPORT_URL = (process.env.TRANSPORT_URL || '').replace(/\/$/, '');
 const CRON_SECRET = process.env.CRON_SECRET || '';
 const CHAIN = process.env.CHAIN || 'sol';
-const BATCH = parseInt(process.env.BATCH || '5', 10);
+// gmgn-cli v1.4.3 `portfolio stats` returns ONLY the first wallet's stats when
+// given multiple --wallet flags, so batching silently dropped 4 of every 5
+// wallets. Screen one wallet per call until the CLI supports true multi-wallet.
+const BATCH = parseInt(process.env.BATCH || '1', 10);
 const MAX_WALLETS = parseInt(process.env.MAX_WALLETS || '200', 10);
 const RATE_LIMIT_MS = parseInt(process.env.RATE_LIMIT_MS || '2500', 10);
 
