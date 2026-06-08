@@ -125,6 +125,21 @@ interface OhlcvResponse {
   closes: number[];
   times: number[];
   last: number | null;
+  // 'geckoterminal' → closes are USD; 'onchain' → closes are SOL/token (fresh-pool
+  // fallback built from the ingested trades). Drives the Y-axis unit + labels.
+  source?: 'geckoterminal' | 'onchain';
+}
+
+// Render a tiny SOL/token price (e.g. 3e-7) without exponential notation, reusing
+// the subscript-zeros convention but with a SOL suffix instead of a $ prefix.
+function smallSol(n: number): string {
+  if (!Number.isFinite(n) || n === 0) return '0 SOL';
+  const a = Math.abs(n);
+  if (a >= 0.001) return `${n.toFixed(6).replace(/0+$/, '').replace(/\.$/, '')} SOL`;
+  const zeros = Math.max(0, -Math.floor(Math.log10(a) + 1e-12) - 1);
+  const sig = (a * Math.pow(10, zeros + 3)).toFixed(0).replace(/0+$/, '') || '0';
+  const body = zeros <= 3 ? `0.${'0'.repeat(zeros)}${sig}` : `0.0${subscript(zeros)}${sig}`;
+  return `${n < 0 ? '-' : ''}${body} SOL`;
 }
 
 /**
@@ -186,6 +201,10 @@ function PriceChart({ mint, pair }: { mint: string; pair?: string }) {
 
   const up = closes.length >= 2 && closes[closes.length - 1] >= closes[0];
   const color = up ? CHART_COLORS.POS : CHART_COLORS.NEG;
+  // On-chain fallback series are SOL/token (not USD) — format the Y-axis to match
+  // so the values aren't mislabelled as dollars.
+  const onchain = data?.source === 'onchain';
+  const fmtY = onchain ? (v: string | number) => smallSol(Number(v)) : (v: string | number) => usd(Number(v));
 
   return (
     <div ref={cardRef} className="card" style={{ overflow: 'hidden' }}>
@@ -217,7 +236,14 @@ function PriceChart({ mint, pair }: { mint: string; pair?: string }) {
         {!visible || state === 'loading' ? (
           <div className="faint" style={{ padding: '90px 0', textAlign: 'center', fontSize: 13 }}>Loading price…</div>
         ) : closes.length >= 2 ? (
-          <AreaChart values={closes} height={240} color={color} xLabels={xLabels} fmtY={(v) => usd(Number(v))} />
+          <>
+            <AreaChart values={closes} height={240} color={color} xLabels={xLabels} fmtY={fmtY} />
+            {onchain && (
+              <p className="faint" style={{ margin: '6px 16px 0', fontSize: 11.5, textAlign: 'center' }}>
+                On-chain price (SOL/token) from recent trades — full candles appear once the pool is indexed.
+              </p>
+            )}
+          </>
         ) : (
           <div className="faint" style={{ padding: '80px 0', textAlign: 'center', fontSize: 13 }}>
             No price history yet for this pool.
