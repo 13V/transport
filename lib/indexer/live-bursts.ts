@@ -130,6 +130,35 @@ export interface LiveBurst {
   priceChange24h?: number;
   priceUsd?: number;
   pairAddress?: string;
+  /**
+   * On-chain trade price (SOL per token) at the streak's FIRST buy, straight
+   * from the trades the burst is built on. The honest "entry" price even when
+   * DexScreener has no pair yet (fresh pump.fun token). null when no priced row.
+   */
+  firstBuyPriceSol?: number | null;
+  /**
+   * On-chain trade price (SOL per token) at the streak's MOST RECENT buy. Used
+   * as a live current-price FALLBACK when DexScreener/GeckoTerminal can't price
+   * the token, so the entry→now % still moves as fresh tokens run. null when no
+   * priced row.
+   */
+  lastBuyPriceSol?: number | null;
+  /**
+   * Server-computed % price change from the burst's entry (firstBuyPriceSol) to
+   * the live current price. Current price prefers the DexScreener oracle and
+   * FALLS BACK to the most-recent on-chain trade price (lastBuyPriceSol) so it
+   * is populated even for fresh pump.fun tokens DexScreener hasn't listed.
+   * Recomputed every feed build (behind the ~2s cache), so it moves each poll.
+   * null when no entry price is known. Filled by computeLiveFeed, not here.
+   */
+  priceChangeSincePct?: number | null;
+  /**
+   * Server-computed entry (first-buy) market cap in USD, derived by scaling the
+   * current marketCapUsd back by the entry→now price ratio. Lets the card show
+   * "$entry → $now" even when the % came from the on-chain fallback. null when
+   * the current mcap or price ratio is unavailable. Filled by computeLiveFeed.
+   */
+  entryMarketCapUsd?: number | null;
   // Additional TokenMeta enrichment (filled by the route; safe-optional in case
   // a field isn't yet present on TokenMeta).
   mintRenounced?: boolean;
@@ -582,6 +611,14 @@ interface BuyRow {
   entity: string;
   ts: number; // block_time in ms
   sol: number; // amount * price (0 when NaN)
+  /**
+   * On-chain trade price in SOL per token (trades.price = solAmount/amount),
+   * or null when the row carried no usable price. This is the live, real price
+   * for ANY token the indexer has ingested — including fresh pre-graduation
+   * pump.fun tokens that DexScreener/GeckoTerminal don't list yet. Used to
+   * compute a live entry→now price change that covers those tokens.
+   */
+  price: number | null;
 }
 
 /**
@@ -650,6 +687,12 @@ function detectBurstsForRows(
     sampleBuyers: string[];
     sampleSeen: Set<string>;
     leadBuyer: string; // wallet of the FIRST (earliest) trade in the streak
+    // On-chain trade price (SOL/token) at the EARLIEST and LATEST priced buy in
+    // the streak. Rows are processed time-ascending, so the first priced row
+    // sets firstPrice and every priced row updates lastPrice. null until a
+    // priced row is seen (some rows may carry no usable price).
+    firstPrice: number | null;
+    lastPrice: number | null;
   }
 
   const tierFor = (w: string): string | null => {
@@ -720,6 +763,9 @@ function detectBurstsForRows(
       leadTier: tierFor(s.leadBuyer),
       smartSetSize,
       suggestedSizeSol: suggestSize(tiers, s.solTotal),
+      // Live on-chain entry/current prices straight from the burst's trades.
+      firstBuyPriceSol: s.firstPrice,
+      lastBuyPriceSol: s.lastPrice,
       // Settled once the streak can no longer absorb a new buy within windowSec.
       finalized: now - s.endMs > windowMs,
     });
@@ -745,6 +791,8 @@ function detectBurstsForRows(
         sampleSeen: new Set(),
         // rows are time-sorted ascending, so the streak's first row is the lead.
         leadBuyer: r.wallet,
+        firstPrice: null,
+        lastPrice: null,
       };
     }
     // Accumulate this buy into the running streak (SOL adds to the total).
@@ -753,6 +801,13 @@ function detectBurstsForRows(
     streak.entities.add(r.entity);
     streak.wallets.add(r.wallet);
     streak.solTotal += r.sol;
+    // Track the earliest/latest usable on-chain price in the streak (rows are
+    // time-ascending). firstPrice is set once (entry); lastPrice tracks the most
+    // recent priced buy (live current price for un-listed fresh tokens).
+    if (r.price != null && Number.isFinite(r.price) && r.price > 0) {
+      if (streak.firstPrice == null) streak.firstPrice = r.price;
+      streak.lastPrice = r.price;
+    }
     if (streak.sampleBuyers.length < 5 && !streak.sampleSeen.has(r.wallet)) {
       streak.sampleSeen.add(r.wallet);
       streak.sampleBuyers.push(r.wallet);
@@ -850,7 +905,7 @@ export async function getLiveBursts(opts: {
         rows = [];
         byMint.set(mint, rows);
       }
-      rows.push({ wallet, entity, ts, sol });
+      rows.push({ wallet, entity, ts, sol, price: Number.isFinite(price) ? price : null });
     }
 
     const bursts: LiveBurst[] = [];
@@ -1003,7 +1058,7 @@ export async function detectBurstsForMintsBothSides(
         rows = [];
         target.set(mint, rows);
       }
-      rows.push({ wallet, entity, ts, sol });
+      rows.push({ wallet, entity, ts, sol, price: Number.isFinite(price) ? price : null });
     }
 
     const detect = (
