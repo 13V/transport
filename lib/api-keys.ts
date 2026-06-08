@@ -75,12 +75,24 @@ export async function provisionApiKey(opts: {
     : 7;
   const expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
 
+  // Default label reflects the ACTUAL configured price/period (L-1) rather than
+  // a hardcoded '1 SOL/period'. Fall back to the same defaults the pay routes use.
+  const labelPriceSol = Number.isFinite(Number(process.env.API_PRICE_SOL))
+    && Number(process.env.API_PRICE_SOL) > 0
+    ? Number(process.env.API_PRICE_SOL)
+    : 1;
+  const labelPeriodDays = Number.isFinite(Number(process.env.API_PERIOD_DAYS))
+    && Number(process.env.API_PERIOD_DAYS) > 0
+    ? Math.floor(Number(process.env.API_PERIOD_DAYS))
+    : 7;
+  const defaultLabel = `paid (${labelPriceSol} SOL/${labelPeriodDays}d)`;
+
   const supabase = getSupabase();
   const { error } = await supabase.from('api_keys').insert({
     key: keyHash,
     owner_id: opts.ownerId ?? null,
     tier: (opts.tier ?? 'pro'),
-    label: opts.label ?? 'paid (1 SOL/period)',
+    label: opts.label ?? defaultLabel,
     expires_at: expiresAt,
   });
   if (error) throw new Error(`provisionApiKey insert failed: ${error.message}`);

@@ -286,7 +286,7 @@ export async function runSeedIndexer(opts: SeedIndexerOptions = {}): Promise<See
     };
 
     // 1. Pull the wallet's swap history (the I/O-bound Helius call we parallelize).
-    const { trades: history, complete } = await fetchWalletSwapHistory(wallet, maxTxsPerWallet);
+    const { trades: history, complete, truncated } = await fetchWalletSwapHistory(wallet, maxTxsPerWallet);
 
     if (history.length > 0) {
       for (const t of history) res.bySource[t.source] = (res.bySource[t.source] ?? 0) + 1;
@@ -325,11 +325,16 @@ export async function runSeedIndexer(opts: SeedIndexerOptions = {}): Promise<See
       res.processed = false;
       // Distinguish a TRUNCATED scan (history exceeds the scan depth → can never
       // complete at this depth) from a transient cut (budget cap / fetch error,
-      // which returns fewer than maxTxs rows and should retry on the next run).
-      // Park only the truncated ones for a cooldown so they stop hogging the
-      // most-active-first backlog and burning deep-scan budget every run. Best-
-      // effort + tolerant of a pre-0019 DB (column may not exist yet).
-      if (history.length >= maxTxsPerWallet) {
+      // which should retry on the next run). The fetcher reports this directly
+      // via `truncated`, set ONLY for the "hit maxTxs while the last page was
+      // still full" stop — keyed on the REAL transaction-count truncation, not
+      // on history.length (parsed Trade objects: a tx can emit ≠1 trade, so that
+      // count both falsely parked budget-capped wallets and never deferred
+      // genuinely-truncated low-trade-per-tx ones). Park only the truncated ones
+      // for a cooldown so they stop hogging the most-active-first backlog and
+      // burning deep-scan budget every run. Best-effort + tolerant of a pre-0019
+      // DB (column may not exist yet).
+      if (truncated) {
         const deferMs = envInt('SEED_DEFER_HOURS', 168) * 3_600_000; // default 7d
         const until = new Date(Date.now() + deferMs).toISOString();
         const { error: deferErr } = await supabase

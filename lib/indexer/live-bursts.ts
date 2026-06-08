@@ -419,8 +419,15 @@ async function resolveSmartSet(): Promise<SmartSet> {
 
     // Only verified (deep-scanned) wallets have trustworthy stats; apply the
     // full curation gate in JS. `score` is selected so we can attach tiers.
+    // profit_factor (migration 0013) and consistency (base schema) MUST be
+    // selected so the gate's edge floors (SMART_MIN_PROFIT_FACTOR /
+    // SMART_MIN_CONSISTENCY) evaluate against real values — without them every
+    // wallet's profitFactor/consistency read as null and, the moment an operator
+    // enables either floor, the whole live/alert smart set collapses to empty.
+    // realized_events is NOT a real column, so it's omitted and realizedEvents is
+    // passed as null — the suspect-win-rate rule then falls back to totalTrades.
     const statCols =
-      'wallet, score, realized_pnl, roi_pct, invested_sol, win_rate, total_trades, tokens_traded, last_trade_at, seeded';
+      'wallet, score, realized_pnl, roi_pct, invested_sol, win_rate, total_trades, tokens_traded, last_trade_at, seeded, profit_factor, consistency';
     const statRead = await supabase
       .from('wallet_stats')
       .select(statCols)
@@ -444,6 +451,14 @@ async function resolveSmartSet(): Promise<SmartSet> {
           roiPct,
           investedSol: r.invested_sol == null ? null : Number(r.invested_sol),
           winRate,
+          // Edge floors read these; map null DB values to null so a disabled
+          // floor (0) lets them pass and an enabled floor rejects only unscored
+          // wallets — instead of silently nulling EVERY wallet (set collapse).
+          profitFactor: r.profit_factor == null ? null : Number(r.profit_factor),
+          consistency: r.consistency == null ? null : Number(r.consistency),
+          // No realized_events column; pass null so the suspect-win-rate rule
+          // falls back to totalTrades (as it already does for unknown samples).
+          realizedEvents: null,
           totalTrades: Number(r.total_trades),
           tokensTraded: Number(r.tokens_traded),
           lastTradeAt: r.last_trade_at,

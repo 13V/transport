@@ -91,24 +91,49 @@ export default function AccessClient() {
         setVerifyMsg('Connect a wallet that supports message signing first.');
         return;
       }
+      // The binding target is the web_session (web) or the telegram chat_id.
+      const targetKind = product === 'web' ? 'web' : 'telegram';
+      const target = product === 'web' ? getWebSession() : chatId;
+      if (!target) {
+        setVerifyMsg(
+          product === 'telegram'
+            ? 'Open the bot and send /verify first so we can link your chat.'
+            : 'Could not determine your web session. Reload and try again.'
+        );
+        return;
+      }
+
       setSigning(true);
       setVerifyMsg(null);
       try {
-        const nonce = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-        const message = `Verify wallet for ${product} — nonce:${nonce}`;
-        const encoded = new TextEncoder().encode(message);
+        // 1) Ask the SERVER for a challenge bound to this product + target. The
+        //    nonce is generated server-side and the returned message embeds the
+        //    target + nonce + expiry, so the signature can't be replayed.
+        const cParams = new URLSearchParams({ product, target, targetKind });
+        const cResp = await fetch(`/api/access/verify-wallet?${cParams.toString()}`, {
+          cache: 'no-store',
+        });
+        const challenge = await cResp.json();
+        if (!challenge?.ok || !challenge.message || !challenge.nonce) {
+          setVerifyMsg(`Could not start verification: ${challenge?.reason ?? 'unknown error'}.`);
+          return;
+        }
+
+        // 2) Sign the EXACT message the server issued.
+        const encoded = new TextEncoder().encode(String(challenge.message));
         const res: any = await prov.signMessage(encoded, 'utf8');
         const sigBytes: Uint8Array = res?.signature ?? res;
         const signature = base58encode(sigBytes);
 
+        // 3) POST to verify. The server re-validates the nonce + target.
         const body: Record<string, unknown> = {
           wallet: address,
           product,
-          nonce,
+          nonce: challenge.nonce,
           signature,
         };
-        if (product === 'web') body.session = getWebSession();
-        if (product === 'telegram') body.chatId = chatId;
+        if (product === 'web') body.session = target;
+        if (product === 'telegram') body.chatId = target;
 
         const resp = await fetch('/api/access/verify-wallet', {
           method: 'POST',

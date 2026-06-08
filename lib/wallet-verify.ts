@@ -16,27 +16,52 @@
  * the dependency tree. Everything degrades gracefully: when Supabase is
  * unconfigured the bind/lookup helpers are safe no-ops rather than throwing.
  *
- * The challenge message format is fixed so a signature for one product can't be
- * replayed against another:
- *   "Verify wallet for <product> — nonce:<n>"
+ * The challenge message is issued SERVER-side and EMBEDS the binding target +
+ * a server-generated nonce + an expiry, so a signature for one product/target
+ * can't be replayed against another (FINDING C-1):
+ *   "Verify <product> for <targetKind>:<target> nonce:<nonce> exp:<unixms>"
  */
+
+import { randomBytes } from 'crypto';
 
 import nacl from 'tweetnacl';
 import bs58 from 'bs58';
 
 import { getSupabase, isSupabaseConfigured } from './supabase-client';
 
+/** Challenge TTL: how long a server-issued nonce stays valid (5 minutes). */
+export const NONCE_TTL_MS = 5 * 60 * 1000;
+
 /** Solana base58 address charset; 32–44 chars. */
 const SOL_ADDRESS_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
 export type VerifyProduct = 'web' | 'telegram' | 'api';
 
+/** Which kind of binding target a challenge is bound to. */
+export type TargetKind = 'web' | 'telegram';
+
+/** Inputs that uniquely + verifiably identify a single challenge. */
+export interface ChallengeParams {
+  product: VerifyProduct;
+  target: string;
+  targetKind: TargetKind;
+  nonce: string;
+  /** Expiry, unix ms — embedded so the signed bytes are pinned to a TTL. */
+  expiresAtMs: number;
+}
+
 /**
- * Build the exact challenge string the wallet must sign. Both the client (sign)
- * and the server (verify) call this so the bytes match exactly.
+ * Build the exact challenge string the wallet must sign. The SERVER builds this
+ * from the STORED nonce row at both issue time and verify time so the bytes
+ * match exactly AND the binding target/nonce/expiry are proven (not spoofable).
+ *
+ * Format: "Verify <product> for <targetKind>:<target> nonce:<nonce> exp:<unixms>"
  */
-export function buildChallenge(product: VerifyProduct, nonce: string): string {
-  return `Verify wallet for ${product} — nonce:${nonce}`;
+export function buildChallenge(p: ChallengeParams): string {
+  return (
+    `Verify ${p.product} for ${p.targetKind}:${p.target} ` +
+    `nonce:${p.nonce} exp:${p.expiresAtMs}`
+  );
 }
 
 /**
@@ -60,6 +85,152 @@ export function verifySignature(wallet: string, msg: string, sig: string): boole
 
     const message = new TextEncoder().encode(msg);
     return nacl.sign.detached.verify(message, signature, pubKey);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Issue a fresh SERVER-side challenge for (product, target, targetKind). We
+ * generate a cryptographically-random nonce, persist a single-use row with a
+ * short TTL, and return both the nonce and the EXACT message the wallet must
+ * sign. The message embeds the binding target so a captured signature can only
+ * ever bind that target (FINDING C-1).
+ *
+ * Returns null when Supabase is unconfigured or the insert fails (fail closed).
+ */
+export async function issueChallenge(input: {
+  product: VerifyProduct;
+  target: string;
+  targetKind: TargetKind;
+}): Promise<{ nonce: string; message: string; expiresAtMs: number } | null> {
+  if (!isSupabaseConfigured()) return null;
+
+  const target = String(input.target || '').trim();
+  if (!target) return null;
+
+  const nonce = randomBytes(24).toString('hex');
+  const expiresAtMs = Date.now() + NONCE_TTL_MS;
+  const message = buildChallenge({
+    product: input.product,
+    target,
+    targetKind: input.targetKind,
+    nonce,
+    expiresAtMs,
+  });
+
+  try {
+    const supabase = getSupabase();
+    const { error } = await supabase.from('verify_nonces').insert({
+      nonce,
+      product: input.product,
+      target,
+      target_kind: input.targetKind,
+      expires_at: new Date(expiresAtMs).toISOString(),
+      used: false,
+    });
+    if (error) {
+      console.error('[WALLET-VERIFY] issueChallenge insert failed:', error.message);
+      return null;
+    }
+    return { nonce, message, expiresAtMs };
+  } catch (err) {
+    console.error('[WALLET-VERIFY] issueChallenge crashed:', (err as Error).message);
+    return null;
+  }
+}
+
+export type ConsumeNonceResult =
+  | { ok: true; message: string; target: string; targetKind: TargetKind }
+  | { ok: false; reason: 'not-found' | 'used' | 'expired' | 'mismatch' | 'error' };
+
+/**
+ * Look up an issued nonce and validate it against the request, then rebuild the
+ * EXACT message from the STORED row (never from client input). The caller
+ * verifies the signature against `message`; on success it must call
+ * markNonceUsed() to make the challenge single-use.
+ *
+ * Requires the row to EXIST, be UNUSED, UNEXPIRED, and its stored
+ * product/target/target_kind to MATCH the request body.
+ */
+export async function consumeNonce(input: {
+  nonce: string;
+  product: VerifyProduct;
+  target: string;
+  targetKind: TargetKind;
+}): Promise<ConsumeNonceResult> {
+  if (!isSupabaseConfigured()) return { ok: false, reason: 'error' };
+
+  const nonce = String(input.nonce || '').trim();
+  const target = String(input.target || '').trim();
+  if (!nonce || !target) return { ok: false, reason: 'not-found' };
+
+  try {
+    const supabase = getSupabase();
+    const { data, error } = await supabase
+      .from('verify_nonces')
+      .select('nonce, product, target, target_kind, expires_at, used')
+      .eq('nonce', nonce)
+      .maybeSingle();
+
+    if (error) return { ok: false, reason: 'error' };
+    if (!data) return { ok: false, reason: 'not-found' };
+
+    const row = data as any;
+    if (row.used === true) return { ok: false, reason: 'used' };
+
+    const expMs = Date.parse(String(row.expires_at));
+    if (!Number.isFinite(expMs) || expMs <= Date.now()) {
+      return { ok: false, reason: 'expired' };
+    }
+
+    if (
+      row.product !== input.product ||
+      String(row.target) !== target ||
+      row.target_kind !== input.targetKind
+    ) {
+      return { ok: false, reason: 'mismatch' };
+    }
+
+    // Rebuild the signed message from the STORED row, not client input.
+    const message = buildChallenge({
+      product: input.product,
+      target: String(row.target),
+      targetKind: row.target_kind as TargetKind,
+      nonce: String(row.nonce),
+      expiresAtMs: expMs,
+    });
+
+    return {
+      ok: true,
+      message,
+      target: String(row.target),
+      targetKind: row.target_kind as TargetKind,
+    };
+  } catch {
+    return { ok: false, reason: 'error' };
+  }
+}
+
+/**
+ * Mark a nonce single-use (used=true) ONLY if it is still unused — the
+ * conditional update is the atomic guard against a concurrent double-redeem.
+ * Returns true when THIS call flipped the row.
+ */
+export async function markNonceUsed(nonce: string): Promise<boolean> {
+  if (!isSupabaseConfigured()) return false;
+  const n = String(nonce || '').trim();
+  if (!n) return false;
+  try {
+    const supabase = getSupabase();
+    const { data, error } = await supabase
+      .from('verify_nonces')
+      .update({ used: true })
+      .eq('nonce', n)
+      .eq('used', false)
+      .select('nonce');
+    if (error) return false;
+    return Array.isArray(data) && data.length === 1;
   } catch {
     return false;
   }

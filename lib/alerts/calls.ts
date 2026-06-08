@@ -66,6 +66,14 @@ interface CallRow {
   sol_total: number | null;
   tiers: string[] | null;
   sample_buyers: string[] | null;
+  /**
+   * FULL distinct buyer-wallet set for this burst (persisted by migration 0009,
+   * capped at 60 in live-bursts.ts), as opposed to the 5-cap `sample_buyers`
+   * used only for display. Read so the per-user /watch override can match a
+   * watched wallet that participated in the burst even when it isn't in the
+   * top-5 sample.
+   */
+  all_buyers: string[] | null;
   window_end: string | null;
 }
 
@@ -181,7 +189,7 @@ export async function postNewCalls(): Promise<{ posted: number }> {
     // the OR across buyers / S-tier / sol_total stays readable and documented.
     const read = await supabase
       .from('live_bursts')
-      .select('id, mint, symbol, buyers, sol_total, tiers, sample_buyers, window_end')
+      .select('id, mint, symbol, buyers, sol_total, tiers, sample_buyers, all_buyers, window_end')
       .eq('posted_call', false)
       .lte('window_end', finalizedBefore)
       .order('window_end', { ascending: false })
@@ -252,7 +260,18 @@ export async function postNewCalls(): Promise<{ posted: number }> {
             buyers: row.buyers,
             sol_total: row.sol_total,
             tiers: row.tiers,
+            // `sample_buyers` (5-cap) is for DISPLAY only; `all_buyers` is the
+            // FULL distinct buyer set used to match a subscriber's /watch list,
+            // so a watched wallet that bought but isn't in the top-5 sample
+            // still triggers its "always alert me for this wallet" override.
             sample_buyers: row.sample_buyers,
+            all_buyers: row.all_buyers,
+            // NOTE: no `holding` signal is passed — the persisted live_bursts
+            // row carries no trustworthy "still holding" flag at this call site
+            // (the table has no such column; see migrations 0008/0009). Rather
+            // than fail closed and silently drop every holding_only subscriber,
+            // matchesSubscription treats holding_only as "no holding filter"
+            // when no signal is present (fail-open, mirroring lib/watch-eval.ts).
           });
         } catch (e) {
           console.error('[CALLS] per-user burst fan-out failed:', (e as Error).message);

@@ -42,6 +42,10 @@ const ADDRESS_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 // Bounds — keep arrays/numbers sane to reject abuse without over-fitting.
 const MAX_WALLETS = 50;
 const MAX_LABEL = 80;
+// Per-owner rule cap. `owner` is a self-asserted, unauthenticated localStorage
+// UUID, so without a ceiling anyone could insert unbounded rules — every rule is
+// scanned on the Helius webhook's hot ingest path. Cap inserts (updates exempt).
+const MAX_RULES_PER_OWNER = 25;
 const VALID_CHANNELS = ['push', 'telegram'] as const;
 type Channel = (typeof VALID_CHANNELS)[number];
 
@@ -208,6 +212,22 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Rule not found' }, { status: 404, headers: NO_STORE });
     }
     return NextResponse.json({ ok: true, rule: rowToRule(data as Record<string, unknown>) }, { headers: NO_STORE });
+  }
+
+  // PER-OWNER CAP — inserts only (updates above are exempt). Count the owner's
+  // existing rules and reject at the cap so an unauthenticated owner can't insert
+  // unbounded rules that bloat the webhook's hot-path rule scan. A count error
+  // (e.g. table pre-migration) is non-fatal: fall through to the insert, which
+  // will itself degrade if the table is missing.
+  const { count, error: countErr } = await supabase
+    .from('watch_rules')
+    .select('id', { count: 'exact', head: true })
+    .eq('owner', owner);
+  if (!countErr && typeof count === 'number' && count >= MAX_RULES_PER_OWNER) {
+    return NextResponse.json(
+      { error: `Rule limit reached (max ${MAX_RULES_PER_OWNER} per owner)` },
+      { status: 409, headers: NO_STORE }
+    );
   }
 
   // INSERT — new rule.

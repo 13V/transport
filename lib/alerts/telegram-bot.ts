@@ -52,10 +52,29 @@ export interface BurstForBroadcast {
   buyers: number | null;
   sol_total: number | null;
   tiers: string[] | null;
-  /** Sample of the buyer wallet addresses in this burst (for /watch matching). */
+  /**
+   * 5-cap sample of the burst's buyer wallets, for DISPLAY only. Do NOT use this
+   * for /watch matching — a watched wallet that bought but isn't in the top 5
+   * would be missed. Use `all_buyers` for matching (see matchesSubscription).
+   */
   sample_buyers?: string[] | null;
+  /**
+   * FULL distinct buyer-wallet set for the burst (persisted live_bursts.all_buyers,
+   * capped at 60 in live-bursts.ts). This is what /watch (watched_wallets) is
+   * matched against so a participating watched wallet always triggers its
+   * override, even when it's outside the 5-cap `sample_buyers` display set.
+   */
+  all_buyers?: string[] | null;
   pairAddress?: string | null;
-  /** Whether this burst includes wallets that are still HOLDING the token. */
+  /**
+   * Whether this burst includes wallets that are still HOLDING the token.
+   * OPTIONAL and frequently absent: the auto-post call site (lib/alerts/calls.ts)
+   * reads the persisted live_bursts row, which carries NO holding signal, so it
+   * passes this undefined. matchesSubscription therefore treats holding_only as
+   * "no holding filter" when this is undefined (fail-open) rather than dropping
+   * every holding_only subscriber. Only callers with a TRUSTWORTHY holding signal
+   * should set this true/false to actually engage the filter.
+   */
   holding?: boolean | null;
 }
 
@@ -139,9 +158,16 @@ export async function sendToChat(
  * Decide whether a chat's filters match a burst.
  *   - muted chats never match.
  *   - a watched-wallet hit ALWAYS matches (overrides the min_* thresholds),
- *     so a user tracking a specific wallet never misses its buys.
+ *     so a user tracking a specific wallet never misses its buys. The watched
+ *     list is matched against the burst's FULL buyer set (`all_buyers`), NOT the
+ *     5-cap `sample_buyers` display set, so a watched wallet that participated
+ *     but isn't in the top-5 sample still triggers its override.
  *   - otherwise the burst must clear the chat's min_buyers AND min_sol, and —
- *     when holding_only is set — the burst must include holders.
+ *     when holding_only is set AND a holding signal is actually present on the
+ *     burst — the burst must include holders. When NO holding signal is present
+ *     (burst.holding === undefined), holding_only FAILS OPEN (treated as no
+ *     holding filter) so we never silently deliver zero alerts; see
+ *     BurstForBroadcast.holding and lib/watch-eval.ts for the same convention.
  */
 export function matchesSubscription(
   sub: SubscriptionRow,
@@ -151,14 +177,24 @@ export function matchesSubscription(
 
   const watched = Array.isArray(sub.watched_wallets) ? sub.watched_wallets : [];
   if (watched.length > 0) {
-    const sample = Array.isArray(burst.sample_buyers) ? burst.sample_buyers : [];
+    // Match /watch against the FULL buyer set; fall back to the 5-cap sample
+    // only when all_buyers wasn't supplied (older callers / partial data).
+    const buyerSet = Array.isArray(burst.all_buyers)
+      ? burst.all_buyers
+      : Array.isArray(burst.sample_buyers)
+        ? burst.sample_buyers
+        : [];
     const watchSet = new Set(watched.map((w) => w.trim()).filter(Boolean));
-    if (sample.some((w) => typeof w === 'string' && watchSet.has(w.trim()))) {
+    if (buyerSet.some((w) => typeof w === 'string' && watchSet.has(w.trim()))) {
       return true;
     }
   }
 
-  if (sub.holding_only && !burst.holding) return false;
+  // holding_only engages ONLY when the burst actually carries a holding signal.
+  // `holding === undefined` means "unknown at this call site" → fail open (no
+  // filter), so holding_only subscribers aren't silently dropped to nothing.
+  // An explicit `holding === false` still means "no holders" → filter applies.
+  if (sub.holding_only && burst.holding === false) return false;
 
   const buyers = typeof burst.buyers === 'number' ? burst.buyers : 0;
   const sol = typeof burst.sol_total === 'number' ? burst.sol_total : 0;

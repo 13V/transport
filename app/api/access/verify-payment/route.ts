@@ -53,6 +53,54 @@ function rpcUrl(): string {
 }
 
 /**
+ * The base58 account keys of a transaction, normalized to strings. accountKeys
+ * may be strings (jsonParsed/legacy) or objects ({ pubkey }).
+ */
+function accountKeys(tx: any): string[] {
+  const raw: any[] = Array.isArray(tx?.transaction?.message?.accountKeys)
+    ? tx.transaction.message.accountKeys
+    : [];
+  return raw.map((k) => (typeof k === 'string' ? k : k?.pubkey)).filter(Boolean);
+}
+
+/**
+ * Derive the ACTUAL on-chain payer from the VERIFIED transaction (FINDING M-2:
+ * never trust a body-supplied `owner` as the payer). We prefer the account whose
+ * lamports decreased the most (the funder of the transfer into treasury); if the
+ * balance deltas are unavailable we fall back to the fee-payer signer — index 0
+ * of accountKeys, which Solana always defines as the fee-payer / first signer.
+ * Returns null when neither can be determined.
+ */
+function derivePayer(tx: any, treasury: string): string | null {
+  const keys = accountKeys(tx);
+  if (keys.length === 0) return null;
+
+  const meta = tx?.meta;
+  const pre = Array.isArray(meta?.preBalances) ? meta.preBalances : null;
+  const post = Array.isArray(meta?.postBalances) ? meta.postBalances : null;
+
+  if (pre && post) {
+    let bestIdx = -1;
+    let bestDrop = 0;
+    for (let i = 0; i < keys.length; i++) {
+      if (keys[i] === treasury) continue; // the recipient, not the payer
+      const p = pre[i];
+      const q = post[i];
+      if (typeof p !== 'number' || typeof q !== 'number') continue;
+      const drop = p - q; // positive => this account spent lamports
+      if (drop > bestDrop) {
+        bestDrop = drop;
+        bestIdx = i;
+      }
+    }
+    if (bestIdx >= 0) return keys[bestIdx];
+  }
+
+  // Fallback: the fee-payer / first signer is always accountKeys[0].
+  return keys[0] ?? null;
+}
+
+/**
  * Net lamports credited to `treasury` in a transaction = (post - pre) for the
  * treasury's account index. Returns 0 if the account isn't in the tx. We read
  * the raw balances rather than trusting a parsed transfer so any transfer path
@@ -139,14 +187,25 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  // Derive the ACTUAL payer from the verified tx — never trust the body `owner`
+  // (FINDING M-2). If a body `owner` was supplied, it MUST equal the derived
+  // payer; otherwise reject (attribution forgery) rather than silently trusting.
+  const payer = derivePayer(tx, treasury);
+  if (!payer) {
+    return NextResponse.json({ ok: false, reason: 'payer-underivable' }, { status: 400 });
+  }
+  if (owner && owner !== payer) {
+    return NextResponse.json({ ok: false, reason: 'owner-mismatch' }, { status: 400 });
+  }
+
   // 4) Redeem-once: INSERT the signature (PRIMARY KEY). A replay conflicts.
   const supabase = getSupabase();
   const ins = await supabase.from('api_payments').insert({
     signature,
-    payer: owner,
+    payer,
     treasury,
     amount_sol: credited / LAMPORTS_PER_SOL,
-    owner_id: owner,
+    owner_id: payer,
   });
   if (ins.error) {
     // Unique-violation (23505) → already redeemed. Anything else → infra error.
@@ -163,7 +222,7 @@ export async function POST(request: NextRequest) {
   try {
     minted = await provisionApiKey({
       tier: 'pro',
-      ownerId: owner,
+      ownerId: payer,
       label: `paid ${priceSol()} SOL / ${periodDays()}d`,
       expiresInDays: periodDays(),
     });

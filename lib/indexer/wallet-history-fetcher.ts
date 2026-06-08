@@ -32,12 +32,12 @@ function heliusBase(): string | null {
 export async function fetchWalletSwapHistory(
   wallet: string,
   maxTxs = 1000
-): Promise<{ trades: Trade[]; complete: boolean }> {
+): Promise<{ trades: Trade[]; complete: boolean; truncated: boolean }> {
   const base = heliusBase();
   if (!base) {
     console.warn('[SEED] HELIUS_API_KEY not set — cannot fetch wallet history');
     // No key ⇒ this is NOT a real "we scanned and found nothing" result.
-    return { trades: [], complete: false };
+    return { trades: [], complete: false, truncated: false };
   }
 
   const url = `${base}/addresses/${wallet}/transactions`;
@@ -50,11 +50,19 @@ export async function fetchWalletSwapHistory(
   // almost certainly exists) — so callers don't persist partial PnL/ROI as if
   // it were the full all-time record, or verify a wallet on a truncated scan.
   let complete = true;
+  // TRUE only for the specific "hit maxTxs while the last page was still full"
+  // stop — i.e. genuine TRUNCATION, where more history exists at this depth.
+  // Budget-cap and fetch-error stops leave this FALSE (they're transient and
+  // should retry soon, NOT be parked for the long defer cooldown). This is the
+  // ONLY signal the seed indexer should use to decide whether to defer a wallet
+  // (parsed Trade count is unreliable: a tx can yield ≠1 trade).
+  let truncated = false;
 
   while (fetched < maxTxs) {
     // Hard cost ceiling: stop paginating once the daily Helius credit cap is
     // reached. Mark INCOMPLETE so the caller leaves the wallet for a later run
-    // rather than scoring/verifying it on a truncated history.
+    // rather than scoring/verifying it on a truncated history. NOT truncated:
+    // this is a transient budget stop that should retry on the next run.
     if (!(await guardHeliusPage(100))) {
       complete = false;
       break;
@@ -84,6 +92,8 @@ export async function fetchWalletSwapHistory(
       }
       console.error(`[SEED] history fetch failed for ${wallet} (status ${status}):`, (err as Error).message);
       complete = false; // partial due to a transient fetch error — retry later
+      // NOT truncated: a transient error isn't proof more history exists at this
+      // depth, so the caller should retry soon rather than park it.
       break;
     }
 
@@ -99,13 +109,15 @@ export async function fetchWalletSwapHistory(
 
     // The page was full and a cursor remains, so more history exists. If that
     // means we're now about to stop only because we hit maxTxs, this is a
-    // TRUNCATED scan, not a complete one — flag it so the caller re-scans later
-    // at greater depth rather than scoring/verifying on partial history.
+    // TRUNCATED scan, not a complete one — flag it (complete AND truncated) so
+    // the caller re-scans later at greater depth rather than scoring/verifying
+    // on partial history, and parks it for the defer cooldown.
     if (fetched >= maxTxs) {
       complete = false;
+      truncated = true;
       break;
     }
   }
 
-  return { trades, complete };
+  return { trades, complete, truncated };
 }

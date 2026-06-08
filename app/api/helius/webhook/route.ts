@@ -18,6 +18,7 @@
  */
 
 import { NextRequest, NextResponse, after } from 'next/server';
+import { timingSafeEqual } from 'crypto';
 import { getSupabase, isSupabaseConfigured } from '../../../../lib/supabase-client';
 import { parseHeliusSwaps } from '../../../../lib/helius/parse-swap';
 import {
@@ -397,13 +398,34 @@ async function runWatchRules(bursts: LiveBurst[], now: number): Promise<void> {
 
     const supabase = getSupabase();
 
-    // Load all candidate rules. Rules with an explicit wallet filter only matter
-    // if one of their wallets is in this batch's bursts; "any wallet" rules
-    // (empty wallets[]) always matter. To keep this to ONE query we fetch all
-    // rules and filter in lib/watch-eval — rule counts are small per deployment.
-    const { data: ruleRows, error: ruleErr } = await supabase
+    // PREFILTER the read so the hot ingest path never full-scans watch_rules.
+    // Rules fall into two classes:
+    //   - wallet-scoped  → their `wallets` text[] intersects THIS batch's buyer
+    //                       wallets (Postgres array-overlap, `.overlaps`)
+    //   - any-wallet      → empty/null `wallets` (always candidates)
+    // We fetch only those two sets (any-wallet + overlapping) instead of the
+    // whole table, then evaluate in lib/watch-eval as before. A hard `.limit`
+    // caps the result as a safety ceiling regardless of prefilter selectivity.
+    const RULE_READ_LIMIT = 2000;
+    const batchWallets = Array.from(
+      new Set(bursts.flatMap((b) => b.wallets ?? []).filter((w) => typeof w === 'string' && w))
+    );
+
+    // PostgREST array literal for the `.overlaps` operand, e.g. {w1,w2}. Wallet
+    // addresses are base58 (no commas/braces), so no escaping is needed.
+    let query = supabase
       .from('watch_rules')
       .select('id, owner, label, wallets, min_buyers, min_sol, holding_only, channels, muted');
+    if (batchWallets.length > 0) {
+      // any-wallet rules (empty array OR null) OR rules overlapping the batch.
+      query = query.or(
+        `wallets.ov.{${batchWallets.join(',')}},wallets.eq.{},wallets.is.null`
+      );
+    } else {
+      // No wallets in this batch → only any-wallet rules can match.
+      query = query.or('wallets.eq.{},wallets.is.null');
+    }
+    const { data: ruleRows, error: ruleErr } = await query.limit(RULE_READ_LIMIT);
     if (ruleErr || !ruleRows || ruleRows.length === 0) return;
 
     const rules: EvalRule[] = (ruleRows as Record<string, unknown>[]).map((r) => ({
@@ -592,8 +614,12 @@ export async function POST(request: NextRequest) {
       { status: 401 }
     );
   }
-  const auth = request.headers.get('authorization');
-  if (auth !== secret) {
+  // Constant-time, length-guarded compare (matches the cron-route pattern). The
+  // header must equal the secret verbatim (Helius sends authHeader as-is).
+  const auth = request.headers.get('authorization') ?? '';
+  const a = Buffer.from(auth);
+  const b = Buffer.from(secret);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
