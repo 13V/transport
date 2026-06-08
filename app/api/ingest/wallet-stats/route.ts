@@ -15,25 +15,22 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { timingSafeEqual } from 'crypto';
+import { cronAuthFails } from '../../../../lib/cron-auth';
 import { getSupabase, isSupabaseConfigured } from '../../../../lib/supabase-client';
 
 export const dynamic = 'force-dynamic';
 
 /**
- * Auth — FAILS CLOSED. Returns true ONLY when CRON_SECRET is set AND the
- * Authorization header equals `Bearer <secret>` (constant-time, length-guarded).
- * An unset secret means NO ONE is authorized — this endpoint writes wallet
- * stats, so an unauthenticated caller could inject fabricated numbers.
+ * Auth — FAILS CLOSED. Returns true ONLY when the request carries a valid
+ * CRON_SECRET. Delegates to the shared `cronAuthFails` helper (which trims the
+ * env secret and accepts `Bearer`/raw Authorization headers or `?secret=` /
+ * `?cron_secret=` query params, all constant-time). Note `cronAuthFails` returns
+ * true when auth FAILS, the opposite of this helper, so we negate it. An unset
+ * secret means NO ONE is authorized — this endpoint writes wallet stats, so an
+ * unauthenticated caller could inject fabricated numbers.
  */
 function authed(request: NextRequest): boolean {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) return false; // fail closed
-  const auth = request.headers.get('authorization') ?? '';
-  const a = Buffer.from(auth);
-  const b = Buffer.from(`Bearer ${secret}`);
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
+  return !cronAuthFails(request);
 }
 
 function num(name: string, fallback: number): number {

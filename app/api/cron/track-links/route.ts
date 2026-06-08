@@ -10,25 +10,10 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { timingSafeEqual } from 'crypto';
+import { cronAuthFails } from '../../../../lib/cron-auth';
 import { runLinkTracking } from '../../../../lib/indexer/run-link-tracking';
 
 export const dynamic = 'force-dynamic';
-
-/**
- * Cron auth — FAILS CLOSED. Returns true (= reject) when CRON_SECRET is unset OR
- * the Authorization header does not match `Bearer <secret>`. Constant-time,
- * length-guarded compare.
- */
-function cronAuthFails(request: NextRequest): boolean {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) return true;
-  const auth = request.headers.get('authorization') ?? '';
-  const a = Buffer.from(auth);
-  const b = Buffer.from(`Bearer ${secret}`);
-  if (a.length !== b.length) return true;
-  return !timingSafeEqual(a, b);
-}
 
 export const maxDuration = 60;
 

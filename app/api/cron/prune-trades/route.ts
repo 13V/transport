@@ -17,24 +17,8 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { timingSafeEqual } from 'crypto';
+import { cronAuthFails } from '../../../../lib/cron-auth';
 import { getSupabase, isSupabaseConfigured } from '../../../../lib/supabase-client';
-
-/**
- * Cron auth — FAILS CLOSED. If CRON_SECRET is unset OR the Authorization header
- * doesn't match `Bearer <secret>`, returns true (= reject). Constant-time
- * compare via timingSafeEqual, length-guarded so a mismatch never throws.
- */
-function cronAuthFails(request: NextRequest): boolean {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) return true; // no secret configured → refuse (fail closed)
-  const auth = request.headers.get('authorization') ?? '';
-  const expected = `Bearer ${secret}`;
-  const a = Buffer.from(auth);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length) return true;
-  return !timingSafeEqual(a, b);
-}
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
