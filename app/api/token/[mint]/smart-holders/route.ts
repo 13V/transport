@@ -19,7 +19,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabase, isSupabaseConfigured } from '../../../../../lib/supabase-client';
-import { getBroadSmartCriteria, isSmartWallet } from '../../../../../lib/indexer/curation';
+import { getSmartWalletSet } from '../../../../../lib/indexer/live-bursts';
 import { tierFromScore } from '../../../../../lib/format';
 import { getTokenMeta } from '../../../../../lib/token-meta';
 import { fetchTokenPricesSol } from '../../../../../lib/prices/price-oracle';
@@ -69,43 +69,34 @@ export async function GET(
 
   try {
     const supabase = getSupabase();
-    // INCLUSION uses the BROAD gate so the smart-holders list matches the buying feed.
-    const criteria = getBroadSmartCriteria();
-    const now = Date.now();
 
-    // 1. Resolve the smart-wallet set — identical definition to the buying feed.
-    const statRead = await supabase
-      .from('wallet_stats')
-      .select('wallet, score, realized_pnl, roi_pct, invested_sol, win_rate, total_trades, tokens_traded, last_trade_at, seeded')
-      .eq('verified', true);
-    if (statRead.error || !statRead.data) return NextResponse.json(empty, { headers });
+    // 1. Resolve the smart-wallet set via the SHARED resolver — the EXACT set the
+    // buying feed / live bursts use. This is the same paginated, SQL-gated
+    // (getBroadSmartCriteria) set, INCLUDING funded-fresh inherited wallets, so
+    // the route's contract holds: if /smart-money/buying says N smart wallets
+    // bought a token, this lists those same wallets.
+    //
+    // The OLD code re-resolved the set inline with a plain
+    // `.eq('verified', true)` read and NO pagination — so PostgREST's default
+    // 1,000-row cap silently truncated the ~2k+ verified set to an arbitrary
+    // 1,000-wallet slice (no .order, so which slice was non-deterministic). Fresh
+    // tokens bought by smart wallets that fell outside that slice showed "0 smart
+    // holders" even though the burst feed (which paginates) saw them. Reusing
+    // getSmartWalletSet() fixes the cap AND keeps the two surfaces consistent.
+    const { wallets, scoreByWallet, statsByWallet } = await getSmartWalletSet();
+    const smartWallets = Array.from(wallets);
+    if (smartWallets.length === 0) return NextResponse.json(empty, { headers });
 
+    // Per-wallet display meta (all-time ROI + tier) from the resolved set. Tier is
+    // derived from the wallet's score; ROI from its verified stats (null for
+    // funded-fresh inherited wallets, which honestly have no own track record).
     const meta = new Map<string, { roi: number | null; tier: string | null }>();
-    const smartWallets: string[] = [];
-    for (const r of statRead.data as any[]) {
-      const ok = isSmartWallet(
-        {
-          realizedPnl: Number(r.realized_pnl),
-          roiPct: r.roi_pct == null ? null : Number(r.roi_pct),
-          investedSol: r.invested_sol == null ? null : Number(r.invested_sol),
-          winRate: Number(r.win_rate),
-          totalTrades: Number(r.total_trades),
-          tokensTraded: Number(r.tokens_traded),
-          lastTradeAt: r.last_trade_at,
-          seeded: Boolean(r.seeded),
-        },
-        criteria,
-        now
-      );
-      if (!ok) continue;
-      const w = String(r.wallet);
-      smartWallets.push(w);
+    for (const w of smartWallets) {
       meta.set(w, {
-        roi: r.roi_pct == null ? null : Number(r.roi_pct),
-        tier: tierFromScore(r.score == null ? null : Number(r.score)),
+        roi: statsByWallet.get(w)?.roiPct ?? null,
+        tier: tierFromScore(scoreByWallet.get(w) ?? null),
       });
     }
-    if (smartWallets.length === 0) return NextResponse.json(empty, { headers });
 
     // 2. Pull every ingested trade on this coin, then intersect with the
     // smart-wallet set IN MEMORY.
@@ -124,7 +115,21 @@ export async function GET(
       .order('block_time', { ascending: true })
       .limit(MAX_TRADE_ROWS);
     if (read.error) return NextResponse.json(empty, { headers });
-    const rows: any[] = (read.data ?? []).filter((r: any) => smartSet.has(String(r.wallet)));
+    const allRows: any[] = read.data ?? [];
+    const rows: any[] = allRows.filter((r: any) => smartSet.has(String(r.wallet)));
+
+    // ON-CHAIN PRICE FALLBACK (SOL/token): the most-recent usable trade price on
+    // this coin, across ALL traders (not just smart), straight from the ingested
+    // `trades` table (trades.price = solAmount/amount). This is the same on-chain
+    // price source the burst pipeline uses for fresh pump.fun tokens DexScreener /
+    // GeckoTerminal haven't listed yet (lib/indexer/live-bursts lastBuyPriceSol).
+    // Rows are time-ascending, so the LAST priced row is the latest price. Used
+    // below ONLY when the DexScreener oracle has no price for this mint.
+    let onchainPriceSol = 0;
+    for (const t of allRows) {
+      const p = Number(t.price);
+      if (Number.isFinite(p) && p > 0) onchainPriceSol = p; // ascending → keep latest
+    }
 
     // 3. Aggregate per wallet → average-cost realized PnL on this coin.
     interface Agg {
@@ -184,8 +189,17 @@ export async function GET(
 
     // Live SOL price for the coin (proven oracle; SOL per UI-token, same unit as
     // our trade `amount`). Used to mark each holder's remaining bag to market.
+    // FALLS BACK to the most-recent on-chain trade price when the oracle has no
+    // price — so fresh pump.fun tokens DexScreener hasn't listed still get a real
+    // mark-to-market (Value held / Unrealized PnL populate instead of showing —),
+    // the same fallback the burst % uses (live-feed annotateLivePriceChange).
     let priceSol = 0;
     try { priceSol = (await fetchTokenPricesSol([mint])).get(mint) ?? 0; } catch { /* no live price */ }
+    let priceSource: 'oracle' | 'onchain' | null = priceSol > 0 ? 'oracle' : null;
+    if (priceSol <= 0 && onchainPriceSol > 0) {
+      priceSol = onchainPriceSol;
+      priceSource = 'onchain';
+    }
 
     const r4 = (n: number) => Math.round(n * 1e4) / 1e4;
     const holders: SmartHolder[] = Array.from(byWallet.entries()).map(([wallet, a]) => {
@@ -204,7 +218,10 @@ export async function GET(
         wallet,
         tier: m?.tier ?? null,
         allTimeRoiPct: m?.roi ?? null,
-        verified: true,
+        // Verified = has its OWN proven track record (non-null ROI). Funded-fresh
+        // inherited wallets (smart by funding association) carry null ROI, so they
+        // surface honestly as unverified rather than claiming a track record.
+        verified: m?.roi != null,
         solBought: r4(a.solSpent),
         avgCostSol: r4(avgCost),
         pnlOnThisCoin: r4(realized),
@@ -218,7 +235,7 @@ export async function GET(
     }).sort((x, y) => (y.currentValueSol || y.solBought) - (x.currentValueSol || x.solBought));
 
     return NextResponse.json(
-      { mint, token, priceSol, traderCount: holders.length, smartHolderCount: holders.length, smartHolders: holders, netFlowSeries },
+      { mint, token, priceSol, priceSource, traderCount: holders.length, smartHolderCount: holders.length, smartHolders: holders, netFlowSeries },
       { headers }
     );
   } catch {

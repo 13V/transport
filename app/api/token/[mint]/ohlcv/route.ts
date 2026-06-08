@@ -16,6 +16,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import axios from 'axios';
 import { getTokenMeta } from '../../../../../lib/token-meta';
 import { rateLimit, clientIp } from '../../../../../lib/rate-limit';
+import { getSupabase, isSupabaseConfigured } from '../../../../../lib/supabase-client';
 
 export const revalidate = 60;
 export const maxDuration = 30;
@@ -31,6 +32,71 @@ const TF: Record<string, { timeframe: 'minute' | 'hour' | 'day'; aggregate: numb
 };
 
 interface Candle { t: number; o: number; h: number; l: number; c: number; v: number }
+
+// Bucket width (ms) per timeframe for the on-chain fallback series, mirroring the
+// GeckoTerminal aggregate above so the fallback's granularity matches the live tf.
+const TF_BUCKET_MS: Record<string, number> = {
+  '5m': 5 * 60_000,
+  '1h': 60 * 60_000,
+  '1d': 24 * 60 * 60_000,
+};
+const ONCHAIN_MAX_ROWS = 4000;
+
+/**
+ * ON-CHAIN FALLBACK SERIES: when GeckoTerminal has no candles for a pool (fresh
+ * pre-graduation pump.fun token), build a minimal close-price series straight
+ * from the ingested `trades` table (trades.price = solAmount/amount, SOL/token).
+ * Same on-chain price source the burst pipeline uses for fresh tokens
+ * (lib/indexer/live-bursts firstBuyPriceSol/lastBuyPriceSol). Trades are bucketed
+ * to the requested tf and each bucket's close is its last priced trade — so a
+ * fresh token renders a REAL price line instead of "No price history yet".
+ *
+ * Returns null on any failure / no data, so the caller degrades to the empty
+ * state exactly as before. Never throws.
+ */
+async function onchainSeries(
+  mint: string,
+  tfKey: string
+): Promise<{ closes: number[]; times: number[]; last: number | null } | null> {
+  if (!isSupabaseConfigured()) return null;
+  const bucketMs = TF_BUCKET_MS[tfKey] ?? TF_BUCKET_MS['1h'];
+  try {
+    const supabase = getSupabase();
+    // Newest-first so a hot token's cap keeps the freshest trades; we re-sort
+    // ascending in memory below. Rides the trades(token_mint, block_time) index.
+    const { data, error } = await supabase
+      .from('trades')
+      .select('price, block_time')
+      .eq('token_mint', mint)
+      .order('block_time', { ascending: false })
+      .limit(ONCHAIN_MAX_ROWS);
+    if (error || !data || data.length === 0) return null;
+
+    // Last priced trade per time bucket (close), ascending by time.
+    const closeByBucket = new Map<number, number>();
+    for (const r of data as { price: unknown; block_time: unknown }[]) {
+      const price = Number(r.price);
+      const ts = r.block_time ? new Date(r.block_time as string).getTime() : NaN;
+      if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(ts)) continue;
+      const bucket = Math.floor(ts / bucketMs) * bucketMs;
+      // data is newest-first, so the FIRST row we see for a bucket is its latest
+      // (close) trade — only set if not already present.
+      if (!closeByBucket.has(bucket)) closeByBucket.set(bucket, price);
+    }
+    if (closeByBucket.size === 0) return null;
+
+    const buckets = Array.from(closeByBucket.keys()).sort((a, b) => a - b);
+    const closes = buckets.map((b) => closeByBucket.get(b) as number);
+    // AreaChart needs ≥2 points to draw a line; a single trade-bucket would render
+    // nothing useful, so duplicate it into a flat 2-point series at the same price.
+    if (closes.length === 1) {
+      return { closes: [closes[0], closes[0]], times: [buckets[0], buckets[0] + bucketMs], last: closes[0] };
+    }
+    return { closes, times: buckets, last: closes[closes.length - 1] };
+  } catch {
+    return null;
+  }
+}
 
 // Per-IP cap: 60/min. A single-mint chart resolves one pool + one OHLCV pull on
 // GeckoTerminal, so it's lighter than the batch route. 60/min leaves generous
@@ -54,11 +120,27 @@ export async function GET(
   const tfKey = (sp.get('tf') || '1h').toLowerCase();
   const tf = TF[tfKey] ?? TF['1h'];
 
+  const HDRS = { 'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=300' };
   const empty = (extra: Record<string, unknown> = {}) =>
     NextResponse.json(
       { mint, tf: tfKey, candles: [], closes: [], times: [], ...extra },
-      { headers: { 'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=300' } }
+      { headers: HDRS }
     );
+
+  // When GeckoTerminal has no candles, fall back to an on-chain trade-price
+  // series so fresh pump.fun tokens still render a REAL price line instead of an
+  // empty "No price history" state. Falls through to `empty` when there are no
+  // on-chain trades either. `source: 'onchain'` lets the client label it.
+  const emptyOrOnchain = async (extra: Record<string, unknown> = {}) => {
+    const oc = await onchainSeries(mint, tfKey);
+    if (oc && oc.closes.length >= 2) {
+      return NextResponse.json(
+        { mint, tf: tfKey, candles: [], closes: oc.closes, times: oc.times, last: oc.last, source: 'onchain', ...extra },
+        { headers: HDRS }
+      );
+    }
+    return empty(extra);
+  };
 
   if (!mint || !BASE58.test(mint)) return empty({ error: 'invalid mint' });
 
@@ -93,7 +175,8 @@ export async function GET(
       pair = '';
     }
   }
-  if (!BASE58.test(pair)) return empty({ error: 'no pool' });
+  // No GeckoTerminal pool at all (fresh token) — try the on-chain fallback.
+  if (!BASE58.test(pair)) return emptyOrOnchain({ error: 'no pool' });
 
   try {
     const url = `${GT}/networks/solana/pools/${pair}/ohlcv/${tf.timeframe}?aggregate=${tf.aggregate}&limit=${tf.limit}&currency=usd`;
@@ -102,7 +185,7 @@ export async function GET(
       headers: { Accept: 'application/json;version=20230302' },
     });
     const list: unknown = res.data?.data?.attributes?.ohlcv_list;
-    if (!Array.isArray(list)) return empty({ pair });
+    if (!Array.isArray(list)) return emptyOrOnchain({ pair });
 
     // GeckoTerminal returns [ts(s), open, high, low, close, volume], newest-first.
     const candles: Candle[] = list
@@ -110,6 +193,10 @@ export async function GET(
       .map((r) => ({ t: Number(r[0]) * 1000, o: +r[1], h: +r[2], l: +r[3], c: +r[4], v: +r[5] }))
       .filter((c) => Number.isFinite(c.t) && Number.isFinite(c.c))
       .sort((a, b) => a.t - b.t);
+
+    // GeckoTerminal returned a pool but no candles yet (just-created pool) — fall
+    // back to the on-chain trade series so the chart still shows something real.
+    if (candles.length < 2) return emptyOrOnchain({ pair });
 
     return NextResponse.json(
       {
@@ -120,10 +207,11 @@ export async function GET(
         closes: candles.map((c) => c.c),
         times: candles.map((c) => c.t),
         last: candles.length ? candles[candles.length - 1].c : null,
+        source: 'geckoterminal',
       },
-      { headers: { 'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=300' } }
+      { headers: HDRS }
     );
   } catch {
-    return empty({ pair });
+    return emptyOrOnchain({ pair });
   }
 }
