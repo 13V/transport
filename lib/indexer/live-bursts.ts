@@ -144,10 +144,20 @@ export interface LiveBurst {
    */
   lastBuyPriceSol?: number | null;
   /**
+   * On-chain trade price (SOL per token) at the MOST RECENT TRADE of ANY side
+   * (buy OR sell) seen for this token. PREFERRED over lastBuyPriceSol for the
+   * un-listed current-price fallback because it also reflects SELLS — so a fresh
+   * token that dumped after the smart buys reads DOWN, not pinned at the last-buy
+   * peak. Set from the burst's own buy rows and then advanced by any more-recent
+   * SELL of the same token (see getLiveBursts). null when no priced row exists.
+   */
+  lastTradePriceSol?: number | null;
+  /**
    * Server-computed % price change from the burst's entry (firstBuyPriceSol) to
-   * the live current price. Current price prefers the DexScreener oracle and
-   * FALLS BACK to the most-recent on-chain trade price (lastBuyPriceSol) so it
-   * is populated even for fresh pump.fun tokens DexScreener hasn't listed.
+   * the live current price. Current price is the SHORT-TTL DexScreener oracle for
+   * LISTED tokens (authoritative, reflects buys AND sells) and FALLS BACK to the
+   * most-recent on-chain trade price (lastTradePriceSol, any side) so it is
+   * populated even for fresh pump.fun tokens DexScreener hasn't listed.
    * Recomputed every feed build (behind the ~2s cache), so it moves each poll.
    * null when no entry price is known. Filled by computeLiveFeed, not here.
    */
@@ -813,6 +823,10 @@ function detectBurstsForRows(
       // Live on-chain entry/current prices straight from the burst's trades.
       firstBuyPriceSol: s.firstPrice,
       lastBuyPriceSol: s.lastPrice,
+      // Seed last-TRADE with the streak's last priced row (same side as this
+      // detection). getLiveBursts then advances it with any more-recent SELL of
+      // the same token so the un-listed fallback reflects sells, not just buys.
+      lastTradePriceSol: s.lastPrice,
       // Settled once the streak can no longer absorb a new buy within windowSec.
       finalized: now - s.endMs > windowMs,
     });
@@ -870,6 +884,67 @@ function qualityScore(b: LiveBurst): number {
   let tierSum = 0;
   for (const t of b.tiers) tierSum += t ? TIER_WEIGHT[t] ?? 0.5 : 0.5;
   return tierSum + Math.log1p(Math.max(0, b.solTotal));
+}
+
+/**
+ * Advance each burst's lastTradePriceSol with the most-recent SELL price of the
+ * same token, when that sell is NEWER than the burst's last buy.
+ *
+ * WHY: the live sweep only reads BUY trades, so lastBuyPriceSol/lastTradePriceSol
+ * are pinned to the last buy. For a token the smart money bought then SOLD off,
+ * that last buy sits at the peak — overstating the on-chain "current" used as the
+ * un-listed price fallback. One batched, indexed SELL read over the (small,
+ * capped) visible mint set gives the real most-recent on-chain price (any side).
+ *
+ * Scope/cost: ONE query over the capped feed's mints (≤ limit, typically ~30-50),
+ * riding the trades(token_mint, block_time) index, behind the 2s feed cache.
+ * Best-effort: any failure leaves lastTradePriceSol unchanged (= last buy).
+ */
+async function advanceLastTradeWithSells(
+  supabase: ReturnType<typeof getSupabase>,
+  bursts: LiveBurst[],
+  sinceIso: string
+): Promise<void> {
+  const mints = Array.from(new Set(bursts.map((b) => b.mint).filter(Boolean)));
+  if (mints.length === 0) return;
+  try {
+    // Most-recent priced SELL per mint over the same lookback. Newest first so
+    // the first row seen per mint is the latest sell.
+    const { data, error } = await supabase
+      .from('trades')
+      .select('token_mint, price, block_time')
+      .eq('trade_type', 'SELL')
+      .in('token_mint', mints)
+      .gte('block_time', sinceIso)
+      .order('block_time', { ascending: false })
+      .limit(MAX_TRADE_ROWS);
+    if (error || !data) return;
+
+    // Latest sell { price, ts } per mint.
+    const latestSell = new Map<string, { price: number; ts: number }>();
+    for (const row of data as any[]) {
+      const mint = String(row.token_mint);
+      if (!mint || latestSell.has(mint)) continue; // newest-first: first wins
+      const price = Number(row.price);
+      const ts = row.block_time ? new Date(row.block_time).getTime() : NaN;
+      if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(ts)) continue;
+      latestSell.set(mint, { price, ts });
+    }
+    if (latestSell.size === 0) return;
+
+    for (const b of bursts) {
+      const sell = latestSell.get(b.mint);
+      if (!sell) continue;
+      // Only override when the sell is MORE RECENT than the burst's last buy
+      // (windowEnd); otherwise the last buy is already the freshest on-chain price.
+      const lastBuyMs = new Date(b.windowEnd).getTime();
+      if (Number.isFinite(lastBuyMs) && sell.ts > lastBuyMs) {
+        b.lastTradePriceSol = sell.price;
+      }
+    }
+  } catch {
+    // Never break the feed on the sell-price advance.
+  }
 }
 
 export async function getLiveBursts(opts: {
@@ -980,6 +1055,15 @@ export async function getLiveBursts(opts: {
         new Date(b.windowEnd).getTime() - new Date(a.windowEnd).getTime()
     );
     const capped = bursts.slice(0, limit);
+
+    // 5. Advance lastTradePriceSol with any more-recent SELL. The buy-only sweep
+    //    above only knows last-BUY prices, so a token that DUMPED after the smart
+    //    buys would carry a stale last-buy price as its on-chain "current". For
+    //    the (small, capped) visible set, pull the most-recent SELL price per mint
+    //    and, when it is newer than the burst's last buy, use it as the on-chain
+    //    last-trade — so the un-listed current-price fallback reflects sells too.
+    //    Best-effort: any failure leaves lastTradePriceSol = last buy (unchanged).
+    await advanceLastTradeWithSells(supabase, capped, sinceIso);
 
     return {
       generatedAt,
