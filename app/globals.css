@@ -1184,6 +1184,18 @@ pre.code .c { color: var(--text-4); }
   font-weight: 650; font-size: 10.5px; letter-spacing: 0;
 }
 
+/* FLOW FILTER segment (toolbar): "Flow: All | 💎 Holding | ⚠ Dumping".
+   Built on the shared .seg styling; these prefixed rules just tint the ACTIVE
+   Holding/Dumping options green/red so the toolbar control echoes the on-card
+   accumulating/selling semantics. Inactive options keep the neutral .seg look. */
+.bf-flow-seg button.on { background: var(--accent-soft); color: var(--accent-hover); }
+.bf-flow-seg button.bf-flow-hold.on {
+  background: var(--pos-soft); color: var(--pos);
+}
+.bf-flow-seg button.bf-flow-dump.on {
+  background: var(--neg-soft); color: var(--neg);
+}
+
 /* Conviction one-liner ("4 smart · 🥇 S-lead · indep"); detail in title tooltip. */
 .bf-conv { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-3); cursor: help; }
 .bf-conv-seg { display: inline-flex; align-items: center; gap: 6px; }

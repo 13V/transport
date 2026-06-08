@@ -299,6 +299,10 @@ const ENTER_HOLD_MS = 1400;
 // localStorage key for the "group bursts by token" toggle (Wave 3, default ON).
 const PREF_GROUP_KEY = 'sm_pref_group_by_token';
 
+// localStorage key for the smart-money flow filter (Holding / Dumping / All).
+const PREF_FLOW_KEY = 'sm_pref_flow';
+type FlowFilter = 'all' | 'holding' | 'dumping';
+
 // localStorage keys for the per-user execution prefs (default terminal + size).
 // Keyed off the same owner id the watchlist uses so prefs ride with the device.
 const PREF_TERMINAL_KEY = 'sm_pref_terminal';
@@ -373,6 +377,25 @@ function pickPrimary(a: Burst, b: Burst): Burst {
   return (ms(b.windowEnd) ?? 0) > (ms(a.windowEnd) ?? 0) ? b : a;
 }
 
+// --- Smart-money flow predicates (exit-signal enrichment) ---
+// A burst is CONFIRMED dumping when ANY exit signal fires: a buyer flipped to
+// selling, a smart wallet sold in-window, or net SOL flow turned negative
+// (distributing). Absent/unknown signals do NOT make it dumping.
+function isDumping(b: Burst): boolean {
+  return (
+    b.someBuyersExited === true ||
+    (b.smartSellWallets ?? 0) > 0 ||
+    (b.netSolFlow != null && b.netSolFlow < 0)
+  );
+}
+
+// A burst is HOLDING unless it is confirmed dumping. We deliberately treat
+// missing exit data as holding so we never hide a fresh burst just because the
+// signal hasn't computed yet — only EXCLUDE confirmed dumping.
+function isHolding(b: Burst): boolean {
+  return !isDumping(b);
+}
+
 // Does this device ask for reduced motion? Read live (not cached) so a system
 // preference change is respected on the next render path that calls it.
 function prefersReducedMotion(): boolean {
@@ -392,6 +415,17 @@ function readGroupPref(): boolean {
     return v == null ? true : v === '1';
   } catch {
     return true;
+  }
+}
+
+// Read the smart-money flow filter pref (default 'all' when unset/invalid).
+function readFlowPref(): FlowFilter {
+  if (typeof window === 'undefined') return 'all';
+  try {
+    const v = window.localStorage.getItem(PREF_FLOW_KEY);
+    return v === 'holding' || v === 'dumping' ? v : 'all';
+  } catch {
+    return 'all';
   }
 }
 
@@ -463,6 +497,7 @@ function Header({
   minBuyers, onMinBuyers, windowSec, onWindowSec, minSol, onMinSol,
   sort, onSort, status, onStatus, compact, onCompact,
   groupByToken, onGroupByToken,
+  flow, onFlow,
   prefTerminal, prefSize, onSavePrefs,
 }: {
   minBuyers: number;
@@ -479,6 +514,8 @@ function Header({
   onCompact: (b: boolean) => void;
   groupByToken: boolean;
   onGroupByToken: (b: boolean) => void;
+  flow: FlowFilter;
+  onFlow: (f: FlowFilter) => void;
   prefTerminal: string | null;
   prefSize: number | null;
   onSavePrefs: (terminal: string | null, size: number | null) => void;
@@ -583,6 +620,37 @@ function Header({
             title="Finalized"
           >
             Cooling
+          </button>
+        </div>
+
+        {/* SMART-MONEY FLOW filter (client-side, uses isHolding/isDumping) */}
+        <div className="seg bf-flow-seg" title="Filter by whether smart money is still holding or already dumping">
+          <button
+            type="button"
+            className={flow === 'all' ? 'on' : ''}
+            onClick={() => onFlow('all')}
+            aria-pressed={flow === 'all'}
+            title="All bursts (still-holding ones surface first)"
+          >
+            Flow: All
+          </button>
+          <button
+            type="button"
+            className={`bf-flow-hold${flow === 'holding' ? ' on' : ''}`}
+            onClick={() => onFlow('holding')}
+            aria-pressed={flow === 'holding'}
+            title="Only bursts smart money hasn't dumped (unknown counts as holding)"
+          >
+            💎 Holding
+          </button>
+          <button
+            type="button"
+            className={`bf-flow-dump${flow === 'dumping' ? ' on' : ''}`}
+            onClick={() => onFlow('dumping')}
+            aria-pressed={flow === 'dumping'}
+            title="Only bursts where a smart wallet has already sold / flipped"
+          >
+            ⚠ Dumping
           </button>
         </div>
 
@@ -810,6 +878,8 @@ export default function LiveFeed() {
   const [statusFilter, setStatusFilter] = useState<'all' | 'live' | 'cooling'>('all');
   const [compact, setCompact] = useState(false);
   const [groupByToken, setGroupByToken] = useState(true);
+  // Smart-money flow filter: All (default) | Holding only | Dumping only.
+  const [flow, setFlow] = useState<FlowFilter>('all');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   void generatedAt;
@@ -908,6 +978,7 @@ export default function LiveFeed() {
     setPrefTerminal(p.terminal);
     setPrefSize(p.size);
     setGroupByToken(readGroupPref());
+    setFlow(readFlowPref());
   }, []);
 
   // Persist the group-by-token toggle.
@@ -916,6 +987,17 @@ export default function LiveFeed() {
     if (typeof window === 'undefined') return;
     try {
       window.localStorage.setItem(PREF_GROUP_KEY, on ? '1' : '0');
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  // Persist the smart-money flow filter.
+  const saveFlow = useCallback((next: FlowFilter) => {
+    setFlow(next);
+    if (typeof window === 'undefined') return;
+    try {
+      window.localStorage.setItem(PREF_FLOW_KEY, next);
     } catch {
       /* ignore */
     }
@@ -1234,15 +1316,23 @@ export default function LiveFeed() {
     return () => clearInterval(t);
   }, []);
 
-  // STATUS filter (client-side): Live = !finalized; Cooling = finalized.
+  // STATUS + FLOW filters (client-side), composed so they stack with each other
+  // (and downstream group-by-token). STATUS: Live = !finalized; Cooling =
+  // finalized. FLOW: Holding = !isDumping (unknown counts as holding); Dumping =
+  // confirmed dumping; All = no flow filter. Applies to both SSE and poll data
+  // since both flow through `bursts`.
   const visible = useMemo(
     () =>
       bursts.filter((b) => {
-        if (statusFilter === 'all') return true;
-        if (statusFilter === 'live') return b.finalized === false;
-        return b.finalized === true; // cooling
+        // Status leg.
+        if (statusFilter === 'live' && b.finalized !== false) return false;
+        if (statusFilter === 'cooling' && b.finalized !== true) return false;
+        // Flow leg.
+        if (flow === 'holding' && !isHolding(b)) return false;
+        if (flow === 'dumping' && !isDumping(b)) return false;
+        return true;
       }),
-    [bursts, statusFilter]
+    [bursts, statusFilter, flow]
   );
 
   // GROUP BY TOKEN (Wave 3): collapse repeated bursts per mint to one primary row
@@ -1254,11 +1344,48 @@ export default function LiveFeed() {
     // bursts (snapshot REPLACE or delta UPSERT) stay at the TOP after their entry
     // animation hold expires, instead of sinking back to insertion order. For
     // 'quality' we preserve the server's authoritative (first-appearance) order.
+    // RANKING NUDGE — gently sink CONFIRMED-dumping bursts below still-holding
+    // ones of similar recency, so even in the "All" view the still-holding
+    // opportunities surface first. Kept deliberately subtle: it's a LOW-PRIORITY
+    // tiebreaker, never a wholesale override of the user's Recent/Quality choice.
+    //  • Gated to flow === 'all' (in Holding/Dumping views the set is already
+    //    homogeneous, so the nudge would be a no-op or fight the filter).
+    //  • For 'recent' we compare within a coarse recency BUCKET (so we never pull
+    //    an older holding burst above a genuinely-newer dumping one — that would
+    //    fight newest-at-top and the entry animation). Within a bucket, holding
+    //    ranks before dumping; ties fall back to exact recency.
+    //  • For 'quality' we preserve the server's authoritative order and only use
+    //    holding-before-dumping as a stable tiebreaker.
+    const FLOW_BUCKET_MS = 90_000; // ~90s recency bucket for the recent-view nudge
+    const dumpRank = (b: Burst): number => (isDumping(b) ? 1 : 0); // holding first
     const sortGroups = (gs: BurstGroup[]): BurstGroup[] => {
-      if (sort !== 'recent') return gs;
-      return [...gs].sort(
-        (a, b) => (ms(b.primary.windowEnd) ?? 0) - (ms(a.primary.windowEnd) ?? 0)
-      );
+      const nudge = flow === 'all';
+      if (sort === 'recent') {
+        return [...gs].sort((a, b) => {
+          const ea = ms(a.primary.windowEnd) ?? 0;
+          const eb = ms(b.primary.windowEnd) ?? 0;
+          if (nudge) {
+            // Same recency bucket → holding before dumping; else newest first.
+            const bucketA = Math.floor(ea / FLOW_BUCKET_MS);
+            const bucketB = Math.floor(eb / FLOW_BUCKET_MS);
+            if (bucketA === bucketB) {
+              const dr = dumpRank(a.primary) - dumpRank(b.primary);
+              if (dr !== 0) return dr;
+            }
+          }
+          return eb - ea;
+        });
+      }
+      // 'quality' — keep server order; only nudge holding above dumping (stable).
+      if (!nudge) return gs;
+      return [...gs]
+        .map((g, i) => ({ g, i }))
+        .sort((a, b) => {
+          const dr = dumpRank(a.g.primary) - dumpRank(b.g.primary);
+          if (dr !== 0) return dr;
+          return a.i - b.i; // stable: preserve original (server) order otherwise
+        })
+        .map((e) => e.g);
     };
 
     if (!groupByToken) {
@@ -1282,7 +1409,7 @@ export default function LiveFeed() {
       return { primary, others };
     });
     return sortGroups(built);
-  }, [visible, groupByToken, sort]);
+  }, [visible, groupByToken, sort, flow]);
 
   // DISPLAY ORDER — Axiom live-feed feel: groups whose primary is currently
   // "entering" (a genuinely-new burst flagged in the last ~ENTER_HOLD_MS) float to
@@ -1544,6 +1671,7 @@ export default function LiveFeed() {
           status={statusFilter} onStatus={setStatusFilter}
           compact={compact} onCompact={setCompact}
           groupByToken={groupByToken} onGroupByToken={saveGroupByToken}
+          flow={flow} onFlow={saveFlow}
           prefTerminal={prefTerminal} prefSize={prefSize} onSavePrefs={savePrefs}
         />
         <div className="stack gap-12">
@@ -1565,6 +1693,7 @@ export default function LiveFeed() {
           status={statusFilter} onStatus={setStatusFilter}
           compact={compact} onCompact={setCompact}
           groupByToken={groupByToken} onGroupByToken={saveGroupByToken}
+          flow={flow} onFlow={saveFlow}
           prefTerminal={prefTerminal} prefSize={prefSize} onSavePrefs={savePrefs}
         />
         <div className="card">
@@ -2045,6 +2174,7 @@ export default function LiveFeed() {
         status={statusFilter} onStatus={setStatusFilter}
         compact={compact} onCompact={setCompact}
         groupByToken={groupByToken} onGroupByToken={saveGroupByToken}
+        flow={flow} onFlow={saveFlow}
         prefTerminal={prefTerminal} prefSize={prefSize} onSavePrefs={savePrefs}
       />
 
@@ -2072,11 +2202,30 @@ export default function LiveFeed() {
 
       {visible.length === 0 ? (
         <div className="card">
-          <EmptyState
-            icon={Radio}
-            title="No bursts yet"
-            msg={`Bursts appear when ≥${minBuyers} smart wallets pile into the same token within ${windowSec}s.`}
-          />
+          {/* Flow-aware empty state: when the flow filter (not the underlying
+              feed) is what cleared the list, say so instead of "no bursts yet"
+              — so the user knows it's the Holding/Dumping filter, not a dead
+              feed. We only show the flow-specific copy when there ARE bursts but
+              they were all filtered out by flow. */}
+          {bursts.length > 0 && flow === 'holding' ? (
+            <EmptyState
+              icon={Radio}
+              title="No still-holding bursts right now"
+              msg="Every current burst shows smart money already selling or distributing. Switch Flow to All to see them."
+            />
+          ) : bursts.length > 0 && flow === 'dumping' ? (
+            <EmptyState
+              icon={Radio}
+              title="No dumping bursts right now"
+              msg="No current burst shows a smart wallet exiting. Switch Flow to All or Holding to see live bursts."
+            />
+          ) : (
+            <EmptyState
+              icon={Radio}
+              title="No bursts yet"
+              msg={`Bursts appear when ≥${minBuyers} smart wallets pile into the same token within ${windowSec}s.`}
+            />
+          )}
         </div>
       ) : (
         <div className={`bf-list stack gap-8${compact ? ' compact' : ''}`}>
