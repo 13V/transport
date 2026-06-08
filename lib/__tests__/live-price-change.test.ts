@@ -39,10 +39,12 @@ function burst(partial: Partial<LiveBurst>): LiveBurst {
 describe('annotateLivePriceChange', () => {
   beforeEach(() => mockOracle.mockReset());
 
-  it('uses the DexScreener oracle as the current price when the token is listed', async () => {
+  it('uses the DexScreener oracle as the current price when the on-chain price agrees (no override)', async () => {
+    // On-chain last buy matches the oracle (within the noise band) → the oracle is
+    // the current price and the snapshot mcap is left as-is.
     mockOracle.mockResolvedValue(new Map([['MINT', 2]])); // current = 2 SOL/token
     const [b] = await annotateLivePriceChange([
-      burst({ firstBuyPriceSol: 1, lastBuyPriceSol: 1.2, marketCapUsd: 20000 }),
+      burst({ firstBuyPriceSol: 1, lastBuyPriceSol: 2, marketCapUsd: 20000 }),
     ]);
     // (2 - 1) / 1 = +100%
     expect(b.priceChangeSincePct).toBe(100);
@@ -101,7 +103,7 @@ describe('annotateLivePriceChange', () => {
   it('tags the DexScreener (listed) source and derives a consistent entry mcap', async () => {
     mockOracle.mockResolvedValue(new Map([['MINT', 2]]));
     const [b] = await annotateLivePriceChange([
-      burst({ firstBuyPriceSol: 1, lastBuyPriceSol: 1.2, marketCapUsd: 20000 }),
+      burst({ firstBuyPriceSol: 1, lastBuyPriceSol: 2, marketCapUsd: 20000 }),
     ]);
     expect(b.priceChangeSource).toBe('dexscreener');
     // % and entry mcap both come from DexScreener → same direction. +100% means
@@ -138,6 +140,64 @@ describe('annotateLivePriceChange', () => {
     expect(b.priceChangeSincePct).toBeLessThan(0);
     // entry mcap (55227) > current mcap (24300): arrow points DOWN, same as the %.
     expect(b.entryMarketCapUsd!).toBeGreaterThan(b.marketCapUsd!);
+  });
+
+  // --- FRESHNESS: rescale the stale DexScreener mcap onto the fresh on-chain price ---
+
+  it('rescales the displayed current mcap/price onto the fresher on-chain last buy (the $38k→$60k staleness bug)', async () => {
+    // DexScreener oracle/mcap snapshot is STALE (up to 2 min): it still prices the
+    // token at the entry-era $38k. The on-chain last buy is ~10s fresh and already
+    // 1.5789× higher. The card's CURRENT mcap must track the fresh price (~$60k),
+    // not the stale $38k.
+    mockOracle.mockResolvedValue(new Map([['MINT', 1]])); // stale oracle: 1 SOL/token
+    const [b] = await annotateLivePriceChange([
+      burst({ firstBuyPriceSol: 1, lastBuyPriceSol: 1.5789, marketCapUsd: 38000 }),
+    ]);
+    expect(b.priceChangeSource).toBe('dexscreener');
+    // current mcap rescaled by 1.5789× → ~60000 (was the stale 38000).
+    expect(b.marketCapUsd).toBe(Math.round(38000 * 1.5789));
+    // % is entry→current on the FRESH price: (1.5789 - 1)/1 = +57.89%.
+    expect(b.priceChangeSincePct).toBeCloseTo(57.89, 1);
+  });
+
+  it('keeps current mcap, %, and entry mcap on ONE consistent basis after the rescale', async () => {
+    mockOracle.mockResolvedValue(new Map([['MINT', 1]]));
+    const [b] = await annotateLivePriceChange([
+      burst({ firstBuyPriceSol: 0.5, lastBuyPriceSol: 2, marketCapUsd: 30000 }),
+    ]);
+    // Up move → current mcap ABOVE entry mcap, multiplier matches the % direction.
+    expect(b.priceChangeSincePct! > 0).toBe(true);
+    expect(b.entryMarketCapUsd!).toBeLessThan(b.marketCapUsd!);
+    // mcMultiple (current/entry mcap) === price multiple (current/entry price).
+    const mcMultiple = b.marketCapUsd! / b.entryMarketCapUsd!;
+    expect(mcMultiple).toBeCloseTo(2 / 0.5, 5); // 4×
+    // Entry mcap is anchored to the DexScreener basis (mcap*entry/oracle), so it is
+    // INDEPENDENT of the on-chain rescale: 30000 * 0.5 / 1 = 15000.
+    expect(b.entryMarketCapUsd).toBe(15000);
+  });
+
+  it('does NOT perturb the current mcap when on-chain ≈ oracle (within the noise band)', async () => {
+    // On-chain within 1% of the oracle → settled token; leave the snapshot as-is so
+    // quote jitter never re-prices a card. Behaviour stays byte-identical to before.
+    mockOracle.mockResolvedValue(new Map([['MINT', 1]]));
+    const [b] = await annotateLivePriceChange([
+      burst({ firstBuyPriceSol: 1, lastBuyPriceSol: 1.005, marketCapUsd: 50000 }),
+    ]);
+    expect(b.marketCapUsd).toBe(50000); // untouched
+    expect(b.priceChangeSincePct).toBe(0); // uses the oracle current (== entry)
+  });
+
+  it('leaves the current mcap untouched on the un-listed (on-chain) path', async () => {
+    // No oracle price → on-chain source. We do NOT rescale a DexScreener mcap by an
+    // on-chain ratio (that mismatch is the bug we eliminate), so any stale mcap is
+    // left as-is and the entry mcap stays null.
+    mockOracle.mockResolvedValue(new Map());
+    const [b] = await annotateLivePriceChange([
+      burst({ firstBuyPriceSol: 1, lastBuyPriceSol: 2, marketCapUsd: 12345 }),
+    ]);
+    expect(b.priceChangeSource).toBe('onchain');
+    expect(b.marketCapUsd).toBe(12345); // untouched
+    expect(b.entryMarketCapUsd).toBeNull();
   });
 });
 
