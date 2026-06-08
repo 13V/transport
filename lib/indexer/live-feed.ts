@@ -121,7 +121,10 @@ async function computeLiveFeed(p: BuildLiveFeedParams): Promise<LiveFeedResult> 
   // DexScreener/Helius. A metadata failure must never break the feed, so
   // getTokenMeta is resilient and we additionally guard here.
   try {
-    const meta = await getTokenMeta(bursts.map((b) => b.mint));
+    // Skip the per-mint getTokenLargestAccounts RPC here: topHolderPct is a
+    // per-card nicety on the FEED hot path, and that extra Helius call bypasses
+    // the daily budget. The token DETAIL page still requests it (default on).
+    const meta = await getTokenMeta(bursts.map((b) => b.mint), { includeTopHolder: false });
     bursts = bursts.map((b) => {
       const m = meta.get(b.mint);
       if (!m) return b;
@@ -163,7 +166,7 @@ async function computeLiveFeed(p: BuildLiveFeedParams): Promise<LiveFeedResult> 
   // Fully resilient: any failure leaves solPriceUsd undefined (never fabricated).
   let solPriceUsd: number | undefined;
   try {
-    const solMeta = await getTokenMeta([WSOL_MINT]);
+    const solMeta = await getTokenMeta([WSOL_MINT], { includeTopHolder: false });
     const price = solMeta.get(WSOL_MINT)?.priceUsd;
     if (typeof price === 'number' && Number.isFinite(price) && price > 0) {
       solPriceUsd = price;

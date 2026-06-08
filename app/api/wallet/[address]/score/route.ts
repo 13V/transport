@@ -41,7 +41,7 @@ export async function GET(
     const score = await scoreWalletAllTime(address, { maxTxs });
 
     return NextResponse.json(score, {
-      headers: { 'Cache-Control': 'public, max-age=120' },
+      headers: { 'Cache-Control': 'public, s-maxage=300, stale-while-revalidate=300' },
     });
   } catch (error) {
     console.error(`[SCORE] failed for ${address}:`, error);

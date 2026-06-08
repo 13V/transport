@@ -22,7 +22,7 @@ import { getSupabase, isSupabaseConfigured } from '../../../../lib/supabase-clie
 import { parseHeliusSwaps } from '../../../../lib/helius/parse-swap';
 import {
   getSmartWalletSet,
-  detectBurstsForMints,
+  detectBurstsForMintsBothSides,
   type LiveBurst,
 } from '../../../../lib/indexer/live-bursts';
 import { readCooldowns, writeCooldowns } from '../../../../lib/alerts/cooldowns';
@@ -104,10 +104,22 @@ async function runBurstAlerts(touchedMints: string[]): Promise<void> {
     const cooldownMs = cooldownMin * 60_000;
     const now = Date.now();
 
-    const bursts = await detectBurstsForMints(mints, {
-      windowSec: 30,
-      minBuyers,
-    });
+    // COALESCED SCAN: detect BUY and SELL bursts from ONE trades query (instead
+    // of two passes), then handle each side below. The sell side honors its own
+    // env-gated entity threshold so the detected results match the old two-call
+    // behavior exactly.
+    const sellEnabled = process.env.ALERT_SELL_BURSTS !== '0';
+    const minSellEntities = envInt('ALERT_SELL_MIN_ENTITIES', 3);
+    const { buy: bursts, sell: sellBursts } = await detectBurstsForMintsBothSides(
+      mints,
+      {
+        windowSec: 30,
+        minBuyBuyers: minBuyers,
+        // Detect at the sell gate's entity threshold; if sell alerts are
+        // disabled we still pass a sane default but skip the path entirely below.
+        minSellEntities,
+      }
+    );
 
     // PER-USER WATCHLIST PUSH — fires for ANY detected buy burst (even below the
     // broadcast bar), since each such user explicitly opted into that wallet.
@@ -181,7 +193,8 @@ async function runBurstAlerts(touchedMints: string[]): Promise<void> {
     if (stamped) await writeCooldowns(BURST_COOLDOWN_KEY, cooldowns);
 
     // EXIT / SELL-BURST ALERTS — distinct broadcast, separate cooldown blob.
-    await runSellBurstAlerts(mints, now);
+    // Reuses the sell bursts already detected by the coalesced scan above.
+    if (sellEnabled) await runSellBurstAlerts(sellBursts, now);
   } catch (error) {
     // Alerting must NEVER affect ingestion.
     console.error('[HELIUS WEBHOOK] burst alert step failed:', (error as Error).message);
@@ -189,27 +202,20 @@ async function runBurstAlerts(touchedMints: string[]): Promise<void> {
 }
 
 /**
- * EXIT / SELL-BURST broadcast: detects ≥N distinct smart-money ENTITIES SELLING
- * the same token within the window and, when the gate passes (min entities + min
- * SOL), broadcasts a distinct "smart money EXITING" alert via Telegram + web
- * push. Uses a SEPARATE per-mint cooldown blob so it never collides with buy
- * bursts. Env-gated; mirrors the buy path's stamp-on-delivery + try/catch
- * isolation. Wrapped so any failure is swallowed.
+ * EXIT / SELL-BURST broadcast: given the already-detected SELL bursts (≥N
+ * distinct smart-money ENTITIES SELLING the same token within the window) from
+ * the coalesced scan, when the gate passes (min entities + min SOL) broadcasts a
+ * distinct "smart money EXITING" alert via Telegram + web push. Uses a SEPARATE
+ * per-mint cooldown blob so it never collides with buy bursts. Env-gated by the
+ * caller; mirrors the buy path's stamp-on-delivery + try/catch isolation.
+ * Wrapped so any failure is swallowed.
  */
-async function runSellBurstAlerts(mints: string[], now: number): Promise<void> {
+async function runSellBurstAlerts(bursts: LiveBurst[], now: number): Promise<void> {
   try {
-    if (process.env.ALERT_SELL_BURSTS === '0') return;
-
     const minEntities = envInt('ALERT_SELL_MIN_ENTITIES', 3);
     const minSol = envNum('ALERT_SELL_MIN_SOL', 5);
     const cooldownMin = envInt('ALERT_SELL_COOLDOWN_MIN', 30);
     const cooldownMs = cooldownMin * 60_000;
-
-    const bursts = await detectBurstsForMints(mints, {
-      windowSec: 30,
-      minBuyers: minEntities,
-      side: 'sell',
-    });
 
     // GATE — min entities + real SOL size.
     const qualified = bursts.filter((b: LiveBurst) => {
@@ -383,6 +389,74 @@ async function getSubscribedWallets(): Promise<Set<string>> {
   }
 }
 
+/**
+ * Background ingestion + alerting, run via `after()` so the 200 ACKs first.
+ * Resolves the smart-wallet set HERE (off the ack path) for correct attribution,
+ * parses the swaps, idempotently upserts trades, stamps freshness, then fires the
+ * real-time alerts. Self-contained + no-throw: a slow/cold smart-set resolve can
+ * never delay the webhook ACK (Helius retries slow/failed acks), and writes stay
+ * idempotent via the unique-constraint upsert. `payload` was already read on the
+ * request path (the body stream isn't available after the response is sent).
+ */
+async function ingestAndAlert(payload: unknown): Promise<void> {
+  try {
+    // Attribute to OUR wallets only: resolve the subscribed smart-wallet set
+    // (memoized) and pass it so the parser doesn't trust a relayer/counterparty
+    // feePayer. Resolved HERE (background) rather than before the ACK so a cold
+    // instance's heavy paginate+cluster resolve never blocks the 200. Degrades to
+    // undefined (feePayer trust) only if resolution is empty, preserving prior
+    // behavior rather than dropping every trade.
+    const wallets = await getSubscribedWallets();
+    const rows = parseHeliusSwaps(payload, wallets.size > 0 ? wallets : undefined);
+    if (rows.length === 0 || !isSupabaseConfigured()) return;
+
+    const supabase = getSupabase();
+    let written = 0;
+
+    // Chunked upsert mirroring lib/indexer/run-indexer.ts. Dedup via the unique
+    // constraint (tx_hash, wallet, token_mint, trade_type) — ignoreDuplicates so
+    // the same tx delivered twice (Helius retries) is idempotent.
+    for (let i = 0; i < rows.length; i += CHUNK) {
+      const chunk = rows.slice(i, i + CHUNK);
+      try {
+        const { error } = await supabase
+          .from('trades')
+          .upsert(chunk, {
+            onConflict: 'tx_hash,wallet,token_mint,trade_type',
+            ignoreDuplicates: true,
+          });
+        if (error) {
+          console.error('[HELIUS WEBHOOK] upsert trades failed:', error.message);
+          continue; // keep other chunks
+        }
+        written += chunk.length;
+      } catch (err) {
+        console.error('[HELIUS WEBHOOK] upsert threw:', (err as Error).message);
+        continue;
+      }
+    }
+
+    if (written === 0) return;
+
+    // OBSERVABILITY: stamp ingest freshness for /api/status. Best-effort.
+    try {
+      await supabase.from('indexer_state').upsert(
+        { key: 'last_webhook_at', value: new Date().toISOString(), updated_at: new Date().toISOString() },
+        { onConflict: 'key' }
+      );
+    } catch (err) {
+      console.error('[HELIUS WEBHOOK] last_webhook_at stamp failed:', (err as Error).message);
+    }
+
+    // REAL-TIME ALERTS (off the ack path; smart set already resolved above).
+    const touchedMints = [...new Set(rows.map((r) => r.token_mint))];
+    await runBurstAlerts(touchedMints);
+  } catch (error) {
+    // Background work must NEVER surface; the ACK already went out.
+    console.error('[HELIUS WEBHOOK] background ingest failed:', (error as Error).message);
+  }
+}
+
 export async function POST(request: NextRequest) {
   // ---- Auth: FAIL CLOSED. ----
   const secret = process.env.HELIUS_WEBHOOK_SECRET;
@@ -399,85 +473,30 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  // ---- Parse body (expected: array of enriched txs). ----
+  // ---- Parse body (expected: array of enriched txs). Read on the request path
+  // because the body stream is no longer available inside `after()`. ----
   let payload: unknown;
   try {
     payload = await request.json();
   } catch {
     // Malformed JSON: 200 no-op so Helius doesn't hammer retries.
-    return NextResponse.json({ ok: true, parsed: 0, written: 0 });
+    return NextResponse.json({ ok: true });
   }
 
-  // Attribute to OUR wallets only: resolve the subscribed smart-wallet set
-  // (memoized) and pass it so the parser doesn't trust a relayer/counterparty
-  // feePayer. Degrades to undefined (feePayer trust) only if resolution is
-  // empty, preserving prior behavior rather than dropping every trade.
-  const wallets = await getSubscribedWallets();
-  const rows = parseHeliusSwaps(payload, wallets.size > 0 ? wallets : undefined);
-  const parsed = rows.length;
-
-  // If Supabase isn't configured, no-op (don't crash, don't fabricate).
-  if (!isSupabaseConfigured()) {
-    return NextResponse.json({ ok: false, parsed, written: 0 });
-  }
-
-  if (parsed === 0) {
-    return NextResponse.json({ ok: true, parsed: 0, written: 0 });
-  }
-
-  const supabase = getSupabase();
-  let written = 0;
-
-  // Chunked upsert mirroring lib/indexer/run-indexer.ts. Dedup via the unique
-  // constraint (tx_hash, wallet, token_mint, trade_type) — ignoreDuplicates so
-  // the same tx delivered twice (Helius retries) is idempotent.
-  for (let i = 0; i < rows.length; i += CHUNK) {
-    const chunk = rows.slice(i, i + CHUNK);
-    try {
-      const { error } = await supabase
-        .from('trades')
-        .upsert(chunk, {
-          onConflict: 'tx_hash,wallet,token_mint,trade_type',
-          ignoreDuplicates: true,
-        });
-      if (error) {
-        console.error('[HELIUS WEBHOOK] upsert trades failed:', error.message);
-        continue; // keep other chunks; never 5xx
-      }
-      written += chunk.length;
-    } catch (err) {
-      console.error('[HELIUS WEBHOOK] upsert threw:', (err as Error).message);
-      continue;
+  // ACK IMMEDIATELY. All heavy work — the smart-set resolve (a cold instance's
+  // paginate+cluster), parse, idempotent upserts, and alerts — runs in the
+  // background via `after()` so Helius gets a fast 200 and never retries on a
+  // slow ack. Writes stay idempotent, so async processing is safe; auth above
+  // already fail-closed gated this request.
+  try {
+    if (typeof after === 'function') {
+      after(() => ingestAndAlert(payload));
+    } else {
+      void ingestAndAlert(payload);
     }
+  } catch {
+    void ingestAndAlert(payload);
   }
 
-  // OBSERVABILITY: stamp ingest freshness for /api/status. Best-effort.
-  if (written > 0) {
-    try {
-      await supabase.from('indexer_state').upsert(
-        { key: 'last_webhook_at', value: new Date().toISOString(), updated_at: new Date().toISOString() },
-        { onConflict: 'key' }
-      );
-    } catch (err) {
-      console.error('[HELIUS WEBHOOK] last_webhook_at stamp failed:', (err as Error).message);
-    }
-  }
-
-  // REAL-TIME ALERTS: run AFTER the response so the 200 is never blocked.
-  if (written > 0) {
-    const touchedMints = [...new Set(rows.map((r) => r.token_mint))];
-    try {
-      // `after` schedules work post-response (Next.js). Fallback to inline
-      // fire-and-forget if `after` is unavailable in the runtime.
-      if (typeof after === 'function') {
-        after(() => runBurstAlerts(touchedMints));
-      } else {
-        void runBurstAlerts(touchedMints);
-      }
-    } catch {
-      void runBurstAlerts(touchedMints);
-    }
-  }
-
-  return NextResponse.json({ ok: true, parsed, written });
+  return NextResponse.json({ ok: true });
 }

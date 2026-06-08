@@ -323,6 +323,16 @@ export async function getSmartMoneyBuys(
     // 4. Resolve current SOL prices (one batched oracle call) so we can compute
     // how far each token has run since the first smart buy. Failures degrade to
     // null rather than throwing.
+    //
+    // NOTE (audit, DexScreener double-fetch): the /api/smart-money/buying route
+    // separately enriches these same mints via getTokenMeta (also DexScreener).
+    // We deliberately KEEP this oracle call: getTokenMeta exposes priceUsd, not a
+    // SOL-denominated price, and converting it would require re-deriving a
+    // SOL/USD reference (which the oracle already does internally from the SAME
+    // pair set). firstBuyPriceSol/priceChangeSincePct here are SOL-unit and must
+    // stay on the oracle to preserve numeric behavior; collapsing the two calls
+    // is not clean without reworking getTokenMeta to surface priceSol. Both layers
+    // are ~60s/~2min cached, so the practical duplication is one cached read.
     let priceMap = new Map<string, number>();
     try {
       priceMap = await fetchTokenPricesSol(ranked.map((a) => a.mint));

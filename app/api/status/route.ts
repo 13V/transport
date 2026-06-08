@@ -244,6 +244,10 @@ export async function GET() {
         leaderboard: '/smart-money',
       },
     },
-    { headers: { 'Cache-Control': 'no-store' } }
+    // CDN-cache for pollers: the status endpoint is public and frequently hit by
+    // monitors. force-dynamic still runs at origin, but s-maxage lets the Vercel
+    // edge serve a cached copy for up to 60s instead of every poll hitting origin
+    // (which does several DB reads). Body is unchanged.
+    { headers: { 'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=60' } }
   );
 }

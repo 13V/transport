@@ -27,14 +27,7 @@ import { fetchTokenPricesSol } from '../../../../../lib/prices/price-oracle';
 export const revalidate = 30;
 export const maxDuration = 30;
 
-const WALLET_CHUNK = 200;
 const MAX_TRADE_ROWS = 6000;
-
-function chunk<T>(arr: T[], size: number): T[][] {
-  const out: T[][] = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out;
-}
 
 interface SmartHolder {
   wallet: string;
@@ -113,20 +106,24 @@ export async function GET(
     }
     if (smartWallets.length === 0) return NextResponse.json(empty, { headers });
 
-    // 2. Pull every ingested trade on this coin by those wallets.
-    const rows: any[] = [];
-    for (const group of chunk(smartWallets, WALLET_CHUNK)) {
-      if (rows.length >= MAX_TRADE_ROWS) break;
-      const read = await supabase
-        .from('trades')
-        .select('wallet, trade_type, amount, price, block_time')
-        .eq('token_mint', mint)
-        .in('wallet', group)
-        .order('block_time', { ascending: true })
-        .limit(MAX_TRADE_ROWS - rows.length);
-      if (read.error) return NextResponse.json(empty, { headers });
-      if (read.data) rows.push(...read.data);
-    }
+    // 2. Pull every ingested trade on this coin, then intersect with the
+    // smart-wallet set IN MEMORY.
+    //
+    // Previously this looped the smart-wallet set in 200-chunks, issuing one
+    // mint-scoped `.in('wallet', chunk)` query per chunk — but every chunk hit
+    // the SAME small per-mint partition (trades for one token), so we re-scanned
+    // it N times for a single coin. A coin's full trade history is small and
+    // already covered by the trades(token_mint, block_time) index, so ONE
+    // mint-scoped query (capped) is strictly cheaper: ~5 queries -> 1.
+    const smartSet = new Set(smartWallets);
+    const read = await supabase
+      .from('trades')
+      .select('wallet, trade_type, amount, price, block_time')
+      .eq('token_mint', mint)
+      .order('block_time', { ascending: true })
+      .limit(MAX_TRADE_ROWS);
+    if (read.error) return NextResponse.json(empty, { headers });
+    const rows: any[] = (read.data ?? []).filter((r: any) => smartSet.has(String(r.wallet)));
 
     // 3. Aggregate per wallet → average-cost realized PnL on this coin.
     interface Agg {

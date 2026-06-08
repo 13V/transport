@@ -36,7 +36,7 @@ export async function GET(
     const result = await getWalletHistory(address, days);
     return NextResponse.json(
       { address, ...result },
-      { headers: { 'Cache-Control': 'public, max-age=300' } }
+      { headers: { 'Cache-Control': 'public, s-maxage=120, stale-while-revalidate=120' } }
     );
   } catch (error) {
     console.error('[HISTORY] Failed to read wallet history:', error);

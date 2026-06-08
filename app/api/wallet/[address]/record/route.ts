@@ -19,7 +19,7 @@ import { getWalletRecord } from '../../../../../lib/indexer/wallet-record';
 export const dynamic = 'force-dynamic';
 export const maxDuration = 30;
 
-const CACHE = { 'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=300' };
+const CACHE = { 'Cache-Control': 'public, s-maxage=120, stale-while-revalidate=120' };
 
 export async function GET(
   request: NextRequest,

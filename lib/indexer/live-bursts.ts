@@ -32,9 +32,14 @@ import { readSnapshot, writeSnapshot } from './smart-set-cache';
 
 export interface LiveBurst {
   /**
-   * Stable content hash of (mint, windowStartMs, minBuyers, windowSec) where
-   * windowStartMs is the streak's FIRST buy. Stays constant as the streak keeps
-   * accumulating later buys, so clients can dedupe reliably.
+   * Stable content hash of (mint, side, windowStartMs) where windowStartMs is
+   * the streak's FIRST buy. IDENTITY IS THE REAL STREAK ONLY — threshold params
+   * (minBuyers, windowSec) are deliberately NOT hashed in, so the SAME real
+   * accumulation streak gets the SAME id regardless of the caller's threshold
+   * (feed minBuyers=3, buy-alert=4, persist=3 all agree). The threshold is a
+   * FILTER (see flush), not part of identity. Stays constant as the streak keeps
+   * accumulating later buys, so clients/persist/alerts dedupe + cross-reference
+   * reliably.
    */
   id: string;
   mint: string;
@@ -156,6 +161,19 @@ export interface SmartSet {
    * curation gate, just retained). Used to surface buyer ROI/win-rate on bursts.
    */
   statsByWallet: Map<string, { score: number; roiPct: number | null; winRate: number | null; realizedPnl: number }>;
+  /**
+   * FAIL-CLOSED flag (signal H2): true when the wallet_links cluster resolution
+   * ERRORED, so the wallet→entity map could NOT be trusted to collapse one
+   * actor's split wallets into a single entity. When set, burst detection must
+   * NOT emit bursts whose entity count was derived from raw wallets (that would
+   * let one actor's split wallets trivially meet minBuyers). We prefer
+   * under-reporting conviction to over-reporting it. An EMPTY map with this flag
+   * FALSY is the legitimate "no clusters exist" case (every wallet is genuinely
+   * its own entity) and is fully trusted. Optional: absent/false both mean
+   * VERIFIED — the persisted snapshot is only ever written from a clean resolve,
+   * so a snapshot-rebuilt set (which omits the flag) is correctly trusted.
+   */
+  entitiesUnverified?: boolean;
 }
 
 const WALLET_CHUNK = 200; // Supabase .in() list size per query
@@ -189,15 +207,21 @@ function countSmartEntities(
   return entities.size;
 }
 
-/** Stable id: short content hash so the id doesn't drift as the window grows. */
+/**
+ * Stable id: short content hash of (mint, side, windowStartMs) ONLY so the id
+ * doesn't drift as the window grows AND so the same real streak resolves to the
+ * same id across every caller regardless of their threshold (minBuyers /
+ * windowSec are FILTERS, not identity). This keeps the live feed, the webhook
+ * alerts, and the persisted live_bursts row (posted_call/posted_result, measured
+ * outcomes) all keyed on the same id for one streak.
+ */
 function burstId(
   mint: string,
-  windowStartMs: number,
-  minBuyers: number,
-  windowSec: number
+  side: 'buy' | 'sell',
+  windowStartMs: number
 ): string {
   const h = createHash('sha1')
-    .update(`${mint}|${windowStartMs}|${minBuyers}|${windowSec}`)
+    .update(`${mint}|${side}|${windowStartMs}`)
     .digest('hex');
   return h.slice(0, 16);
 }
@@ -207,12 +231,23 @@ function burstId(
  * share an entity id (the cluster's stable representative member). Mirrors the
  * approach in smart-buys.ts: fetch the wallet_links edges touching the smart
  * set in a few batched .in() queries, then run the pure in-memory union-find
- * from clusters.ts. Degrades to an empty map (raw wallets = own entity) on any
- * error so burst counting never fails on cluster issues.
+ * from clusters.ts.
+ *
+ * FAILS CLOSED (signal H2): if the wallet_links query ERRORS (or throws) we
+ * CANNOT trust that one actor's split wallets collapse to a single entity, so we
+ * return { error: true }. The caller then flags bursts as unverified-entities
+ * rather than counting raw wallets as separate entities (which would let one
+ * actor trivially meet minBuyers with split wallets). A clean read with zero
+ * edges returns { map: empty, error: false } — the legitimate "no clusters"
+ * case where every wallet genuinely is its own entity.
  */
-async function resolveEntityMap(wallets: string[]): Promise<Map<string, string>> {
+async function resolveEntityMap(
+  wallets: string[]
+): Promise<{ map: Map<string, string>; error: boolean }> {
   const entityMap = new Map<string, string>();
-  if (wallets.length === 0 || !isSupabaseConfigured()) return entityMap;
+  if (wallets.length === 0 || !isSupabaseConfigured()) {
+    return { map: entityMap, error: false };
+  }
 
   try {
     const supabase = getSupabase();
@@ -224,7 +259,7 @@ async function resolveEntityMap(wallets: string[]): Promise<Map<string, string>>
           .from('wallet_links')
           .select('source, target')
           .in(col, group);
-        if (error) return new Map(); // degrade to raw counts
+        if (error) return { map: new Map(), error: true }; // FAIL CLOSED
         for (const row of data ?? []) {
           const src = (row as any).source as string;
           const tgt = (row as any).target as string;
@@ -233,15 +268,15 @@ async function resolveEntityMap(wallets: string[]): Promise<Map<string, string>>
       }
     }
 
-    if (edges.length === 0) return entityMap;
+    if (edges.length === 0) return { map: entityMap, error: false };
 
     const clusters = buildClusters(edges);
     for (const [wallet, members] of clusters) {
       entityMap.set(wallet, members[0] ?? wallet);
     }
-    return entityMap;
+    return { map: entityMap, error: false };
   } catch {
-    return new Map(); // never fail the feed on cluster issues
+    return { map: new Map(), error: true }; // FAIL CLOSED on any cluster error
   }
 }
 
@@ -267,6 +302,7 @@ async function resolveSmartSet(): Promise<SmartSet> {
     walletToEntity: new Map(),
     scoreByWallet: new Map(),
     statsByWallet: new Map(),
+    entitiesUnverified: false,
   };
   if (!isSupabaseConfigured()) return empty;
 
@@ -326,8 +362,15 @@ async function resolveSmartSet(): Promise<SmartSet> {
 
     if (wallets.size === 0) return empty;
 
-    const walletToEntity = await resolveEntityMap(Array.from(wallets));
-    return { wallets, walletToEntity, scoreByWallet, statsByWallet };
+    const { map: walletToEntity, error: entitiesUnverified } =
+      await resolveEntityMap(Array.from(wallets));
+    return {
+      wallets,
+      walletToEntity,
+      scoreByWallet,
+      statsByWallet,
+      entitiesUnverified,
+    };
   } catch {
     return empty;
   }
@@ -433,8 +476,18 @@ function detectBurstsForRows(
     string,
     { score: number; roiPct: number | null; winRate: number | null; realizedPnl: number }
   >,
-  smartSetSize?: number
+  smartSetSize?: number,
+  /**
+   * FAIL-CLOSED (signal H2): when true the wallet→entity cluster map could not
+   * be verified (wallet_links errored), so entity counts derived from raw
+   * wallets are untrustworthy. We emit NOTHING for these rows rather than
+   * over-report buyer/entity conviction from one actor's split wallets.
+   */
+  entitiesUnverified?: boolean
 ): LiveBurst[] {
+  // FAIL CLOSED: if cluster verification failed we cannot trust entity counts,
+  // so do not emit any bursts (prefer under-reporting to inflated conviction).
+  if (entitiesUnverified) return [];
   const windowMs = windowSec * 1000;
   const out: LiveBurst[] = [];
   // Sort ascending by time (chunked reads / fetch order can interleave).
@@ -486,8 +539,9 @@ function detectBurstsForRows(
       };
     });
     out.push({
-      // id keyed on the streak's FIRST buy -> stable as the streak grows.
-      id: burstId(mint, s.startMs, minBuyers, windowSec),
+      // id keyed on (mint, side, streak's FIRST buy) -> stable as the streak
+      // grows AND identical across callers regardless of their threshold.
+      id: burstId(mint, side, s.startMs),
       mint,
       buyers: s.entities.size,
       buyerWallets: s.wallets.size,
@@ -582,10 +636,12 @@ export async function getLiveBursts(opts: {
     const now = Date.now();
 
     // 1. Resolve the smart-wallet set (memoized: wallets + entity map + scores).
-    const { wallets, walletToEntity, scoreByWallet, statsByWallet } =
+    const { wallets, walletToEntity, scoreByWallet, statsByWallet, entitiesUnverified } =
       await getSmartWalletSet();
     const smartWallets = Array.from(wallets);
     if (smartWallets.length === 0) return empty;
+    // FAIL CLOSED: cluster verification failed -> don't emit inflated bursts.
+    if (entitiesUnverified) return empty;
 
     // Total distinct smart ENTITIES across the whole set, for coverage display:
     // map every smart wallet through the entity map (no cluster = own entity).
@@ -649,7 +705,8 @@ export async function getLiveBursts(opts: {
           now,
           'buy',
           statsByWallet,
-          smartSetSize
+          smartSetSize,
+          entitiesUnverified
         )
       );
     }
@@ -680,6 +737,9 @@ export async function getLiveBursts(opts: {
  * accumulation-streak logic as getLiveBursts. Tiers are populated; market
  * enrichment is left to the
  * caller (optional here). Degrades to an empty list on any failure.
+ *
+ * Single-side convenience wrapper around detectBurstsForMintsBothSides (which
+ * does ONE coalesced trade query). Kept for callers that only need one side.
  */
 export async function detectBurstsForMints(
   mints: string[],
@@ -690,47 +750,79 @@ export async function detectBurstsForMints(
     side?: 'buy' | 'sell';
   }
 ): Promise<LiveBurst[]> {
-  const windowSec = opts?.windowSec ?? 30;
-  const minBuyers = opts?.minBuyers ?? 3;
-  const lookbackMs = opts?.lookbackMs ?? 5 * 60 * 1000;
   const side = opts?.side ?? 'buy';
-  const tradeType = side === 'sell' ? 'SELL' : 'BUY';
+  const both = await detectBurstsForMintsBothSides(mints, {
+    windowSec: opts?.windowSec,
+    lookbackMs: opts?.lookbackMs,
+    minBuyBuyers: side === 'buy' ? opts?.minBuyers : undefined,
+    minSellEntities: side === 'sell' ? opts?.minBuyers : undefined,
+  });
+  return side === 'sell' ? both.sell : both.buy;
+}
 
+/**
+ * COALESCED mint-scoped burst sweep that detects BOTH buy and sell bursts from a
+ * SINGLE trades query (perf): instead of two queries (one per trade_type), pull
+ * BUY and SELL rows together via `.in('trade_type', ['BUY','SELL'])` over the
+ * mints/window, then split BUY vs SELL in memory and run the SAME per-side
+ * detection. This halves the hot-path trade reads for the webhook, which needs
+ * both sides. Buy-burst and sell-burst results are identical to running the two
+ * single-side passes separately. Degrades to empty lists on any failure.
+ */
+export async function detectBurstsForMintsBothSides(
+  mints: string[],
+  opts?: {
+    windowSec?: number;
+    lookbackMs?: number;
+    minBuyBuyers?: number;
+    minSellEntities?: number;
+  }
+): Promise<{ buy: LiveBurst[]; sell: LiveBurst[] }> {
+  const windowSec = opts?.windowSec ?? 30;
+  const lookbackMs = opts?.lookbackMs ?? 5 * 60 * 1000;
+  const minBuyBuyers = opts?.minBuyBuyers ?? 3;
+  const minSellEntities = opts?.minSellEntities ?? 3;
+
+  const empty = { buy: [] as LiveBurst[], sell: [] as LiveBurst[] };
   const uniqueMints = Array.from(
     new Set(mints.filter((m) => typeof m === 'string' && m))
   );
-  if (uniqueMints.length === 0 || !isSupabaseConfigured()) return [];
+  if (uniqueMints.length === 0 || !isSupabaseConfigured()) return empty;
 
   try {
     const supabase = getSupabase();
     const now = Date.now();
 
-    const { wallets, walletToEntity, scoreByWallet, statsByWallet } =
+    const { wallets, walletToEntity, scoreByWallet, statsByWallet, entitiesUnverified } =
       await getSmartWalletSet();
-    if (wallets.size === 0) return [];
+    if (wallets.size === 0) return empty;
+    // FAIL CLOSED: cluster verification failed -> don't emit inflated bursts.
+    if (entitiesUnverified) return empty;
 
     const smartSetSize = countSmartEntities(wallets, walletToEntity);
     const sinceIso = new Date(now - lookbackMs).toISOString();
 
-    // Pull recent trades (BUY or SELL per `side`) for the given mints, newest
-    // first, then filter to smart wallets in memory. Scoping by mint (a short
-    // .in() list) keeps this cheap enough for the per-webhook hot path.
+    // ONE coalesced query per mint-chunk: pull BUY *and* SELL together (newest
+    // first), then split by side in memory. Halves the per-webhook trade reads
+    // vs two single-side queries. Filtered to smart wallets in memory below.
     const trades: any[] = [];
     for (const group of chunk(uniqueMints, WALLET_CHUNK)) {
       const tradeRead = await supabase
         .from('trades')
-        .select('wallet, token_mint, amount, price, block_time')
-        .eq('trade_type', tradeType)
+        .select('wallet, token_mint, amount, price, block_time, trade_type')
+        .in('trade_type', ['BUY', 'SELL'])
         .in('token_mint', group)
         .gte('block_time', sinceIso)
         .order('block_time', { ascending: false })
         .limit(MAX_TRADE_ROWS);
 
-      if (tradeRead.error) return [];
+      if (tradeRead.error) return empty;
       if (tradeRead.data) trades.push(...tradeRead.data);
     }
 
-    const byMint = new Map<string, BuyRow[]>();
+    // Split rows per mint AND per side in one pass.
+    const buyByMint = new Map<string, BuyRow[]>();
+    const sellByMint = new Map<string, BuyRow[]>();
     for (const t of trades) {
       const wallet = String(t.wallet);
       if (!wallets.has(wallet)) continue; // smart-money only
@@ -744,38 +836,50 @@ export async function detectBurstsForMints(
       if (!Number.isFinite(ts)) continue;
       const entity = walletToEntity.get(wallet) ?? wallet;
 
-      let rows = byMint.get(mint);
+      const target = t.trade_type === 'SELL' ? sellByMint : buyByMint;
+      let rows = target.get(mint);
       if (!rows) {
         rows = [];
-        byMint.set(mint, rows);
+        target.set(mint, rows);
       }
       rows.push({ wallet, entity, ts, sol });
     }
 
-    const out: LiveBurst[] = [];
-    for (const [mint, rows] of byMint) {
-      out.push(
-        ...detectBurstsForRows(
-          mint,
-          rows,
-          windowSec,
-          minBuyers,
-          scoreByWallet,
-          now,
-          side,
-          statsByWallet,
-          smartSetSize
-        )
+    const detect = (
+      byMint: Map<string, BuyRow[]>,
+      side: 'buy' | 'sell',
+      minBuyers: number
+    ): LiveBurst[] => {
+      const out: LiveBurst[] = [];
+      for (const [mint, rows] of byMint) {
+        out.push(
+          ...detectBurstsForRows(
+            mint,
+            rows,
+            windowSec,
+            minBuyers,
+            scoreByWallet,
+            now,
+            side,
+            statsByWallet,
+            smartSetSize,
+            entitiesUnverified
+          )
+        );
+      }
+      out.sort(
+        (a, b) =>
+          new Date(b.windowEnd).getTime() - new Date(a.windowEnd).getTime()
       );
-    }
+      return out;
+    };
 
-    out.sort(
-      (a, b) =>
-        new Date(b.windowEnd).getTime() - new Date(a.windowEnd).getTime()
-    );
-    return out;
+    return {
+      buy: detect(buyByMint, 'buy', minBuyBuyers),
+      sell: detect(sellByMint, 'sell', minSellEntities),
+    };
   } catch {
-    return [];
+    return empty;
   }
 }
 

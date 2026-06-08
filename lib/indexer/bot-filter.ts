@@ -43,12 +43,16 @@ const ZERO_EDGE_MIN_TRADES = 1000;
 const ZERO_EDGE_MAX_ABS_ROI_PCT = 1; // |roi%| < 1 == effectively no edge
 
 /**
- * 'extreme-winrate-highvol': a near-perfect win rate sustained over a large
- * sample is statistically implausible for discretionary trading and points to
- * stat-farming / guaranteed-fill automation (e.g. JIT, atomic arb).
+ * 'extreme-winrate-highvol': a near-perfect win rate sustained over a
+ * meaningful sample is statistically implausible for discretionary memecoin
+ * trading and points to stat-farming / guaranteed-fill automation (e.g. JIT,
+ * atomic arb) OR — just as often — incomplete history (a wallet whose losing
+ * sells predate our scan window). The old 200-trade floor let the abundant
+ * 100%-win / ~50-trade wallets sail through; 30 is low enough to catch those
+ * while still demanding a sample large enough that 100% isn't pure luck.
  */
 const EXTREME_WIN_RATE = 0.97;
-const EXTREME_WIN_RATE_MIN_TRADES = 200;
+const EXTREME_WIN_RATE_MIN_TRADES = 30;
 
 export interface BotSignal {
   isLikelyBot: boolean;

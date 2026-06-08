@@ -78,6 +78,6 @@ export async function GET(
       members: memberStats,
       edges,
     },
-    { headers: { 'Cache-Control': 'public, max-age=120' } }
+    { headers: { 'Cache-Control': 'public, s-maxage=300, stale-while-revalidate=300' } }
   );
 }

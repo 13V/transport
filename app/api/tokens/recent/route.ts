@@ -68,6 +68,6 @@ export async function GET(request: NextRequest) {
         tradersUrl: `/api/token/${c.mint}/traders?winners=1&limit=20`,
       })),
     },
-    { headers: { 'Cache-Control': 'public, max-age=120' } }
+    { headers: { 'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=60' } }
   );
 }

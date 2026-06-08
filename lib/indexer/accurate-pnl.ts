@@ -16,6 +16,14 @@
  *     sold. THIS is the ROI denominator (not all capital ever deployed).
  *   - roiPct = realized / investedSol · 100
  *   - winRate = winning realized events / (winning + losing)   [break-even excluded]
+ *   - profitFactor = gross realized wins / gross realized losses. The ASYMMETRY
+ *     signal a win-rate floor deliberately omits: a sniper can win <50% of the
+ *     time yet have a huge profit factor (the few wins dwarf the many losses).
+ *     >1 = net-positive edge; <1 = bleeding. Infinity when there are no losses.
+ *   - openExposureRatio = remainingCost / (investedSol + remainingCost). The
+ *     fraction of deployed capital still sitting in open bags. High = a
+ *     "holds-losers" wallet whose realized winRate flatters reality (it just
+ *     hasn't sold the bags it's down on). 0 when nothing is open.
  *
  * Inputs are SOL-quoted Trade objects (already fee-adjusted by the parser).
  * Trades are sorted chronologically (stable on equal timestamps) before replay.
@@ -30,6 +38,8 @@ export interface AccuratePnL {
   investedSol: number; // cost basis of the SOLD quantity — the ROI denominator
   roiPct: number; // realizedPnlSol / investedSol * 100 (0 when nothing realized)
   winRate: number; // 0..1 over realized events (break-even excluded)
+  profitFactor: number; // gross wins / gross losses (asymmetry); Infinity if no losses, 0 if no wins
+  openExposureRatio: number; // remainingCost / (investedSol+remainingCost): 0..1, share of capital still in open bags
   consistency: number; // share of closed tokens that ended net-positive
   realizedEvents: number; // count of sell↔lot matches (realized "trades")
   closedTokens: number; // distinct tokens with at least one realized event
@@ -68,6 +78,8 @@ export function computeAccuratePnL(trades: Trade[]): AccuratePnL {
   let unmatchedProceeds = 0;
   let wins = 0;
   let losses = 0;
+  let grossWins = 0; // Σ of positive realized gains (for profit factor)
+  let grossLosses = 0; // Σ of |negative realized gains| (for profit factor)
   let realizedEvents = 0;
   let lastTradeAt: Date | null = null;
 
@@ -98,8 +110,13 @@ export function computeAccuratePnL(trades: Trade[]): AccuratePnL {
       matchedCost += lotCost;
       realizedByToken.set(tr.tokenMint, (realizedByToken.get(tr.tokenMint) ?? 0) + gain);
       realizedEvents += 1;
-      if (gain > EPS) wins += 1;
-      else if (gain < -EPS) losses += 1;
+      if (gain > EPS) {
+        wins += 1;
+        grossWins += gain;
+      } else if (gain < -EPS) {
+        losses += 1;
+        grossLosses += -gain;
+      }
 
       lot.qty -= q;
       remaining -= q;
@@ -123,12 +140,21 @@ export function computeAccuratePnL(trades: Trade[]): AccuratePnL {
   const roiPct = matchedCost > EPS ? (realized / matchedCost) * 100 : 0;
   const winRate = wins + losses > 0 ? wins / (wins + losses) : 0;
   const consistency = closedTokens > 0 ? profitableTokens / closedTokens : 0;
+  // Profit factor: gross wins / gross losses. No losses but some wins → Infinity
+  // (unbounded edge). No wins at all → 0. No realized events → 0 (neutral).
+  const profitFactor =
+    grossLosses > EPS ? grossWins / grossLosses : grossWins > EPS ? Infinity : 0;
+  // Open exposure: fraction of total deployed capital still locked in open bags.
+  const totalDeployed = matchedCost + remainingCost;
+  const openExposureRatio = totalDeployed > EPS ? remainingCost / totalDeployed : 0;
 
   return {
     realizedPnlSol: round4(realized),
     investedSol: round4(matchedCost),
     roiPct: round4(roiPct),
     winRate: round4(winRate),
+    profitFactor: Number.isFinite(profitFactor) ? round4(profitFactor) : profitFactor,
+    openExposureRatio: round4(openExposureRatio),
     consistency: round4(consistency),
     realizedEvents,
     closedTokens,

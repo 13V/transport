@@ -137,6 +137,8 @@ const EXTENDED_COLUMNS = [
   'seed_source',
   'roi_pct',
   'invested_sol',
+  'profit_factor',
+  'open_exposure_ratio',
   'verified',
   'scored_at',
 ];
@@ -348,6 +350,11 @@ export async function runSeedIndexer(opts: SeedIndexerOptions = {}): Promise<See
       realized_pnl: acc.realizedPnlSol,
       roi_pct: acc.roiPct,
       invested_sol: acc.investedSol,
+      // profit factor: gross wins / gross losses. Infinity (no losses) isn't
+      // JSON-serializable (the client would coerce it to null and lose the
+      // signal), so store a large finite sentinel — still clears any floor.
+      profit_factor: Number.isFinite(acc.profitFactor) ? acc.profitFactor : 999999,
+      open_exposure_ratio: acc.openExposureRatio,
       win_rate: acc.winRate,
       consistency: acc.consistency,
       total_trades: acc.totalTrades,

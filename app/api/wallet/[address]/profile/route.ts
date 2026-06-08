@@ -184,6 +184,6 @@ export async function GET(
       recentTrades,
       cluster,
     },
-    { headers: { 'Cache-Control': 'public, max-age=120' } }
+    { headers: { 'Cache-Control': 'public, s-maxage=120, stale-while-revalidate=120' } }
   );
 }

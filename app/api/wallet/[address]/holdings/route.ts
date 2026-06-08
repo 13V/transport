@@ -131,6 +131,6 @@ export async function GET(
         currentValueSol: round4(totals.currentValueSol),
       },
     },
-    { headers: { 'Cache-Control': 'public, max-age=60' } }
+    { headers: { 'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=60' } }
   );
 }
