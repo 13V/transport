@@ -16,12 +16,15 @@ import GateControls from '@/components/GateControls';
 
 interface NavItem { href: string; label: string; icon: React.ComponentType<{ size?: number }>; owner: string; }
 const NAV: { group: string; items: NavItem[] }[] = [
+  // Ordered along the value path the product wants a visitor to walk:
+  // Dashboard (proof) → Live (the wedge, real-time bursts) → Backtest (the
+  // credible historical record) → Leaderboard → Buying.
   { group: 'Analytics', items: [
     { href: '/', label: 'Dashboard', icon: LayoutDashboard, owner: 'dashboard' },
-    { href: '/smart-money', label: 'Leaderboard', icon: Crown, owner: 'leaderboard' },
-    { href: '/smart-money/buying', label: 'Buying', icon: Flame, owner: 'buying' },
     { href: '/live', label: 'Live', icon: Radio, owner: 'live' },
     { href: '/backtest', label: 'Backtest', icon: FlaskConical, owner: 'backtest' },
+    { href: '/smart-money', label: 'Leaderboard', icon: Crown, owner: 'leaderboard' },
+    { href: '/smart-money/buying', label: 'Buying', icon: Flame, owner: 'buying' },
   ] },
   { group: 'You', items: [
     { href: '/watchlist', label: 'Watchlist', icon: Star, owner: 'watchlist' },

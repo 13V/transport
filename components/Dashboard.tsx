@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Crown, Flame, Activity, ArrowRight, ArrowUp, ArrowDown,
-  Layers, ShieldCheck, Sparkles, Radio, BarChart3,
+  Layers, ShieldCheck, Sparkles, Radio, BarChart3, Bell, FlaskConical, X,
 } from 'lucide-react';
 import * as f from '@/lib/format';
 import {
@@ -194,6 +194,125 @@ function ProofStrip({ load }: { load: Load<LiveStats> }) {
   );
 }
 
+/**
+ * FIRST-RUN HERO / VALUE STRIP — the wedge for first-time visitors. Leads with
+ * the measured-proof number (reusing the same /api/smart-money/live/stats payload
+ * the dashboard already loads — no extra fetch), one line of what-this-is, two
+ * CTAs (Live + alerts), and a trust line promoting the backtester.
+ *
+ * Honesty: never fabricates. Until the proof matures it shows the value prop with
+ * a neutral "measuring outcomes…" line. Collapses for return visitors via
+ * localStorage so it never nags power users; a one-line condensed pill stays.
+ */
+const HERO_DISMISS_KEY = 'sm.hero.collapsed.v1';
+
+function buildProofHeadline(s: LiveStats | null): string | null {
+  if (!s || !s.n) return null;
+  const parts: string[] = [];
+  if (s.medianRet1h != null && Number.isFinite(s.medianRet1h)) parts.push(`${f.pct(s.medianRet1h)} median @1h`);
+  if (s.hitRate1h != null && Number.isFinite(s.hitRate1h)) parts.push(`${Math.round(s.hitRate1h)}% green`);
+  parts.push(`n=${s.n}`);
+  const wh = s.windowHours;
+  const whLabel = wh != null && Number.isFinite(wh) ? `last ${wh}h` : 'recent window';
+  return `Smart-money bursts: ${parts.join(' · ')} · ${whLabel}`;
+}
+
+function FirstRunHero({ load, onGetAlerts }: { load: Load<LiveStats>; onGetAlerts: () => void }) {
+  const router = useRouter();
+  // Start expanded; reconcile with localStorage on mount to avoid hydration flash.
+  const [collapsed, setCollapsed] = useState(false);
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    try {
+      setCollapsed(localStorage.getItem(HERO_DISMISS_KEY) === '1');
+    } catch { /* ignore */ }
+    setReady(true);
+  }, []);
+
+  const collapse = () => {
+    setCollapsed(true);
+    try { localStorage.setItem(HERO_DISMISS_KEY, '1'); } catch { /* ignore */ }
+  };
+  const expand = () => {
+    setCollapsed(false);
+    try { localStorage.removeItem(HERO_DISMISS_KEY); } catch { /* ignore */ }
+  };
+
+  const s = load.state === 'ok' ? load.data : null;
+  const headline = buildProofHeadline(s);
+  const measuring = load.state !== 'error' && !headline; // loading or n===0 → honest "measuring"
+
+  // Condensed pill for return visitors — keeps the wedge one tap away, no nag.
+  if (ready && collapsed) {
+    return (
+      <div className="hero-mini">
+        <span className="hero-mini-proof">
+          <BarChart3 size={12} />
+          {headline ?? 'Measuring smart-money outcomes…'}
+        </span>
+        <button type="button" className="hero-mini-cta" onClick={() => router.push('/live')}>
+          Open Live feed <ArrowRight size={12} />
+        </button>
+        <button type="button" className="hero-mini-expand" onClick={expand} title="Show the intro">
+          What is this?
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <section className="hero" aria-label="What this is">
+      <button type="button" className="hero-dismiss" onClick={collapse} aria-label="Dismiss intro">
+        <X size={15} />
+      </button>
+
+      <div className="hero-proof" aria-live="polite">
+        <span className="hero-proof-tag"><BarChart3 size={12} /> measured outcomes</span>
+        {headline ? (
+          <span className="hero-proof-num">{headline}</span>
+        ) : (
+          <span className="hero-proof-num measuring">
+            {measuring ? 'Measuring smart-money outcomes…' : 'Outcomes unavailable'}
+          </span>
+        )}
+      </div>
+
+      <h2 className="hero-lede">
+        Track verified smart-money wallets buying the same token in real time — and see the
+        measured outcome of every call.
+      </h2>
+
+      <p className="hero-trust">
+        Every call is measured. We post our losses too —{' '}
+        <a
+          href="/backtest"
+          className="hero-trust-link"
+          onClick={(e) => { e.preventDefault(); router.push('/backtest'); }}
+        >
+          see the full historical record <ArrowRight size={12} />
+        </a>
+      </p>
+
+      <div className="hero-cta">
+        <button type="button" className="btn primary hero-btn" onClick={() => router.push('/live')}>
+          <Radio size={15} /> Open Live feed <ArrowRight size={14} />
+        </button>
+        <button type="button" className="btn hero-btn" onClick={onGetAlerts}>
+          <Bell size={15} /> Get alerts
+        </button>
+        <button
+          type="button"
+          className="btn ghost hero-btn hero-btn-quiet"
+          onClick={() => router.push('/backtest')}
+        >
+          <FlaskConical size={15} /> Backtest
+        </button>
+      </div>
+    </section>
+  );
+}
+
 export default function Dashboard() {
   const router = useRouter();
   const status = useFetch<StatusResponse['totals']>('/api/status', (j) => (j as StatusResponse).totals);
@@ -213,8 +332,15 @@ export default function Dashboard() {
   const volTotal = (buying.data ?? []).reduce((a, t) => a + (t.solVolume || 0), 0);
   const volMax = topByVol.length ? (topByVol[0].solVolume || 0) : 0;
 
+  // "Get alerts" → the opt-in lives on the Live feed (browser push). Route there
+  // so first-time visitors land directly on the alerts affordance.
+  const goToAlerts = () => router.push('/live');
+
   return (
     <div className="view stack gap-14">
+      {/* FIRST-RUN HERO / VALUE STRIP — wedge + proof + CTAs, dismissible */}
+      <FirstRunHero load={proof} onGetAlerts={goToAlerts} />
+
       {/* metric strip */}
       {status.state === 'error' ? (
         <div className="card"><ErrorState title="Index status unavailable" msg="Couldn’t fetch wallet counts from the indexer." /></div>

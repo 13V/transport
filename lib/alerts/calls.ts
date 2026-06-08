@@ -39,6 +39,7 @@
 
 import { sendAlert, escapeHtml } from './notifier';
 import { postTweet } from './twitter';
+import { broadcastBurst } from './telegram-bot';
 import { tokenLinks } from '../trade-links';
 import { getSupabase, isSupabaseConfigured } from '../supabase-client';
 
@@ -64,6 +65,7 @@ interface CallRow {
   buyers: number | null;
   sol_total: number | null;
   tiers: string[] | null;
+  sample_buyers: string[] | null;
   window_end: string | null;
 }
 
@@ -179,7 +181,7 @@ export async function postNewCalls(): Promise<{ posted: number }> {
     // the OR across buyers / S-tier / sol_total stays readable and documented.
     const read = await supabase
       .from('live_bursts')
-      .select('id, mint, symbol, buyers, sol_total, tiers, window_end')
+      .select('id, mint, symbol, buyers, sol_total, tiers, sample_buyers, window_end')
       .eq('posted_call', false)
       .lte('window_end', finalizedBefore)
       .order('window_end', { ascending: false })
@@ -237,6 +239,24 @@ export async function postNewCalls(): Promise<{ posted: number }> {
           continue;
         }
         posted++;
+
+        // Per-user fan-out: DM the high-conviction call to every Telegram
+        // subscriber whose filters match, with one-tap (revenue-bearing) Ape
+        // buttons. Env-gated + non-fatal — a no-op when the bot/Supabase are
+        // unset, and a failure here must never undo the posted_call flag or
+        // abort the public-call batch.
+        try {
+          await broadcastBurst({
+            mint: row.mint,
+            symbol: row.symbol,
+            buyers: row.buyers,
+            sol_total: row.sol_total,
+            tiers: row.tiers,
+            sample_buyers: row.sample_buyers,
+          });
+        } catch (e) {
+          console.error('[CALLS] per-user burst fan-out failed:', (e as Error).message);
+        }
       } catch (err) {
         console.error('[CALLS] post-call row failed:', (err as Error).message);
       }

@@ -31,31 +31,95 @@ export function escapeHtml(s: string): string {
     .replace(/>/g, '&gt;');
 }
 
-/** POST one HTML message to a single Telegram chat. Returns true on res.ok. */
-async function sendTelegram(token: string, chatId: string, text: string): Promise<boolean> {
+/** A single Telegram inline-keyboard button (URL buttons + callback buttons). */
+export interface InlineButton {
+  text: string;
+  url?: string;
+  callback_data?: string;
+}
+
+/** A Telegram inline keyboard: rows of buttons. */
+export type InlineKeyboard = InlineButton[][];
+
+/** Parsed Telegram Bot API response envelope. */
+export interface TgApiResult {
+  ok: boolean;
+  result?: unknown;
+  description?: string;
+}
+
+/**
+ * Low-level Telegram Bot API call. Posts `payload` as JSON to the given Bot API
+ * `method` (e.g. 'sendMessage', 'answerCallbackQuery', 'setWebhook') and returns
+ * the parsed `{ ok, result?, description? }` envelope, or `null` when the bot
+ * token is unset (env-gated no-op) or the request throws. Never throws — a
+ * failed Telegram call must never take down the caller.
+ */
+export async function tgApi(
+  method: string,
+  payload: Record<string, unknown>
+): Promise<TgApiResult | null> {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) return null;
   try {
-    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text,
-        parse_mode: 'HTML',
-        disable_web_page_preview: true,
-      }),
+      body: JSON.stringify(payload),
     });
-    if (!res.ok) {
-      // 429 / 5xx etc. — surface so the caller skips stamping the cooldown.
-      console.error(
-        `[ALERT] Telegram send to ${chatId} returned ${res.status} ${res.statusText}`
-      );
-      return false;
+    let json: TgApiResult | null = null;
+    try {
+      json = (await res.json()) as TgApiResult;
+    } catch {
+      json = null;
     }
-    return true;
+    if (!res.ok || !json?.ok) {
+      console.error(
+        `[ALERT] Telegram ${method} returned ${res.status} ${res.statusText}` +
+          (json?.description ? ` — ${json.description}` : '')
+      );
+      return json ?? { ok: false };
+    }
+    return json;
   } catch (error) {
-    console.error('[ALERT] Telegram send failed:', (error as Error).message);
-    return false;
+    console.error(`[ALERT] Telegram ${method} failed:`, (error as Error).message);
+    return null;
   }
+}
+
+/**
+ * Send ONE HTML message to a single chat, with an optional inline keyboard.
+ * Returns true only when Telegram acknowledged the send (so callers can gate a
+ * cooldown / retry on false). No-op success is NOT implied here — when the token
+ * is unset tgApi returns null and we return false.
+ */
+export async function sendMessageTo(
+  chatId: string,
+  html: string,
+  inlineKeyboard?: InlineKeyboard
+): Promise<boolean> {
+  const payload: Record<string, unknown> = {
+    chat_id: chatId,
+    text: html,
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
+  };
+  if (inlineKeyboard && inlineKeyboard.length > 0) {
+    payload.reply_markup = { inline_keyboard: inlineKeyboard };
+  }
+  const res = await tgApi('sendMessage', payload);
+  return Boolean(res?.ok);
+}
+
+/**
+ * POST one HTML message to a single Telegram chat. Returns true on success.
+ * Thin wrapper over {@link sendMessageTo} (the shared tgApi path) so the
+ * broadcast functions below and the inbound bot share one code path. The
+ * `token` arg is retained for call-site compatibility but the token is read
+ * from env inside tgApi; callers only reach here when it is set.
+ */
+async function sendTelegram(_token: string, chatId: string, text: string): Promise<boolean> {
+  return sendMessageTo(chatId, text);
 }
 
 /**

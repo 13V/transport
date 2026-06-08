@@ -995,6 +995,107 @@ pre.code .c { color: var(--text-4); }
 }
 
 /* =========================================================================
+   FIRST-RUN HERO / VALUE STRIP — landing wedge for first-time visitors.
+   Proof number + one-line what-this-is + CTAs + trust line. Dismissible to a
+   condensed pill (.hero-mini) for return users so it never nags power users.
+   ========================================================================= */
+.hero {
+  position: relative;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-lg);
+  background:
+    radial-gradient(120% 140% at 0% 0%, var(--accent-soft), transparent 55%),
+    linear-gradient(0deg, var(--surface), var(--surface)), var(--surface-2);
+  padding: 18px 20px 16px;
+  overflow: hidden;
+}
+.hero::before {
+  content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+  background: linear-gradient(180deg, var(--accent), var(--accent-2));
+}
+.hero-dismiss {
+  position: absolute; top: 10px; right: 10px;
+  width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid transparent; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-4); cursor: pointer;
+  transition: color .15s ease, background .15s ease, border-color .15s ease;
+}
+.hero-dismiss:hover { color: var(--text-2); background: var(--surface-3); border-color: var(--border); }
+
+.hero-proof { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.hero-proof-tag {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 9.5px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
+  color: var(--text-4); padding: 3px 8px;
+  border: 1px solid var(--border); border-radius: var(--r-pill);
+  background: var(--surface-3); white-space: nowrap;
+}
+.hero-proof-tag svg { opacity: .85; }
+.hero-proof-num {
+  font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+  font-size: 14px; font-weight: 700; color: var(--pos); letter-spacing: -0.01em;
+}
+.hero-proof-num.measuring { color: var(--text-3); font-weight: 600; }
+
+.hero-lede {
+  margin: 0; max-width: 62ch;
+  font-size: 16px; line-height: 1.4; font-weight: 600; letter-spacing: -0.01em;
+  color: var(--text);
+}
+.hero-trust {
+  margin: 8px 0 0; max-width: 62ch;
+  font-size: 12.5px; line-height: 1.45; color: var(--text-3);
+}
+.hero-trust-link {
+  display: inline-flex; align-items: center; gap: 3px;
+  color: var(--accent-hover); font-weight: 600; text-decoration: none; white-space: nowrap;
+}
+.hero-trust-link:hover { color: var(--accent); text-decoration: underline; }
+.hero-trust-link svg { width: 12px; height: 12px; }
+
+.hero-cta { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 15px; }
+.hero-btn { gap: 7px; }
+.hero-btn svg { width: 15px; height: 15px; }
+.hero-btn-quiet { color: var(--text-2); }
+
+/* Condensed pill for return visitors — keeps the wedge one tap away, no nag. */
+.hero-mini {
+  display: flex; align-items: center; gap: 10px 14px; flex-wrap: wrap;
+  border: 1px solid var(--border); border-radius: var(--r);
+  background: linear-gradient(0deg, var(--surface), var(--surface)), var(--surface-2);
+  padding: 9px 14px; font-size: 12px;
+}
+.hero-mini-proof {
+  display: inline-flex; align-items: center; gap: 6px; min-width: 0;
+  font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+  font-size: 12px; font-weight: 650; color: var(--text-2);
+}
+.hero-mini-proof svg { color: var(--text-4); flex-shrink: 0; }
+.hero-mini-cta {
+  display: inline-flex; align-items: center; gap: 4px; margin-left: auto;
+  background: transparent; border: 0; cursor: pointer;
+  color: var(--accent-hover); font-size: 12px; font-weight: 600;
+}
+.hero-mini-cta:hover { color: var(--accent); }
+.hero-mini-expand {
+  background: transparent; border: 0; cursor: pointer;
+  color: var(--text-4); font-size: 11.5px; font-weight: 500; text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.hero-mini-expand:hover { color: var(--text-2); }
+
+@media (max-width: 640px) {
+  .hero { padding: 16px 14px 14px; }
+  .hero-lede { font-size: 15px; }
+  .hero-cta .hero-btn { flex: 1 1 auto; justify-content: center; }
+  .hero-mini-cta { margin-left: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-dismiss { transition: none; }
+}
+
+/* =========================================================================
    LIVE FEED — Wave 3: sparkline + % since first buy, hot strip, grouping,
    keyboard selection ring, mobile ape bar. Same deep-slate .bf-* system.
    ========================================================================= */
