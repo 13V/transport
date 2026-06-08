@@ -20,9 +20,19 @@ interface BuyerStat {
   winRate?: number | null;
 }
 
+// Signal type discriminator. 'burst' = classic ≥minBuyers convergence (default).
+// The Early layer adds earlier, lower-confidence types. Optional/defaulted so an
+// older payload (no `type`) renders exactly as a burst.
+type SignalType = 'burst' | 'early-s1' | 'heating' | 'fresh';
+
 interface Burst {
   id: string;
   mint: string;
+  // Signal type — absent on older payloads → treated as 'burst'.
+  type?: SignalType | null;
+  // Best-effort bundle/sniper risk flag (Early cards). true = flagged bundled;
+  // undefined = not checked at feed time. Chip renders only when true.
+  bundleFlag?: boolean | null;
   symbol?: string | null;
   name?: string | null;
   icon?: string | null;
@@ -413,6 +423,43 @@ function hotness(b: Burst, now: number): number {
   return raw * recency * liveBoost;
 }
 
+// Effective signal type (default 'burst' for older/absent payloads).
+function burstType(b: Burst): SignalType {
+  return b.type ?? 'burst';
+}
+
+// Is this an EARLY-layer signal (not a classic convergence burst)?
+function isEarly(b: Burst): boolean {
+  return burstType(b) !== 'burst';
+}
+
+// Per-type badge label + title for the Early layer. Returns null for classic
+// bursts (they render with the existing buyer-count framing, unchanged).
+function earlyBadge(b: Burst): { label: string; title: string; cls: string } | null {
+  switch (burstType(b)) {
+    case 'early-s1':
+      return {
+        label: 'EARLY · 1 S-wallet',
+        title: 'A single S-tier smart wallet made a first buy here — earliest, lowest-confidence signal, before 3-wallet convergence.',
+        cls: 'early-s1',
+      };
+    case 'heating':
+      return {
+        label: 'HEATING UP',
+        title: 'Smart-buy rate is spiking on this token (recent window ≫ baseline) — accelerating toward a burst but not there yet.',
+        cls: 'heating',
+      };
+    case 'fresh':
+      return {
+        label: 'FRESH LAUNCH',
+        title: 'A smart wallet bought this token within minutes of launch — very early, higher risk.',
+        cls: 'fresh',
+      };
+    default:
+      return null;
+  }
+}
+
 // Pick the freshest/most-significant burst for a token: prefer non-finalized,
 // else the latest windowEnd.
 function pickPrimary(a: Burst, b: Burst): Burst {
@@ -543,6 +590,7 @@ function Header({
   sort, onSort, status, onStatus, compact, onCompact,
   groupByToken, onGroupByToken,
   flow, onFlow,
+  layer, onLayer,
   prefTerminal, prefSize, onSavePrefs,
 }: {
   minBuyers: number;
@@ -561,6 +609,8 @@ function Header({
   onGroupByToken: (b: boolean) => void;
   flow: FlowFilter;
   onFlow: (f: FlowFilter) => void;
+  layer: 'bursts' | 'early' | 'early-only';
+  onLayer: (l: 'bursts' | 'early' | 'early-only') => void;
   prefTerminal: string | null;
   prefSize: number | null;
   onSavePrefs: (terminal: string | null, size: number | null) => void;
@@ -587,6 +637,40 @@ function Header({
             </button>
           ))}
         </div>
+
+        {/* SIGNAL LAYER — Bursts (classic ≥N convergence) vs the EARLY layer
+            (single S-tier first buys, heating velocity, fresh launches) that
+            front-runs bursts. "Early" shows both; "Early only" isolates them. */}
+        <div className="seg" title="Show classic convergence bursts, or also the earlier smart-money signals">
+          <button
+            type="button"
+            className={layer === 'bursts' ? 'on' : ''}
+            onClick={() => onLayer('bursts')}
+            aria-pressed={layer === 'bursts'}
+            title="Only classic bursts (≥N smart wallets converging)"
+          >
+            Bursts
+          </button>
+          <button
+            type="button"
+            className={layer === 'early' ? 'on' : ''}
+            onClick={() => onLayer('early')}
+            aria-pressed={layer === 'early'}
+            title="Bursts plus the earlier Early signals (1 S-wallet, heating, fresh)"
+          >
+            ⚡ Early
+          </button>
+          <button
+            type="button"
+            className={layer === 'early-only' ? 'on' : ''}
+            onClick={() => onLayer('early-only')}
+            aria-pressed={layer === 'early-only'}
+            title="Only the earlier signals (front-running bursts) — lower confidence"
+          >
+            Early only
+          </button>
+        </div>
+
         <div className="seg">
           {WINDOW_SEC.map((w) => (
             <button
@@ -925,6 +1009,10 @@ export default function LiveFeed() {
   const [groupByToken, setGroupByToken] = useState(true);
   // Smart-money flow filter: All (default) | Holding only | Dumping only.
   const [flow, setFlow] = useState<FlowFilter>('all');
+  // SIGNAL-LAYER filter: 'bursts' (classic only, default) | 'early' (include the
+  // Early layer too) | 'early-only' (just the earlier signals). Drives both the
+  // server include flag and a client-side type filter.
+  const [layer, setLayer] = useState<'bursts' | 'early' | 'early-only'>('bursts');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   void generatedAt;
@@ -1011,8 +1099,8 @@ export default function LiveFeed() {
   sseOkRef.current = sseOk;
   // Current controls mirrored into refs so the realtime handler refetches with
   // the live filter values without re-subscribing on every control change.
-  const ctrlRef = useRef({ min: minBuyers, win: windowSec, sol: minSol, sort });
-  ctrlRef.current = { min: minBuyers, win: windowSec, sol: minSol, sort };
+  const ctrlRef = useRef({ min: minBuyers, win: windowSec, sol: minSol, sort, early: layer !== 'bursts' });
+  ctrlRef.current = { min: minBuyers, win: windowSec, sol: minSol, sort, early: layer !== 'bursts' };
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Timestamp of the last realtime-triggered refetch, for the min-interval floor.
   const lastRealtimeFetchRef = useRef(0);
@@ -1119,10 +1207,10 @@ export default function LiveFeed() {
     setError(null);
   }, [flagNewIds]);
 
-  const fetchLive = useCallback(async (min: number, win: number, sol: number, srt: 'quality' | 'recent') => {
+  const fetchLive = useCallback(async (min: number, win: number, sol: number, srt: 'quality' | 'recent', early: boolean) => {
     try {
       const res = await fetch(
-        `/api/smart-money/live?windowSec=${win}&minBuyers=${min}&minSol=${sol}&hours=6&limit=50&sort=${srt}`
+        `/api/smart-money/live?windowSec=${win}&minBuyers=${min}&minSol=${sol}&hours=6&limit=50&sort=${srt}${early ? '&tier=early' : ''}`
       );
       if (!res.ok) throw new Error('Failed to fetch live feed');
       const json = (await res.json()) as LiveResponse;
@@ -1156,9 +1244,9 @@ export default function LiveFeed() {
     setLoading(true);
     firstLoadRef.current = true;
     seenRef.current = new Set();
-    fetchLive(minBuyers, windowSec, minSol, sort);
+    fetchLive(minBuyers, windowSec, minSol, sort, layer !== 'bursts');
     return () => { mountedRef.current = false; };
-  }, [fetchLive, minBuyers, windowSec, minSol, sort]);
+  }, [fetchLive, minBuyers, windowSec, minSol, sort, layer]);
 
   // Proof stats: fetch on mount + refresh ~5 min.
   useEffect(() => {
@@ -1192,7 +1280,7 @@ export default function LiveFeed() {
             const now = Date.now();
             if (now - lastRealtimeFetchRef.current < REALTIME_MIN_INTERVAL_MS) return;
             lastRealtimeFetchRef.current = now;
-            fetchLive(ctrlRef.current.min, ctrlRef.current.win, ctrlRef.current.sol, ctrlRef.current.sort);
+            fetchLive(ctrlRef.current.min, ctrlRef.current.win, ctrlRef.current.sol, ctrlRef.current.sort, ctrlRef.current.early);
           }, 700);
         }
       )
@@ -1241,7 +1329,7 @@ export default function LiveFeed() {
     // separately at /api/smart-money/live/stream — don't point the UI at it.
     const url =
       `/api/smart-money/live/ui-stream?windowSec=${windowSec}&minBuyers=${minBuyers}` +
-      `&minSol=${minSol}&hours=6&limit=50&sort=${sort}`;
+      `&minSol=${minSol}&hours=6&limit=50&sort=${sort}${layer !== 'bursts' ? '&tier=early' : ''}`;
 
     // Mark a frame of ANY kind received — the true liveness signal. Marks SSE
     // healthy and frame-fresh immediately so a quiet (ping-only) connection is
@@ -1319,7 +1407,7 @@ export default function LiveFeed() {
       setSseFrameFresh(false);
       if (esRef.current === es) esRef.current = null;
     };
-  }, [applySnapshot, upsertBursts, minBuyers, windowSec, minSol, sort]);
+  }, [applySnapshot, upsertBursts, minBuyers, windowSec, minSol, sort, layer]);
 
   // SSE FRAME-LIVENESS CHECK — independent of the connect watchdog. The browser
   // EventSource can keep a socket "open" while it has actually buffered/stalled;
@@ -1351,9 +1439,9 @@ export default function LiveFeed() {
   // keys off genuinely-new ids — does NOT retrigger the entry animation.
   useEffect(() => {
     const pollMs = sseOk && sseFrameFresh ? 8000 : POLL_MS;
-    const interval = setInterval(() => fetchLive(minBuyers, windowSec, minSol, sort), pollMs);
+    const interval = setInterval(() => fetchLive(minBuyers, windowSec, minSol, sort, layer !== 'bursts'), pollMs);
     return () => clearInterval(interval);
-  }, [fetchLive, minBuyers, windowSec, minSol, sort, sseOk, sseFrameFresh]);
+  }, [fetchLive, minBuyers, windowSec, minSol, sort, layer, sseOk, sseFrameFresh]);
 
   // Keep relative ages ticking between polls (every 5s is plenty).
   useEffect(() => {
@@ -1369,6 +1457,10 @@ export default function LiveFeed() {
   const visible = useMemo(
     () =>
       bursts.filter((b) => {
+        // Signal-layer leg: 'bursts' hides the Early layer; 'early-only' hides
+        // classic bursts; 'early' shows both.
+        if (layer === 'bursts' && isEarly(b)) return false;
+        if (layer === 'early-only' && !isEarly(b)) return false;
         // Status leg.
         if (statusFilter === 'live' && b.finalized !== false) return false;
         if (statusFilter === 'cooling' && b.finalized !== true) return false;
@@ -1377,7 +1469,7 @@ export default function LiveFeed() {
         if (flow === 'dumping' && !isDumping(b)) return false;
         return true;
       }),
-    [bursts, statusFilter, flow]
+    [bursts, statusFilter, flow, layer]
   );
 
   // GROUP BY TOKEN (Wave 3): collapse repeated bursts per mint to one primary row
@@ -1717,6 +1809,7 @@ export default function LiveFeed() {
           compact={compact} onCompact={setCompact}
           groupByToken={groupByToken} onGroupByToken={saveGroupByToken}
           flow={flow} onFlow={saveFlow}
+          layer={layer} onLayer={setLayer}
           prefTerminal={prefTerminal} prefSize={prefSize} onSavePrefs={savePrefs}
         />
         <div className="stack gap-12">
@@ -1739,12 +1832,13 @@ export default function LiveFeed() {
           compact={compact} onCompact={setCompact}
           groupByToken={groupByToken} onGroupByToken={saveGroupByToken}
           flow={flow} onFlow={saveFlow}
+          layer={layer} onLayer={setLayer}
           prefTerminal={prefTerminal} prefSize={prefSize} onSavePrefs={savePrefs}
         />
         <div className="card">
           <ErrorState
             msg="The live feed didn’t respond."
-            onRetry={() => { setLoading(true); fetchLive(minBuyers, windowSec, minSol, sort); }}
+            onRetry={() => { setLoading(true); fetchLive(minBuyers, windowSec, minSol, sort, layer !== 'bursts'); }}
           />
         </div>
       </div>
@@ -1940,6 +2034,10 @@ export default function LiveFeed() {
         ? 'Mint & freeze renounced · no risk flags'
         : 'Safety data unavailable';
 
+    // EARLY-LAYER badge (null for classic bursts) + best-effort BUNDLE chip.
+    const earlyTag = earlyBadge(b);
+    const showBundle = b.bundleFlag === true;
+
     // --- EXIT SIGNAL (Part B). Render only when a field is present. ---
     const hasExitData =
       b.someBuyersExited != null || b.netSolFlow != null || b.smartSellWallets != null;
@@ -2102,6 +2200,45 @@ export default function LiveFeed() {
 
           {/* DECISION ROW: safety verdict + exit signal + conviction one-liner */}
           <div className="bf-signals">
+            {/* EARLY-LAYER type badge (early-s1 / heating / fresh). Classic bursts
+                render no badge here — their framing is the buyer count below. */}
+            {earlyTag && (
+              <span
+                className={`bf-early-badge bf-early-${earlyTag.cls}`}
+                title={earlyTag.title}
+                style={{
+                  fontSize: '10px',
+                  fontWeight: 700,
+                  letterSpacing: '0.02em',
+                  padding: '1px 6px',
+                  borderRadius: '4px',
+                  whiteSpace: 'nowrap',
+                  background: 'var(--accent-soft, rgba(120,140,255,0.15))',
+                  color: 'var(--accent, #8fa0ff)',
+                }}
+              >
+                ⚡ {earlyTag.label}
+              </span>
+            )}
+            {/* BUNDLE / sniper risk chip — the user's one real pump.fun risk.
+                Shows ONLY when explicitly flagged (best-effort; see annotateBundleFlag). */}
+            {showBundle && (
+              <span
+                className="bf-bundle-chip"
+                title="Bundle/sniper concentration detected — supply may be controlled by the launcher. Higher rug risk."
+                style={{
+                  fontSize: '10px',
+                  fontWeight: 700,
+                  padding: '1px 6px',
+                  borderRadius: '4px',
+                  whiteSpace: 'nowrap',
+                  background: 'rgba(255,80,80,0.18)',
+                  color: '#ff6b6b',
+                }}
+              >
+                ⚠ BUNDLE
+              </span>
+            )}
             <span
               className={`bf-verdict ${verdict}`}
               title={verdictTitle}
@@ -2288,6 +2425,7 @@ export default function LiveFeed() {
         compact={compact} onCompact={setCompact}
         groupByToken={groupByToken} onGroupByToken={saveGroupByToken}
         flow={flow} onFlow={saveFlow}
+        layer={layer} onLayer={setLayer}
         prefTerminal={prefTerminal} prefSize={prefSize} onSavePrefs={savePrefs}
       />
 

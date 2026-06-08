@@ -21,6 +21,7 @@ import { getLiveBursts, qualityScore, type LiveBurst } from './live-bursts';
 import { getTokenMeta } from '../token-meta';
 import { fetchTokenPricesSol } from '../prices/price-oracle';
 import { getSupabase, isSupabaseConfigured } from '../supabase-client';
+import { envInt } from './env';
 
 /** Inputs to buildLiveFeed — already clamped/parsed by the caller (the routes). */
 export interface BuildLiveFeedParams {
@@ -32,6 +33,11 @@ export interface BuildLiveFeedParams {
   minSol: number;
   /** `since` cursor in epoch-ms, or null for no lower bound. */
   sinceMs: number | null;
+  /**
+   * FEED-ONLY: include the "Early" signal layer (early-s1/heating/fresh) in
+   * addition to classic bursts. Default false → identical to the prior feed.
+   */
+  includeEarly?: boolean;
 }
 
 /** Output of buildLiveFeed — the exact JSON body shape the poll route returns. */
@@ -92,6 +98,7 @@ function cacheKey(p: BuildLiveFeedParams): string {
     p.sort,
     p.minSol,
     p.sinceMs == null ? '' : p.sinceMs,
+    p.includeEarly ? 'early' : '',
   ].join('|');
 }
 
@@ -107,7 +114,13 @@ async function computeLiveFeed(p: BuildLiveFeedParams): Promise<LiveFeedResult> 
 
   // Pull more than `limit` so post-filtering (minSol/since) + re-ranking still
   // has a full pool to cap from; the underlying limit is clamped to 200.
-  const result = await getLiveBursts({ windowSec, minBuyers, hours, limit: 200 });
+  const result = await getLiveBursts({
+    windowSec,
+    minBuyers,
+    hours,
+    limit: 200,
+    includeEarly: p.includeEarly ?? false,
+  });
 
   // Apply caller filters, then rank, then cap to the requested limit.
   let bursts: LiveBurst[] = result.bursts.filter((b) => {
@@ -182,6 +195,14 @@ async function computeLiveFeed(p: BuildLiveFeedParams): Promise<LiveFeedResult> 
     });
   } catch {
     // ignore — return the un-enriched feed
+  }
+
+  // EARLY LAYER (feed-only): now that pairCreatedAt is enriched, promote a fresh
+  // launch and attach the best-effort bundle/sniper flag. No-ops unless the early
+  // layer is enabled, so the classic burst feed is byte-identical.
+  if (p.includeEarly) {
+    bursts = annotateFreshLaunch(bursts);
+    bursts = await annotateBundleFlag(bursts);
   }
 
   // LIVE entry→now price change. The burst card's hero % and the "$entry → $now"
@@ -350,6 +371,55 @@ export async function annotateLivePriceChange(bursts: LiveBurst[]): Promise<Live
       entryMarketCapUsd,
     };
   });
+}
+
+/**
+ * FRESH-LAUNCH promotion (Detector #4). Now that pairCreatedAt is enriched, any
+ * EARLY signal (or a smart buy that produced no burst) on a token younger than
+ * FRESH_MAX_AGE_MIN is re-tagged 'fresh' — the very-young-token signal the user
+ * wants surfaced. Pure + synchronous (no queries): it only reads the already-
+ * enriched pairCreatedAt. Classic bursts (type 'burst') are NEVER re-tagged, so
+ * convergence bursts keep their identity even on a fresh token.
+ */
+export function annotateFreshLaunch(bursts: LiveBurst[]): LiveBurst[] {
+  const maxAgeMs = envInt('FRESH_MAX_AGE_MIN', 10) * 60_000;
+  const now = Date.now();
+  return bursts.map((b) => {
+    if (b.type === 'burst') return b; // never override a real convergence burst
+    const createdMs =
+      typeof b.pairCreatedAt === 'number' && Number.isFinite(b.pairCreatedAt)
+        ? b.pairCreatedAt
+        : null;
+    if (createdMs == null) return b;
+    const ageMs = now - createdMs;
+    if (ageMs >= 0 && ageMs < maxAgeMs) return { ...b, type: 'fresh' };
+    return b;
+  });
+}
+
+/**
+ * BUNDLE/SNIPER flag (best-effort) — the user's ONE real pump.fun risk.
+ *
+ * The cheap live-feed enrichment (getTokenMeta: mint/freeze/liq/age) does NOT
+ * carry bundle/sniper concentration, and gmgn-cli can't run on Vercel. So this
+ * is an ENV-GATED HOOK, OFF by default (BUNDLE_FLAG_ENABLED): when off it is a
+ * no-op and every Early card simply renders WITHOUT a bundle chip (bundleFlag
+ * stays undefined). It deliberately adds NO per-mint RPC to the hot path.
+ *
+ * TODO (intended source): GMGN OpenAPI token-security (bundler_rate /
+ * sniper_count), already batched + cheap (the GMGN seeder/CLI uses it). Wire the
+ * real lookup inside the `enabled` branch below — one batched call over the
+ * (capped) feed mints, behind the existing ~2s feed cache — and set bundleFlag /
+ * bundleSource:'gmgn' from its result. Until then this returns the feed unchanged
+ * so the rest of the Early feature does not depend on it.
+ */
+export async function annotateBundleFlag(bursts: LiveBurst[]): Promise<LiveBurst[]> {
+  const enabled = process.env.BUNDLE_FLAG_ENABLED === '1';
+  if (!enabled || bursts.length === 0) return bursts; // default off → no chip
+  // Intentionally a stub: NO real bundle source is available at cheap feed time
+  // yet (see the TODO above). When GMGN token-security is wired here, replace
+  // this with one batched lookup over the capped feed mints and set bundleFlag.
+  return bursts;
 }
 
 /**

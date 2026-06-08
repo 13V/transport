@@ -22,6 +22,7 @@ function burst(partial: Partial<LiveBurst>): LiveBurst {
   return {
     id: 'id',
     mint: 'MINT',
+    type: 'burst',
     buyers: 3,
     buyerWallets: 3,
     solTotal: 1,

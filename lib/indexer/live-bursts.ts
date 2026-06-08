@@ -45,6 +45,20 @@ export interface LiveBurst {
    */
   id: string;
   mint: string;
+  /**
+   * SIGNAL TYPE DISCRIMINATOR. 'burst' is the classic ≥minBuyers convergence
+   * signal and is the DEFAULT for every existing burst (backward-compatible —
+   * an older snapshot / any code that omits this still reads as a burst). The
+   * "Early" layer adds earlier, lower-confidence signals that front-run the
+   * 3-wallet burst:
+   *   - 'early-s1' : a SINGLE S-tier smart wallet made a first buy (1 distinct
+   *                  S-tier entity), before 3-wallet convergence.
+   *   - 'heating'  : the per-token smart-buy RATE is spiking (short-window rate
+   *                  ≫ baseline) before the burst threshold is hit.
+   *   - 'fresh'    : a smart wallet bought a token younger than FRESH_MAX_AGE_MIN.
+   * FEED-ONLY: the alert path only ever emits/consumes 'burst'.
+   */
+  type: 'burst' | 'early-s1' | 'heating' | 'fresh';
   /** Distinct smart-money ENTITIES (cluster-deduped) over the whole streak. */
   buyers: number;
   /** Raw distinct buyer WALLET addresses over the streak (pre-cluster-dedup). */
@@ -205,6 +219,16 @@ export interface LiveBurst {
   netSolFlow?: number;
   /** True if any wallet in this burst's buyer set also appears in the sells (they're flipping out). */
   someBuyersExited?: boolean;
+  /**
+   * BUNDLE/SNIPER RISK CHIP (Early layer, best-effort). The user's one real
+   * pump.fun risk. true = the token is flagged bundled/sniped, false = checked
+   * and clean, undefined = NOT checked at feed time (the cheap feed enrichment
+   * has no bundle data — see annotateBundleFlag in live-feed.ts). The card shows
+   * the chip only when this is explicitly true.
+   */
+  bundleFlag?: boolean;
+  /** Where bundleFlag came from (for transparency/debugging). undefined when unchecked. */
+  bundleSource?: 'gmgn' | 'none';
 }
 
 export interface LiveBurstsResult {
@@ -262,6 +286,29 @@ const TIER_WEIGHT: Record<string, number> = { S: 3, A: 2, B: 1, C: 0.5 };
 // Cap on the distinct buyer wallet list retained for per-wallet attribution
 // (live_bursts.all_buyers). Most bursts hold far fewer; this bounds the array.
 const MAX_ALL_BUYERS = 60;
+
+/** Positive float from env, else fallback (env helper only does ints). */
+function envFloat(name: string, fallback: number): number {
+  const v = Number(process.env[name]);
+  return Number.isFinite(v) && v > 0 ? v : fallback;
+}
+
+/**
+ * EARLY-SIGNAL THRESHOLDS (Phase 1). All env-gated so they tune from Vercel
+ * without a deploy. Read lazily inside detection so tests can override per-case.
+ *  - EARLY_S1_MIN_SOL: min SOL value of the single S-tier first buy to emit an
+ *    'early-s1' signal. Keeps a dust buy from firing the earliest signal.
+ *  - HEATING_MIN_RATE_MULT: how much the recent short-window smart-buy rate must
+ *    exceed the streak's baseline rate to emit a 'heating' signal.
+ *  - HEATING_MIN_BUYS: min buys in the recent window before a rate spike counts
+ *    (so 1-2 buys can't read as a "spike").
+ *  - FRESH_MAX_AGE_MIN: a smart buy on a token younger than this (minutes, by
+ *    pairCreatedAt) emits a 'fresh' signal.
+ */
+const EARLY_S1_MIN_SOL = () => envFloat('EARLY_S1_MIN_SOL', 0.5);
+const HEATING_MIN_RATE_MULT = () => envFloat('HEATING_MIN_RATE_MULT', 3);
+const HEATING_MIN_BUYS = () => envInt('HEATING_MIN_BUYS', 3);
+const FRESH_MAX_AGE_MIN = () => envInt('FRESH_MAX_AGE_MIN', 10);
 
 function chunk<T>(arr: T[], size: number): T[][] {
   const out: T[][] = [];
@@ -663,7 +710,7 @@ export async function getSmartWalletSet(): Promise<SmartSet> {
   return smartSetInflight;
 }
 
-interface BuyRow {
+export interface BuyRow {
   wallet: string;
   entity: string;
   ts: number; // block_time in ms
@@ -699,7 +746,7 @@ interface BuyRow {
  * Shared by both the full live sweep and the mint-scoped real-time detector so
  * the dedup + streak logic stays identical (buy and sell sides alike).
  */
-function detectBurstsForRows(
+export function detectBurstsForRows(
   mint: string,
   rowsUnsorted: BuyRow[],
   windowSec: number,
@@ -801,6 +848,10 @@ function detectBurstsForRows(
       // grows AND identical across callers regardless of their threshold.
       id: burstId(mint, side, s.startMs),
       mint,
+      // Classic convergence burst — the default signal type. The Early layer
+      // (early-s1/heating/fresh) is emitted by detectEarlySignalsForRows, never
+      // here, so existing bursts are byte-identical except for this tag.
+      type: 'burst',
       buyers: s.entities.size,
       buyerWallets: s.wallets.size,
       solTotal: Math.round(s.solTotal * 1e4) / 1e4,
@@ -879,6 +930,180 @@ function detectBurstsForRows(
   return out;
 }
 
+/**
+ * EARLY-SIGNAL DETECTION (Phase 1) — surfaces smart-money interest BEFORE the
+ * ≥minBuyers burst converges, reusing the exact same per-token buy rows + tier
+ * map already resolved for burst detection (NO new queries). Emits at most one
+ * signal per token, choosing the EARLIEST/strongest applicable type:
+ *
+ *   1. 'early-s1' — a SINGLE S-tier smart wallet made a first buy (the earliest
+ *      possible smart signal: one proven S-wallet, before any convergence). The
+ *      streak's first S-tier buy ≥ EARLY_S1_MIN_SOL fires it.
+ *   3. 'heating'  — the recent short-window smart-buy RATE is spiking vs the
+ *      streak's baseline rate (≥ HEATING_MIN_RATE_MULT, with ≥ HEATING_MIN_BUYS
+ *      buys in the recent window), i.e. accumulation is accelerating toward — but
+ *      hasn't yet reached — the burst threshold.
+ *
+ * Suppressed once the token already has a full burst (handled by the caller,
+ * which knows the burst set) so we never double-surface a token that's already a
+ * burst. The 'fresh' type (#4) is attached in the feed layer where token age
+ * (pairCreatedAt) is available — see live-feed.ts.
+ *
+ * Same fail-closed contract as detectBurstsForRows: returns [] when cluster
+ * verification failed (entitiesUnverified).
+ */
+export function detectEarlySignalsForRows(
+  mint: string,
+  rowsUnsorted: BuyRow[],
+  windowSec: number,
+  scoreByWallet: Map<string, number>,
+  now: number,
+  statsByWallet?: Map<
+    string,
+    { score: number; roiPct: number | null; winRate: number | null; realizedPnl: number }
+  >,
+  smartSetSize?: number,
+  entitiesUnverified?: boolean,
+  fundedByWallet?: Map<string, string>
+): LiveBurst[] {
+  if (entitiesUnverified) return [];
+  const rows = rowsUnsorted.slice().sort((a, b) => a.ts - b.ts);
+  if (rows.length === 0) return [];
+
+  const windowMs = windowSec * 1000;
+  const tierFor = (w: string): string | null => {
+    const score = scoreByWallet.get(w);
+    return score == null ? null : tierFromScore(score);
+  };
+
+  // Build a base signal object from a single representative wallet + the rows it
+  // summarizes. Mirrors the burst shape so the feed/UI/persist treat it uniformly.
+  const makeSignal = (
+    type: LiveBurst['type'],
+    leadWallet: string,
+    startMs: number,
+    endMs: number,
+    buyerEntities: Set<string>,
+    buyerWallets: Set<string>,
+    solTotal: number,
+    firstPrice: number | null,
+    lastPrice: number | null
+  ): LiveBurst => {
+    const sampleBuyers = Array.from(buyerWallets).slice(0, 5);
+    const tiers = sampleBuyers.map(tierFor);
+    let inheritedBuyers: number | undefined;
+    let sampleFunded: (string | null)[] | undefined;
+    if (fundedByWallet && fundedByWallet.size > 0) {
+      let n = 0;
+      for (const w of buyerWallets) if (fundedByWallet.has(w)) n++;
+      inheritedBuyers = n;
+      sampleFunded = sampleBuyers.map((w) => fundedByWallet.get(w) ?? null);
+    }
+    const buyerStats = sampleBuyers.map((w) => {
+      const st = statsByWallet?.get(w);
+      return {
+        addr: w,
+        tier: tierFor(w),
+        roiPct: st ? st.roiPct : null,
+        winRate: st ? st.winRate : null,
+      };
+    });
+    return {
+      // Same id basis as a burst (mint, side, streak-start) so persist/measure
+      // dedupe identically; the `type` distinguishes it from a same-window burst.
+      id: burstId(mint, 'buy', startMs),
+      mint,
+      type,
+      buyers: buyerEntities.size,
+      buyerWallets: buyerWallets.size,
+      solTotal: Math.round(solTotal * 1e4) / 1e4,
+      windowStart: new Date(startMs).toISOString(),
+      windowEnd: new Date(endMs).toISOString(),
+      sampleBuyers,
+      wallets: Array.from(buyerWallets),
+      allBuyers: Array.from(buyerWallets).slice(0, MAX_ALL_BUYERS),
+      side: 'buy',
+      tiers,
+      buyerStats,
+      inheritedBuyers,
+      sampleFunded,
+      leadBuyer: leadWallet,
+      leadTier: tierFor(leadWallet),
+      smartSetSize,
+      firstBuyPriceSol: firstPrice,
+      lastBuyPriceSol: lastPrice,
+      lastTradePriceSol: lastPrice,
+      finalized: now - endMs > windowMs,
+    };
+  };
+
+  const out: LiveBurst[] = [];
+
+  // --- Detector #1: first S-tier buy. The EARLIEST S-tier buy on this token.
+  const firstS = rows.find((r) => tierFor(r.wallet) === 'S');
+  if (firstS && firstS.sol >= EARLY_S1_MIN_SOL()) {
+    out.push(
+      makeSignal(
+        'early-s1',
+        firstS.wallet,
+        firstS.ts,
+        firstS.ts,
+        new Set([firstS.entity]),
+        new Set([firstS.wallet]),
+        firstS.sol,
+        firstS.price != null && firstS.price > 0 ? firstS.price : null,
+        firstS.price != null && firstS.price > 0 ? firstS.price : null
+      )
+    );
+  }
+
+  // --- Detector #3: heating / velocity spike. Compare the buy RATE in the most
+  // recent windowSec to the streak's overall baseline rate. A short recent window
+  // running much hotter than the token's own baseline = accelerating accumulation.
+  const recentCutoff = now - windowMs;
+  const recent = rows.filter((r) => r.ts >= recentCutoff);
+  if (recent.length >= HEATING_MIN_BUYS()) {
+    const firstTs = rows[0].ts;
+    const lastTs = rows[rows.length - 1].ts;
+    const baselineSpanSec = Math.max(1, (lastTs - firstTs) / 1000);
+    const baselineRate = rows.length / baselineSpanSec; // buys/sec over all rows
+    const recentSpanSec = Math.max(1, windowSec);
+    const recentRate = recent.length / recentSpanSec;
+    const accel = baselineRate > 0 ? recentRate / baselineRate : Infinity;
+    if (accel >= HEATING_MIN_RATE_MULT()) {
+      const ent = new Set<string>();
+      const wal = new Set<string>();
+      let sol = 0;
+      let firstPrice: number | null = null;
+      let lastPrice: number | null = null;
+      for (const r of recent) {
+        ent.add(r.entity);
+        wal.add(r.wallet);
+        sol += r.sol;
+        if (r.price != null && Number.isFinite(r.price) && r.price > 0) {
+          if (firstPrice == null) firstPrice = r.price;
+          lastPrice = r.price;
+        }
+      }
+      out.push(
+        makeSignal(
+          'heating',
+          recent[0].wallet,
+          recent[0].ts,
+          recent[recent.length - 1].ts,
+          ent,
+          wal,
+          sol,
+          firstPrice,
+          lastPrice
+        )
+      );
+    }
+  }
+
+  return out;
+}
+
 /** Composite "quality" score for a burst: tier-weighted conviction + size. */
 function qualityScore(b: LiveBurst): number {
   let tierSum = 0;
@@ -952,11 +1177,19 @@ export async function getLiveBursts(opts: {
   minBuyers?: number;
   hours?: number;
   limit?: number;
+  /**
+   * FEED-ONLY: when true, ALSO emit the "Early" signal layer (early-s1/heating)
+   * for tokens that have NOT yet produced a full burst, so the feed can surface
+   * smart money earlier. Default false so the alert/persist callers (which call
+   * getLiveBursts plainly) get the exact classic burst set, unchanged.
+   */
+  includeEarly?: boolean;
 }): Promise<LiveBurstsResult> {
   const windowSec = opts.windowSec ?? envInt('BURST_WINDOW_SEC', 180);
   const minBuyers = opts.minBuyers ?? 3;
   const hours = opts.hours ?? 6;
   const limit = opts.limit ?? 50;
+  const includeEarly = opts.includeEarly ?? false;
   const generatedAt = new Date().toISOString();
   const empty: LiveBurstsResult = {
     generatedAt,
@@ -1032,21 +1265,38 @@ export async function getLiveBursts(opts: {
 
     const bursts: LiveBurst[] = [];
     for (const [mint, rows] of byMint) {
-      bursts.push(
-        ...detectBurstsForRows(
-          mint,
-          rows,
-          windowSec,
-          minBuyers,
-          scoreByWallet,
-          now,
-          'buy',
-          statsByWallet,
-          smartSetSize,
-          entitiesUnverified,
-          fundedByWallet
-        )
+      const mintBursts = detectBurstsForRows(
+        mint,
+        rows,
+        windowSec,
+        minBuyers,
+        scoreByWallet,
+        now,
+        'buy',
+        statsByWallet,
+        smartSetSize,
+        entitiesUnverified,
+        fundedByWallet
       );
+      bursts.push(...mintBursts);
+
+      // EARLY LAYER (feed-only): only when this token did NOT already converge
+      // into a burst — an early signal would be redundant once the burst exists.
+      if (includeEarly && mintBursts.length === 0) {
+        bursts.push(
+          ...detectEarlySignalsForRows(
+            mint,
+            rows,
+            windowSec,
+            scoreByWallet,
+            now,
+            statsByWallet,
+            smartSetSize,
+            entitiesUnverified,
+            fundedByWallet
+          )
+        );
+      }
     }
 
     // 4. Newest first, capped at limit (default ordering; the route may re-rank).
