@@ -29,6 +29,7 @@ import { getSmartCriteria, isSmartWallet } from './curation';
 import { buildClusters } from './clusters';
 import { tierFromScore } from '../format';
 import { readSnapshot, writeSnapshot } from './smart-set-cache';
+import { envInt } from './env';
 
 export interface LiveBurst {
   /**
@@ -296,6 +297,85 @@ const SMART_SET_TTL_MS = 5 * 60 * 1000;
 let smartSetCache: { value: SmartSet; at: number } | null = null;
 let smartSetInflight: Promise<SmartSet> | null = null;
 
+/**
+ * SMART INHERITANCE — follow the trader, not the wallet.
+ *
+ * Top traders rotate to fresh wallets to shake trackers. run-link-tracking
+ * already detects when a PROVEN wallet funds a fresh address (meaningful SOL,
+ * not CEX/system — see wallet-links.ts) and stamps the recipient's
+ * wallet_stats.funded_by. But a fresh wallet has no track record, so the
+ * curation gate never lets it in — and its first buys (the whole edge) go
+ * unsurfaced. This pulls those fresh wallets into the smart set: a wallet
+ * funded by a smart wallet is almost always the same operator, so we treat it
+ * as smart IMMEDIATELY — its buys count, and (via sync-webhook) Helius starts
+ * streaming its trades the moment it's detected.
+ *
+ * Guardrails: only UNVERIFIED recipients inherit (a verified wallet stands on
+ * its own record — real evidence wins over a funding hop); one hop only (funder
+ * must be in the verified-smart set, not itself inherited); per-funder + global
+ * caps stop a disperser from flooding the set; inherited stats are NULL (no
+ * fabricated history) and the score is the funder's, lightly discounted so a
+ * proven wallet always outranks its inherited cousins. Disable with
+ * SMART_INHERIT_FUNDED=0.
+ */
+async function addFundedFreshWallets(
+  supabase: ReturnType<typeof getSupabase>,
+  wallets: Set<string>,
+  scoreByWallet: Map<string, number>,
+  statsByWallet: Map<
+    string,
+    { score: number; roiPct: number | null; winRate: number | null; realizedPnl: number }
+  >
+): Promise<void> {
+  if (process.env.SMART_INHERIT_FUNDED === '0') return;
+
+  const perFunderCap = envInt('SMART_INHERIT_PER_FUNDER', 25);
+  const totalCap = envInt('SMART_INHERIT_MAX', 1500);
+  const SCORE_FACTOR = 0.9; // inherited conviction sits just below the funder's
+
+  // One-hop only: funders are the verified-smart wallets resolved so far.
+  const funders = Array.from(wallets);
+  const perFunder = new Map<string, number>();
+  let added = 0;
+
+  for (const batch of chunk(funders, 200)) {
+    if (added >= totalCap) break;
+    // Fresh (unverified) wallets funded by a smart wallet. Most-active first so
+    // that under a cap we keep the fresh wallets already trading.
+    const { data, error } = await supabase
+      .from('wallet_stats')
+      .select('wallet, funded_by, total_trades')
+      .in('funded_by', batch)
+      .eq('verified', false)
+      .order('total_trades', { ascending: false })
+      .limit(2000);
+    if (error || !data) continue; // tolerate pre-funded_by DB / query error
+
+    for (const r of data as any[]) {
+      if (added >= totalCap) break;
+      const wallet = String(r.wallet);
+      const funder = String(r.funded_by);
+      if (!wallet || wallets.has(wallet)) continue; // already smart on own merit
+      const n = perFunder.get(funder) ?? 0;
+      if (n >= perFunderCap) continue;
+
+      perFunder.set(funder, n + 1);
+      wallets.add(wallet);
+      added++;
+      const inheritedScore = (scoreByWallet.get(funder) ?? 0) * SCORE_FACTOR;
+      if (inheritedScore > 0) scoreByWallet.set(wallet, inheritedScore);
+      // NULL stats = honest "no own track record yet" (fresh wallet); the UI
+      // shows it as smart-by-association rather than a fabricated history.
+      statsByWallet.set(wallet, {
+        score: inheritedScore,
+        roiPct: null,
+        winRate: null,
+        realizedPnl: 0,
+      });
+    }
+  }
+}
+
 async function resolveSmartSet(): Promise<SmartSet> {
   const empty: SmartSet = {
     wallets: new Set(),
@@ -361,6 +441,12 @@ async function resolveSmartSet(): Promise<SmartSet> {
     }
 
     if (wallets.size === 0) return empty;
+
+    // Pull in fresh wallets funded by these smart wallets (same operator on a
+    // new wallet). Done BEFORE clustering so resolveEntityMap groups each fresh
+    // wallet into its funder's entity — preserving anti-sybil burst counts (a
+    // funder + its fresh wallets = ONE entity).
+    await addFundedFreshWallets(supabase, wallets, scoreByWallet, statsByWallet);
 
     const { map: walletToEntity, error: entitiesUnverified } =
       await resolveEntityMap(Array.from(wallets));
