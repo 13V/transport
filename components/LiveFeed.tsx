@@ -245,7 +245,9 @@ function AlertsToggle() {
 }
 
 const MIN_BUYERS: number[] = [3, 4, 5];
-const WINDOW_SEC: number[] = [15, 30, 60];
+// Smart money trickles into a token over minutes, not seconds — a 15-30s window
+// essentially never fires. Default to 3m; keep tighter options for power users.
+const WINDOW_SEC: number[] = [30, 60, 180, 300];
 const MIN_SOL: number[] = [0, 1, 5, 10];
 const POLL_MS = 3 * 1000;
 
@@ -557,7 +559,7 @@ function Header({
               aria-pressed={windowSec === w}
               title={`Max gap between buys in an accumulation streak: ${w}s`}
             >
-              {w}s
+              {w < 120 ? `${w}s` : `${w / 60}m`}
             </button>
           ))}
         </div>
@@ -874,7 +876,7 @@ export default function LiveFeed() {
   // render average ape size in USD. Undefined until known; never fabricated.
   const [solPriceUsd, setSolPriceUsd] = useState<number | undefined>(undefined);
   const [minBuyers, setMinBuyers] = useState<number>(3);
-  const [windowSec, setWindowSec] = useState<number>(30);
+  const [windowSec, setWindowSec] = useState<number>(180);
   const [minSol, setMinSol] = useState<number>(0);
   // Default to a live TAPE: newest cluster first, so fresh bursts lead and stay
   // at the top (the entry animation plays as they arrive). User can still flip to
