@@ -45,7 +45,6 @@ async function gmgnCli(args) {
     timeout: 30000,
     env: { ...process.env },
     maxBuffer: 10 * 1024 * 1024,
-    shell: true,
   });
   const trimmed = (stdout || '').trim();
   const starts = [trimmed.indexOf('{'), trimmed.indexOf('[')].filter((i) => i >= 0);

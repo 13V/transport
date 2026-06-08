@@ -17,14 +17,27 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { analyzeTokenTraders } from '../../../../../lib/indexer/token-traders';
+import { rateLimit, clientIp } from '../../../../../lib/rate-limit';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
+
+// Per-IP cap: each call pulls a coin's full swap history (expensive Helius
+// spend), so keep it tight — a handful per minute covers legitimate browsing.
+const RL_MAX = 15;
 
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ mint: string }> }
 ) {
+  const rl = rateLimit('token-traders', clientIp(request), RL_MAX);
+  if (!rl.ok) {
+    return NextResponse.json(
+      { error: 'Rate limit exceeded' },
+      { status: 429, headers: { 'Retry-After': String(rl.retryAfter) } }
+    );
+  }
+
   const { mint } = await params;
 
   if (!mint || mint.length < 32 || mint.length > 64) {

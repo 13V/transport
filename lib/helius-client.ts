@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { PublicKey } from '@solana/web3.js';
+import { guardHeliusPage, recordSpend } from './indexer/helius-budget';
 
 let heliusApiKey: string | null = null;
 let keyResolved = false;
@@ -36,7 +37,19 @@ function getHeliusEnhancedUrl(): string {
   return `https://api-mainnet.helius-rpc.com/v0`;
 }
 
+// Per-RPC credit estimate for the daily budget guard. The Enhanced API pages
+// cost 100 credits each; a single JSON-RPC call is cheaper, but charging a flat
+// estimate keeps /api/analyze's many small calls bounded by the same global cap
+// as the indexer/swap fetchers (lib/indexer/helius-budget.ts).
+const RPC_CREDIT_EST = 10;
+
 async function heliusRpc(method: string, params: any[] = [], retries = 3): Promise<any> {
+  // Global daily-budget circuit breaker: once the Helius credit cap is reached,
+  // fail closed so /api/analyze can't keep spending. Callers already degrade
+  // gracefully (return []/null) on a thrown error.
+  if (!(await guardHeliusPage(RPC_CREDIT_EST))) {
+    throw new Error('Helius daily credit cap reached');
+  }
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
       const response = await axios.post(getHeliusUrl(), {
@@ -50,6 +63,7 @@ async function heliusRpc(method: string, params: any[] = [], retries = 3): Promi
         throw new Error(response.data.error.message || 'RPC error');
       }
 
+      await recordSpend(RPC_CREDIT_EST); // call succeeded -> record the spend
       return response.data.result;
     } catch (error) {
       if (attempt === retries - 1) {

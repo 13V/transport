@@ -19,9 +19,14 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { discoverSmartWallets } from '../../../../lib/indexer/discover';
+import { rateLimit, clientIp } from '../../../../lib/rate-limit';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
+
+// Per-IP cap: each call scans live chain data (expensive Helius spend, ~30-60s),
+// so keep it tight — a handful per minute is ample for legitimate manual use.
+const RL_MAX = 10;
 
 function csvEscape(v: unknown): string {
   const s = String(v ?? '');
@@ -29,6 +34,14 @@ function csvEscape(v: unknown): string {
 }
 
 export async function GET(request: NextRequest) {
+  const rl = rateLimit('sm-discover', clientIp(request), RL_MAX);
+  if (!rl.ok) {
+    return NextResponse.json(
+      { error: 'Rate limit exceeded' },
+      { status: 429, headers: { 'Retry-After': String(rl.retryAfter) } }
+    );
+  }
+
   if (!process.env.HELIUS_API_KEY) {
     return NextResponse.json(
       { error: 'HELIUS_API_KEY missing — cannot scan chain data' },

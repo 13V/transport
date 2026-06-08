@@ -23,8 +23,8 @@ export const dynamic = 'force-dynamic';
 /**
  * Auth — FAILS CLOSED. Returns true ONLY when the request carries a valid
  * CRON_SECRET. Delegates to the shared `cronAuthFails` helper (which trims the
- * env secret and accepts `Bearer`/raw Authorization headers or `?secret=` /
- * `?cron_secret=` query params, all constant-time). Note `cronAuthFails` returns
+ * env secret and accepts `Bearer`/raw Authorization headers, constant-time).
+ * Note `cronAuthFails` returns
  * true when auth FAILS, the opposite of this helper, so we negate it. An unset
  * secret means NO ONE is authorized — this endpoint writes wallet stats, so an
  * unauthenticated caller could inject fabricated numbers.
@@ -87,8 +87,9 @@ export async function POST(request: NextRequest) {
   // Lenient pre-filter — Helius does the real gate, this just decides who's worth
   // the expensive verify. Profitable + a bit of breadth.
   const minProfit = num('SCREEN_MIN_PROFIT_USD', 0);
-  // Aligned with curation's minTokens (3): the cheap pre-screen must not be
-  // STRICTER than the final gate, or it would discard wallets the gate would pass.
+  // Intentionally LOOSER than curation's minTokens (default 10): the cheap
+  // pre-screen must not be STRICTER than the final gate, or it would discard
+  // wallets the gate would pass. The Helius verify step applies the real floor.
   const minTokens = num('SCREEN_MIN_TOKENS', 3);
 
   const now = new Date().toISOString();

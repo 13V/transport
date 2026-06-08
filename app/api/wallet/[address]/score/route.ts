@@ -13,14 +13,27 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { scoreWalletAllTime } from '../../../../../lib/indexer/wallet-scorer';
+import { rateLimit, clientIp } from '../../../../../lib/rate-limit';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
+
+// Per-IP cap: each call pulls full wallet swap history (expensive Helius spend),
+// so keep it tight — a handful per minute is ample for legitimate inspection.
+const RL_MAX = 15;
 
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ address: string }> }
 ) {
+  const rl = rateLimit('wallet-score', clientIp(request), RL_MAX);
+  if (!rl.ok) {
+    return NextResponse.json(
+      { error: 'Rate limit exceeded' },
+      { status: 429, headers: { 'Retry-After': String(rl.retryAfter) } }
+    );
+  }
+
   const { address } = await params;
 
   // Base58-ish sanity check — Solana addresses are 32..44 chars.
