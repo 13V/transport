@@ -20,7 +20,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabase, isSupabaseConfigured } from '../../../../lib/supabase-client';
-import { getSmartCriteria, isSmartWallet } from '../../../../lib/indexer/curation';
+import { getBroadSmartCriteria, isSmartWallet } from '../../../../lib/indexer/curation';
 import { tierFromScore } from '../../../../lib/format';
 import { fetchAllRows } from '../../../../lib/db-paginate';
 
@@ -119,7 +119,9 @@ export async function GET(request: NextRequest) {
   const tierFilter = ['S', 'A', 'B', 'C'].includes(tierRaw) ? tierRaw : null;
 
   const supabase = getSupabase();
-  const criteria = getSmartCriteria();
+  // Use the BROAD tier gate so the leaderboard matches /api/status and the
+  // tiered-gate inventory (the strict set is still identifiable via smartTier).
+  const criteria = getBroadSmartCriteria();
   const now = Date.now();
 
   // Pull the top-ranked wallets with every field curation needs. To keep the
