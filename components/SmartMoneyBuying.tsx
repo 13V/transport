@@ -7,6 +7,7 @@ import * as f from '@/lib/format';
 import {
   TokenMark, Sparkline, EmptyState, ErrorState, SkLine, TradeLinks, CHART_COLORS,
 } from '@/components/ui';
+import CopyTradeButton from '@/components/CopyTradeButton';
 
 interface SmartBuyToken {
   mint: string;
@@ -511,9 +512,17 @@ export default function SmartMoneyBuying() {
           )}
         </div>
 
-        {/* Right column: one-tap Ape */}
+        {/* Right column: one-tap Copy/Ape (non-custodial) + the link chips */}
         <div className="bf-right">
-          <div className="bf-actions">
+          <div className="bf-actions" style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            <CopyTradeButton
+              mint={t.mint}
+              sourceWallet={t.sampleBuyers?.[0]}
+              pairAddress={t.pairAddress ?? undefined}
+              size="xs"
+              preferred={prefTerminal ?? undefined}
+              label="Copy"
+            />
             <TradeLinks
               mint={t.mint}
               size="xs"

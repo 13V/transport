@@ -11,6 +11,7 @@ import {
   SkTable, SkCard, CHART_COLORS, Sparkline,
 } from '@/components/ui';
 import { tokenLinks } from '@/lib/trade-links';
+import CopyTradeButton from '@/components/CopyTradeButton';
 
 interface BuyerStat {
   addr: string;
@@ -2107,7 +2108,15 @@ export default function LiveFeed() {
             )}
           </div>
 
-          <div className="bf-actions" onClick={(e) => e.stopPropagation()}>
+          <div className="bf-actions" onClick={(e) => e.stopPropagation()} style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            <CopyTradeButton
+              mint={b.mint}
+              sourceWallet={b.leadBuyer ?? b.sampleBuyers?.[0]}
+              pairAddress={b.pairAddress ?? undefined}
+              size="xs"
+              preferred={prefTerminal ?? undefined}
+              label="Copy"
+            />
             {apeLink && (
               <a
                 className={`btn primary sm trade-primary bf-ape${isLive ? '' : ' ghost'}`}

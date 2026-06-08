@@ -7,6 +7,7 @@ import { TokenInsiderReport } from '@/lib/types';
 import ReportView from '@/components/ReportView';
 import TokenSmartHolders from '@/components/TokenSmartHolders';
 import { ErrorState, TradeLinks } from '@/components/ui';
+import CopyTradeButton from '@/components/CopyTradeButton';
 
 /**
  * Deep insider analysis (creator / clusters / snipers) is heavy and not always
@@ -76,7 +77,12 @@ export default function TokenPage() {
         <button className="btn ghost sm" onClick={() => router.back()}>
           <ChevronLeft size={15} /> Back
         </button>
-        {mint && <TradeLinks mint={mint} />}
+        {mint && (
+          <div className="row gap-10 wrap" style={{ alignItems: 'center' }}>
+            <CopyTradeButton mint={mint} label="Copy" />
+            <TradeLinks mint={mint} />
+          </div>
+        )}
       </div>
 
       {/* Primary: smart money in this coin (self-contained, own states) */}
