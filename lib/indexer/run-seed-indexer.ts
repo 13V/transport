@@ -82,29 +82,44 @@ async function getCandidateWallets(
     return arr.slice(0, limit);
   };
 
+  // Skip wallets parked by scan-defer: ones whose history exceeds the scan depth
+  // come back truncated every run and can never verify, yet sort to the top of
+  // the most-active backlog and burn the deep-scan budget indefinitely. Re-pick
+  // them only after their cooldown lapses. Probe the column once so the drain
+  // still works on a pre-0019 DB (filter simply not applied).
+  const nowIso = new Date().toISOString();
+  const deferProbe = await supabase.from('wallet_stats').select('scan_deferred_until').limit(1);
+  const hasDefer = !deferProbe.error;
+  const notDeferred = <T extends { or: (f: string) => T }>(q: T): T =>
+    hasDefer ? q.or(`scan_deferred_until.is.null,scan_deferred_until.lt.${nowIso}`) : q;
+
   // Tier 1: wallets the cheap GMGN screen flagged as promising but not yet
   // Helius-verified. Spending the expensive deep-scan here first is the whole
   // point of the screen — verify likely winners, not every captured wallet.
-  const promising = await supabase
-    .from('wallet_stats')
-    .select('wallet, total_trades')
-    .eq('verified', false)
-    .eq('screen_pass', true)
-    .order('total_trades', { ascending: false })
-    .limit(pool);
+  const promising = await notDeferred(
+    supabase
+      .from('wallet_stats')
+      .select('wallet, total_trades')
+      .eq('verified', false)
+      .eq('screen_pass', true)
+      .order('total_trades', { ascending: false })
+      .limit(pool)
+  );
   if (!promising.error && promising.data && promising.data.length > 0) {
     const picked = pick(promising.data as any[]);
     if (picked.length > 0) return picked;
   }
 
   // Tier 2: general unverified backlog (most-active first).
-  const backlog = await supabase
-    .from('wallet_stats')
-    .select('wallet, total_trades')
-    .eq('verified', false)
-    .gte('total_trades', floor)
-    .order('total_trades', { ascending: false })
-    .limit(pool);
+  const backlog = await notDeferred(
+    supabase
+      .from('wallet_stats')
+      .select('wallet, total_trades')
+      .eq('verified', false)
+      .gte('total_trades', floor)
+      .order('total_trades', { ascending: false })
+      .limit(pool)
+  );
 
   if (!backlog.error && backlog.data && backlog.data.length > 0) {
     const picked = pick(backlog.data as any[]);
@@ -115,13 +130,15 @@ async function getCandidateWallets(
   // score. Keep verified=false so a drained backlog returns [] (lets the
   // workflow's walletsProcessed==0 early-stop fire) rather than re-scanning
   // already-verified wallets forever.
-  const { data, error } = await supabase
-    .from('wallet_stats')
-    .select('wallet, total_trades')
-    .eq('verified', false)
-    .gte('total_trades', 2)
-    .order('score', { ascending: false })
-    .limit(pool);
+  const { data, error } = await notDeferred(
+    supabase
+      .from('wallet_stats')
+      .select('wallet, total_trades')
+      .eq('verified', false)
+      .gte('total_trades', 2)
+      .order('score', { ascending: false })
+      .limit(pool)
+  );
   if (error || !data) {
     console.error('[SEED] candidate fetch failed:', error?.message);
     return [];
@@ -306,6 +323,23 @@ export async function runSeedIndexer(opts: SeedIndexerOptions = {}): Promise<See
     // the rest). processed=false marks it a skip, not a real scan.
     if (!complete) {
       res.processed = false;
+      // Distinguish a TRUNCATED scan (history exceeds the scan depth → can never
+      // complete at this depth) from a transient cut (budget cap / fetch error,
+      // which returns fewer than maxTxs rows and should retry on the next run).
+      // Park only the truncated ones for a cooldown so they stop hogging the
+      // most-active-first backlog and burning deep-scan budget every run. Best-
+      // effort + tolerant of a pre-0019 DB (column may not exist yet).
+      if (history.length >= maxTxsPerWallet) {
+        const deferMs = envInt('SEED_DEFER_HOURS', 168) * 3_600_000; // default 7d
+        const until = new Date(Date.now() + deferMs).toISOString();
+        const { error: deferErr } = await supabase
+          .from('wallet_stats')
+          .update({ scan_deferred_until: until })
+          .eq('wallet', wallet);
+        if (deferErr && !/scan_deferred_until|column/i.test(deferErr.message ?? '')) {
+          console.error(`[SEED] defer stamp failed for ${wallet}:`, deferErr.message);
+        }
+      }
       return res;
     }
 
