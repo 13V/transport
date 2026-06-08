@@ -1305,6 +1305,17 @@ pre.code .c { color: var(--text-4); }
   background: var(--neg-soft); color: var(--neg);
 }
 
+/* SMART-INHERITANCE chip ("🌱 fresh"): a no-history wallet that is smart ONLY
+   because a tracked smart wallet funded it (likely the same trader on a new
+   wallet). Subtle green, same dense pill shape as the verdict/flow chips. */
+.bf-fresh {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 19px; padding: 0 8px; border-radius: var(--r-sm);
+  font-size: 10px; font-weight: 800; letter-spacing: .03em; white-space: nowrap;
+  cursor: help;
+  background: var(--pos-soft); color: var(--pos); border: 1px solid var(--pos-ring);
+}
+
 /* Conviction one-liner ("4 smart · 🥇 S-lead · indep"); detail in title tooltip. */
 .bf-conv { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-3); cursor: help; }
 .bf-conv-seg { display: inline-flex; align-items: center; gap: 6px; }

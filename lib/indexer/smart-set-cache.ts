@@ -46,6 +46,10 @@ export const SNAPSHOT_TTL_MS = 5 * 60 * 1000;
  *  - st: [wallet, roiPct, winRate, realizedPnl] tuples — SmartSet.statsByWallet.
  *        `score` is intentionally NOT duplicated here; it is re-attached from
  *        `s` (scoreByWallet) on read, since stats.score === scoreByWallet value.
+ *  - fb: [inheritedWallet, funderWallet] pairs — SmartSet.fundedByWallet (smart
+ *        inheritance: a fresh wallet -> the verified smart wallet that funded it).
+ *        OPTIONAL: older blobs written before this field are tolerated (absent ->
+ *        empty map), so no inheritance badges render until the next snapshot.
  * `at` is the write epoch-ms used for the TTL freshness check.
  */
 interface SnapshotBlob {
@@ -54,6 +58,7 @@ interface SnapshotBlob {
   e: [string, string][];
   s: [string, number][];
   st: [string, number | null, number | null, number][];
+  fb?: [string, string][];
 }
 
 /**
@@ -126,7 +131,17 @@ export async function readSnapshot(): Promise<SmartSet | null> {
       });
     }
 
-    return { wallets, walletToEntity, scoreByWallet, statsByWallet };
+    // SMART INHERITANCE map (inherited wallet -> funder). Tolerate older blobs
+    // that predate this field: absent `fb` simply yields an empty map (no badges).
+    const fundedByWallet = new Map<string, string>();
+    for (const pair of Array.isArray(blob.fb) ? blob.fb : []) {
+      const [w, funder] = pair as [string, string];
+      if (typeof w === 'string' && w && typeof funder === 'string' && funder) {
+        fundedByWallet.set(w, funder);
+      }
+    }
+
+    return { wallets, walletToEntity, scoreByWallet, statsByWallet, fundedByWallet };
   } catch {
     return null; // any failure -> caller falls back to live resolve
   }
@@ -157,6 +172,8 @@ export async function writeSnapshot(set: SmartSet): Promise<void> {
           number
         ]
       ),
+      // Smart inheritance map; omitted when there are no inherited wallets.
+      fb: set.fundedByWallet ? Array.from(set.fundedByWallet.entries()) : [],
     };
 
     const supabase = getSupabase();

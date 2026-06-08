@@ -44,6 +44,10 @@ interface Burst {
   finalized?: boolean;
   // Wave 2 enrichment — all optional; render only when present, never fabricate.
   buyerStats?: BuyerStat[] | null;       // aligned to sampleBuyers
+  // Smart inheritance — fresh wallets in the smart set ONLY because a proven
+  // smart wallet funded them. Optional: absent (older snapshot) → no badge.
+  inheritedBuyers?: number | null;       // distinct funded-fresh wallets in burst
+  sampleFunded?: (string | null)[] | null; // aligned to sampleBuyers: funder addr or null
   leadBuyer?: string | null;             // wallet that fired first
   leadTier?: string | null;
   smartSetSize?: number | null;          // total known smart wallets (coverage)
@@ -1888,6 +1892,23 @@ export default function LiveFeed() {
       })
       .join('\n');
 
+    // --- SMART INHERITANCE — fresh wallets smart only by funding (same trader on
+    //     a new wallet). Show a small "🌱 fresh" chip when this burst includes any
+    //     inherited wallet; name a funder when a sample buyer carries one. ---
+    const inheritedCount = b.inheritedBuyers ?? 0;
+    const sampleFunded = b.sampleFunded ?? [];
+    const firstFunder = sampleFunded.find((fn): fn is string => !!fn) ?? null;
+    const hasInherited = inheritedCount > 0;
+    const freshLabel = firstFunder
+      ? `🌱 funded by ${f.short(firstFunder, 4, 4)}`
+      : '🌱 fresh wallet';
+    const freshTitle =
+      `${inheritedCount} new wallet${inheritedCount === 1 ? '' : 's'} in this burst ` +
+      `${inheritedCount === 1 ? 'is' : 'are'} smart only because a tracked smart wallet funded ` +
+      `${inheritedCount === 1 ? 'it' : 'them'} — likely the same trader on a new wallet. ` +
+      `No own ROI/win-rate history yet.` +
+      (firstFunder ? `\nFunder: ${firstFunder}` : '');
+
     const isSelected = rowIndex === selIdx || (selMint != null && selMint === b.mint && !isChild);
     const earlierCount = !isChild ? group.others.length : 0;
     const expanded = expandedGroups.has(group.primary.mint);
@@ -2037,6 +2058,14 @@ export default function LiveFeed() {
             {isTrap && (
               <span className="bf-trap" title="Many wallets map to few entities — likely one actor faking a crowd">
                 ⚠ TRAP {b.buyerWallets}w/{b.buyers}e
+              </span>
+            )}
+
+            {/* SMART INHERITANCE — a fresh wallet funded by a tracked smart
+                wallet (same trader, new wallet). Only when present. */}
+            {hasInherited && (
+              <span className="bf-fresh" title={freshTitle}>
+                {freshLabel}
               </span>
             )}
 

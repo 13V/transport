@@ -81,6 +81,18 @@ export interface LiveBurst {
    * verified historical stats. null fields mean the stat wasn't available.
    */
   buyerStats?: { addr: string; tier: string | null; roiPct: number | null; winRate: number | null }[];
+  /**
+   * SMART INHERITANCE display fields (optional; absent when the SmartSet has no
+   * fundedByWallet map, e.g. an older snapshot — render nothing then).
+   *  - inheritedBuyers: how many DISTINCT inherited (funded-fresh) wallets are in
+   *    this streak. >0 means the burst includes at least one new wallet that is
+   *    smart only because a proven smart wallet funded it.
+   *  - sampleFunded: per-sampleBuyers entry, ALIGNED to sampleBuyers order. When
+   *    a sample buyer is inherited, carries its funder's short address; otherwise
+   *    null. Lets the UI badge exactly the rows that are inherited.
+   */
+  inheritedBuyers?: number;
+  sampleFunded?: (string | null)[];
   /** Wallet of the FIRST (earliest) trade in the accumulation streak. */
   leadBuyer?: string;
   /** Tier of the lead buyer's wallet (tierFromScore), or null. */
@@ -162,6 +174,15 @@ export interface SmartSet {
    * curation gate, just retained). Used to surface buyer ROI/win-rate on bursts.
    */
   statsByWallet: Map<string, { score: number; roiPct: number | null; winRate: number | null; realizedPnl: number }>;
+  /**
+   * SMART INHERITANCE map: inherited (fresh) wallet -> the verified smart wallet
+   * that funded it. ONLY wallets pulled in by addFundedFreshWallets appear here;
+   * verified wallets (in the set on their own record) are deliberately absent.
+   * Lets the UI explain WHY a no-history wallet is flagged smart ("new wallet
+   * funded by a tracked smart wallet — likely the same trader"). Optional: an
+   * older snapshot rebuilt without it simply yields no inheritance badges.
+   */
+  fundedByWallet?: Map<string, string>;
   /**
    * FAIL-CLOSED flag (signal H2): true when the wallet_links cluster resolution
    * ERRORED, so the wallet→entity map could NOT be trusted to collapse one
@@ -325,7 +346,8 @@ async function addFundedFreshWallets(
   statsByWallet: Map<
     string,
     { score: number; roiPct: number | null; winRate: number | null; realizedPnl: number }
-  >
+  >,
+  fundedByWallet: Map<string, string>
 ): Promise<void> {
   if (process.env.SMART_INHERIT_FUNDED === '0') return;
 
@@ -361,6 +383,9 @@ async function addFundedFreshWallets(
 
       perFunder.set(funder, n + 1);
       wallets.add(wallet);
+      // Record WHY this fresh wallet is smart: it was funded by `funder` (a
+      // verified smart wallet). Only inherited wallets enter this map.
+      fundedByWallet.set(wallet, funder);
       added++;
       const inheritedScore = (scoreByWallet.get(funder) ?? 0) * SCORE_FACTOR;
       if (inheritedScore > 0) scoreByWallet.set(wallet, inheritedScore);
@@ -382,6 +407,7 @@ async function resolveSmartSet(): Promise<SmartSet> {
     walletToEntity: new Map(),
     scoreByWallet: new Map(),
     statsByWallet: new Map(),
+    fundedByWallet: new Map(),
     entitiesUnverified: false,
   };
   if (!isSupabaseConfigured()) return empty;
@@ -446,7 +472,8 @@ async function resolveSmartSet(): Promise<SmartSet> {
     // new wallet). Done BEFORE clustering so resolveEntityMap groups each fresh
     // wallet into its funder's entity — preserving anti-sybil burst counts (a
     // funder + its fresh wallets = ONE entity).
-    await addFundedFreshWallets(supabase, wallets, scoreByWallet, statsByWallet);
+    const fundedByWallet = new Map<string, string>();
+    await addFundedFreshWallets(supabase, wallets, scoreByWallet, statsByWallet, fundedByWallet);
 
     const { map: walletToEntity, error: entitiesUnverified } =
       await resolveEntityMap(Array.from(wallets));
@@ -455,6 +482,7 @@ async function resolveSmartSet(): Promise<SmartSet> {
       walletToEntity,
       scoreByWallet,
       statsByWallet,
+      fundedByWallet,
       entitiesUnverified,
     };
   } catch {
@@ -569,7 +597,13 @@ function detectBurstsForRows(
    * wallets are untrustworthy. We emit NOTHING for these rows rather than
    * over-report buyer/entity conviction from one actor's split wallets.
    */
-  entitiesUnverified?: boolean
+  entitiesUnverified?: boolean,
+  /**
+   * SMART INHERITANCE map (inherited wallet -> funder). Optional: when absent
+   * (e.g. an older snapshot) no inheritance fields are emitted. Used to flag
+   * fresh wallets that are smart only because a proven smart wallet funded them.
+   */
+  fundedByWallet?: Map<string, string>
 ): LiveBurst[] {
   // FAIL CLOSED: if cluster verification failed we cannot trust entity counts,
   // so do not emit any bursts (prefer under-reporting to inflated conviction).
@@ -615,6 +649,17 @@ function detectBurstsForRows(
   const flush = (s: Streak): void => {
     if (s.entities.size < minBuyers) return;
     const tiers = s.sampleBuyers.map(tierFor);
+    // SMART INHERITANCE: count distinct inherited wallets in the whole streak and
+    // build a per-sampleBuyer funder list (null for non-inherited). Only computed
+    // when a fundedByWallet map is supplied (absent on older snapshots).
+    let inheritedBuyers: number | undefined;
+    let sampleFunded: (string | null)[] | undefined;
+    if (fundedByWallet && fundedByWallet.size > 0) {
+      let n = 0;
+      for (const w of s.wallets) if (fundedByWallet.has(w)) n++;
+      inheritedBuyers = n;
+      sampleFunded = s.sampleBuyers.map((w) => fundedByWallet.get(w) ?? null);
+    }
     const buyerStats = s.sampleBuyers.map((w) => {
       const st = statsByWallet?.get(w);
       return {
@@ -642,6 +687,8 @@ function detectBurstsForRows(
       side,
       tiers,
       buyerStats,
+      inheritedBuyers,
+      sampleFunded,
       leadBuyer: s.leadBuyer,
       leadTier: tierFor(s.leadBuyer),
       smartSetSize,
@@ -722,7 +769,7 @@ export async function getLiveBursts(opts: {
     const now = Date.now();
 
     // 1. Resolve the smart-wallet set (memoized: wallets + entity map + scores).
-    const { wallets, walletToEntity, scoreByWallet, statsByWallet, entitiesUnverified } =
+    const { wallets, walletToEntity, scoreByWallet, statsByWallet, fundedByWallet, entitiesUnverified } =
       await getSmartWalletSet();
     const smartWallets = Array.from(wallets);
     if (smartWallets.length === 0) return empty;
@@ -792,7 +839,8 @@ export async function getLiveBursts(opts: {
           'buy',
           statsByWallet,
           smartSetSize,
-          entitiesUnverified
+          entitiesUnverified,
+          fundedByWallet
         )
       );
     }
@@ -879,7 +927,7 @@ export async function detectBurstsForMintsBothSides(
     const supabase = getSupabase();
     const now = Date.now();
 
-    const { wallets, walletToEntity, scoreByWallet, statsByWallet, entitiesUnverified } =
+    const { wallets, walletToEntity, scoreByWallet, statsByWallet, fundedByWallet, entitiesUnverified } =
       await getSmartWalletSet();
     if (wallets.size === 0) return empty;
     // FAIL CLOSED: cluster verification failed -> don't emit inflated bursts.
@@ -949,7 +997,8 @@ export async function detectBurstsForMintsBothSides(
             side,
             statsByWallet,
             smartSetSize,
-            entitiesUnverified
+            entitiesUnverified,
+            fundedByWallet
           )
         );
       }
