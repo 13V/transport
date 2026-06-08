@@ -20,7 +20,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabase, isSupabaseConfigured } from '../../../../lib/supabase-client';
-import { getBroadSmartCriteria, isSmartWallet } from '../../../../lib/indexer/curation';
+import { getBroadSmartCriteria, isSmartWallet, smartTier } from '../../../../lib/indexer/curation';
 import { tierFromScore } from '../../../../lib/format';
 import { fetchAllRows } from '../../../../lib/db-paginate';
 
@@ -49,7 +49,11 @@ const MIN_SCAN = 200;
 interface SmartWalletRow {
   address: string;
   score: number;
+  // Score band (tierFromScore: S/A/B/C from `score`). NOT the smart-gate tier.
   tier: string | null;
+  // Smart-gate tier: 'S' = clears the strict elite gate, 'A' = broad-only, null
+  // = not smart under either. Lets clients distinguish strict-vs-broad wallets.
+  smartTier: 'S' | 'A' | null;
   pnl: number;
   roiPct: number | null;
   investedSol: number | null;
@@ -397,6 +401,22 @@ export async function GET(request: NextRequest) {
     address: r.wallet,
     score: Number(r.score),
     tier: tierFromScore(Number(r.score)),
+    // Explicit smart-gate tier (S strict / A broad-only / null), computed from
+    // the SAME stats the gate uses, so clients can tell elite from broad wallets.
+    smartTier: smartTier(
+      {
+        realizedPnl: Number(r.realized_pnl),
+        roiPct: r.roi_pct == null ? null : Number(r.roi_pct),
+        investedSol: r.invested_sol == null ? null : Number(r.invested_sol),
+        winRate: Number(r.win_rate),
+        consistency: r.consistency == null ? null : Number(r.consistency),
+        totalTrades: Number(r.total_trades),
+        tokensTraded: Number(r.tokens_traded),
+        lastTradeAt: r.last_trade_at,
+        seeded: Boolean(r.seeded),
+      },
+      now
+    ),
     pnl: Number(r.realized_pnl),
     roiPct: r.roi_pct == null ? null : Number(r.roi_pct),
     investedSol: r.invested_sol == null ? null : Number(r.invested_sol),

@@ -110,6 +110,36 @@ async function getCandidateWallets(
     if (picked.length > 0) return picked;
   }
 
+  // Tier 1.5: funding-graph siblings that have since recorded trades. The
+  // funding-graph enqueues ~hundreds of sibling stubs/run ({wallet, funded_by},
+  // zero trades). Once such a sibling actually trades it deserves a verify ahead
+  // of the generic most-active backlog, so funding-graph discovery converts into
+  // verified smart wallets instead of sinking under busier unrelated wallets.
+  // Kept modest (requires >=1 trade so we don't burn deep-scan budget on the
+  // zero-trade stubs) and column-safe: if `funded_by` isn't present yet the query
+  // errors and we simply fall through to the existing backlog tier below.
+  // Build directly (not via the notDeferred<T> generic): the extra `.not()`
+  // filter combined with that generic pushes TS's type instantiation past its
+  // depth limit. We inline the same scan-defer `.or(...)` clause instead.
+  let siblingsQuery = supabase
+    .from('wallet_stats')
+    .select('wallet, total_trades')
+    .eq('verified', false)
+    .not('funded_by', 'is', null)
+    .gte('total_trades', 1);
+  if (hasDefer) {
+    siblingsQuery = siblingsQuery.or(
+      `scan_deferred_until.is.null,scan_deferred_until.lt.${nowIso}`
+    );
+  }
+  const siblings = await siblingsQuery
+    .order('total_trades', { ascending: false })
+    .limit(pool);
+  if (!siblings.error && siblings.data && siblings.data.length > 0) {
+    const picked = pick(siblings.data as any[]);
+    if (picked.length > 0) return picked;
+  }
+
   // Tier 2: general unverified backlog (most-active first).
   const backlog = await notDeferred(
     supabase

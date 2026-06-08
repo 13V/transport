@@ -20,6 +20,8 @@ import { getSupabase, isSupabaseConfigured } from '../supabase-client';
 import { fetchTokenPricesSol } from '../prices/price-oracle';
 import { getBroadSmartCriteria, isSmartWallet } from './curation';
 import { buildClusters } from './clusters';
+import { fetchAllRows } from '../db-paginate';
+import { envInt } from './env';
 
 export interface SmartBuyToken {
   mint: string;
@@ -154,10 +156,19 @@ export async function getSmartMoneyBuys(
     // full curation gate in JS.
     const statCols =
       'wallet, realized_pnl, roi_pct, invested_sol, win_rate, total_trades, tokens_traded, last_trade_at, seeded';
-    const statRead = await supabase
-      .from('wallet_stats')
-      .select(statCols)
-      .eq('verified', true);
+    // PostgREST caps a single response at ~1000 rows, so a bare select silently
+    // clamps the verified set once it grows past that — starving the buy flow of
+    // the full broadened smart set. Page through with .range() (stable .order so
+    // pagination is deterministic) up to a sane cap.
+    const statRead = await fetchAllRows(
+      () =>
+        supabase
+          .from('wallet_stats')
+          .select(statCols)
+          .eq('verified', true)
+          .order('score', { ascending: false }),
+      { cap: envInt('SMART_SET_MAX', 5000) }
+    );
 
     // If verified/roi_pct columns are missing (or any other query error),
     // degrade to an empty result rather than crashing the endpoint.

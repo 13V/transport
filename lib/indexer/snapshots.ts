@@ -30,9 +30,15 @@
 
 import { getSupabase, isSupabaseConfigured } from '../supabase-client';
 import { getBroadSmartCriteria, isSmartWallet } from './curation';
+import { fetchAllRows } from '../db-paginate';
+import { envInt } from './env';
 
-/** How many top-scored verified wallets to consider before curation. */
-const READ_LIMIT = 500;
+// Upper bound on verified wallets paged through before curation. The old fixed
+// top-500 truncated history for the ~1500 A-tier wallets below it once the smart
+// set grew to ~2000; paginate via fetchAllRows up to this cap so all smart
+// wallets get snapshot rows. PostgREST caps a single response at ~1000 rows, so
+// this MUST be paged with .range() rather than a bare .limit().
+const READ_CAP = envInt('SMART_SET_MAX', 5000);
 
 /** UTC day string (YYYY-MM-DD) for a given instant. */
 function dayString(d: Date = new Date()): string {
@@ -59,14 +65,17 @@ export async function snapshotLeaderboard(): Promise<{ captured: number }> {
 
   const supabase = getSupabase();
 
-  const { data, error } = await supabase
-    .from('wallet_stats')
-    .select(
-      'wallet, score, roi_pct, realized_pnl, win_rate, total_trades, tokens_traded, last_trade_at, verified, seeded, invested_sol'
-    )
-    .eq('verified', true)
-    .order('score', { ascending: false })
-    .limit(READ_LIMIT);
+  const { data, error } = await fetchAllRows(
+    () =>
+      supabase
+        .from('wallet_stats')
+        .select(
+          'wallet, score, roi_pct, realized_pnl, win_rate, total_trades, tokens_traded, last_trade_at, verified, seeded, invested_sol'
+        )
+        .eq('verified', true)
+        .order('score', { ascending: false }),
+    { cap: READ_CAP }
+  );
 
   if (error || !data) {
     console.error('[SNAPSHOT] Failed to read wallet_stats:', error?.message);

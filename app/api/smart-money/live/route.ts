@@ -6,7 +6,7 @@
  * counterpart to /api/smart-money/buying: "smart money just piled into X."
  *
  *   GET /api/smart-money/live                  → JSON { generatedAt, windowSec, minBuyers, count, nextCursor, bursts[] }
- *   GET /api/smart-money/live?windowSec=30     → burst window in seconds (clamped 5..300)
+ *   GET /api/smart-money/live?windowSec=180    → burst window in seconds (default BURST_WINDOW_SEC=180; clamped 5..300)
  *   GET /api/smart-money/live?minBuyers=3      → distinct entities required to fire (clamped 2..20)
  *   GET /api/smart-money/live?hours=6          → look-back window (clamped 1..48)
  *   GET /api/smart-money/live?limit=50         → cap bursts returned (clamped 1..200)
@@ -22,6 +22,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { buildLiveFeed } from '../../../../lib/indexer/live-feed';
 import { rateLimit, clientIp } from '../../../../lib/rate-limit';
+import { envInt } from '../../../../lib/indexer/env';
 
 export const dynamic = 'force-dynamic';
 
@@ -62,7 +63,10 @@ export async function GET(request: NextRequest) {
   }
 
   const { searchParams } = request.nextUrl;
-  const windowSec = clampInt(searchParams.get('windowSec'), 30, 5, 300);
+  // Default to the wider, env-configurable burst window (smart money trickles in
+  // over minutes, so 30s essentially never fired); still clamped to 5..300, so an
+  // explicit ?windowSec= override is honored within that range.
+  const windowSec = clampInt(searchParams.get('windowSec'), envInt('BURST_WINDOW_SEC', 180), 5, 300);
   const minBuyers = clampInt(searchParams.get('minBuyers'), 3, 2, 20);
   const hours = clampInt(searchParams.get('hours'), 6, 1, 48);
   const limit = clampInt(searchParams.get('limit'), 50, 1, 200);
