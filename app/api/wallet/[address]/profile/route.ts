@@ -109,6 +109,10 @@ export async function GET(
         seeded: sr.seeded ?? null,
         fundedBy: sr.funded_by ?? null,
         lastTradeAt: sr.last_trade_at ?? null,
+        // GMGN-sourced live SOL balance (drained-winner signal). null until the
+        // wallet has been screened on a 0023+ DB.
+        solBalance: sr.sol_balance != null ? Number(sr.sol_balance) : null,
+        balanceCheckedAt: sr.balance_checked_at ?? null,
       }
     : null;
 
