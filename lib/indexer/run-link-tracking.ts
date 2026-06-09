@@ -10,6 +10,7 @@
 
 import { getSupabase, isSupabaseConfigured } from '../supabase-client';
 import { fetchSolDistributions } from './wallet-links';
+import { fetchSolBalances } from './wallet-balances';
 import { envInt } from './env';
 
 export interface LinkTrackingResult {
@@ -42,6 +43,10 @@ export async function runLinkTracking(opts: LinkTrackingOptions = {}): Promise<L
   const maxTxsPerWallet = opts.maxTxsPerWallet ?? envInt('LINK_MAX_TXS', 500);
   const maxLinksPerWallet = opts.maxLinksPerWallet ?? envInt('LINK_MAX_TARGETS', 100);
   const timeBudgetMs = opts.timeBudgetMs ?? envInt('LINK_TIME_BUDGET_MS', 55_000);
+  // Drained-winner prioritization: a verified winner whose balance is below this
+  // (profits extracted / likely moved wallets) jumps the link-scan queue.
+  const drainedSol = Number(process.env.LINK_DRAINED_SOL ?? 1.0);
+  const balanceRefresh = envInt('LINK_BALANCE_REFRESH', 400); // wallets to refresh balances for per run
 
   const blank = (error?: string): LinkTrackingResult => ({
     ok: !error,
@@ -63,18 +68,69 @@ export async function runLinkTracking(opts: LinkTrackingOptions = {}): Promise<L
   // pre-0022 DB still works (falls back to roi_pct order). This is why a high-ROI
   // wallet that moved its funds to a fresh wallet could sit with no funding edges:
   // the tracker never reached it.
+  // Probe optional columns so a pre-0022/0023 DB still works (rotation / drained
+  // prioritization simply not applied).
   const hasLinkTs = !(await supabase.from('wallet_stats').select('links_checked_at').limit(1)).error;
-  let wq = supabase
-    .from('wallet_stats')
-    .select('wallet, roi_pct')
-    .eq('verified', true)
-    .gt('roi_pct', 0);
-  wq = hasLinkTs
-    ? wq.order('links_checked_at', { ascending: true, nullsFirst: true })
-    : wq.order('roi_pct', { ascending: false });
-  const { data: winners, error: wErr } = await wq.limit(maxWallets);
-  if (wErr) return blank(`winner fetch failed: ${wErr.message}`);
-  const winnerWallets = (winners ?? []).map((r: any) => r.wallet);
+  const hasBalance = !(await supabase.from('wallet_stats').select('sol_balance').limit(1)).error;
+
+  // 0) Refresh native SOL balances for the staleest chunk of verified winners
+  // (cheap: ~1 credit / 100 wallets, budget-guarded) so the drained signal below
+  // is current. Rotates via balance_checked_at (never/oldest first).
+  if (hasBalance && balanceRefresh > 0) {
+    const { data: toRefresh } = await supabase
+      .from('wallet_stats')
+      .select('wallet')
+      .eq('verified', true)
+      .gt('roi_pct', 0)
+      .order('balance_checked_at', { ascending: true, nullsFirst: true })
+      .limit(balanceRefresh);
+    const refreshList = (toRefresh ?? []).map((r: any) => r.wallet);
+    if (refreshList.length) {
+      const balances = await fetchSolBalances(refreshList);
+      const nowIso = new Date().toISOString();
+      const rows = [...balances.entries()].map(([wallet, sol]) => ({
+        wallet,
+        sol_balance: Math.round(sol * 1e6) / 1e6,
+        balance_checked_at: nowIso,
+      }));
+      // Chunked upserts keep PostgREST payloads sane.
+      for (let i = 0; i < rows.length; i += 500) {
+        await supabase.from('wallet_stats').upsert(rows.slice(i, i + 500), { onConflict: 'wallet' });
+      }
+    }
+  }
+
+  // 1) Build the candidate list. DRAINED verified winners (balance below the
+  // threshold — profits pulled / likely on a new wallet) come FIRST, ordered by
+  // least-recently link-checked; the rest fill via the normal full-set rotation.
+  const winnerWallets: string[] = [];
+  const pushUnique = (rows: any[] | null | undefined) => {
+    for (const r of rows ?? []) {
+      if (winnerWallets.length >= maxWallets) break;
+      if (!winnerWallets.includes(r.wallet)) winnerWallets.push(r.wallet);
+    }
+  };
+
+  if (hasBalance && hasLinkTs) {
+    const drained = await supabase
+      .from('wallet_stats')
+      .select('wallet')
+      .eq('verified', true)
+      .gt('roi_pct', 0)
+      .lt('sol_balance', drainedSol) // nulls excluded — only confirmed-drained jump the queue
+      .order('links_checked_at', { ascending: true, nullsFirst: true })
+      .limit(maxWallets);
+    pushUnique(drained.data);
+  }
+  if (winnerWallets.length < maxWallets) {
+    let wq = supabase.from('wallet_stats').select('wallet').eq('verified', true).gt('roi_pct', 0);
+    wq = hasLinkTs
+      ? wq.order('links_checked_at', { ascending: true, nullsFirst: true })
+      : wq.order('roi_pct', { ascending: false });
+    const fill = await wq.limit(maxWallets);
+    if (fill.error && winnerWallets.length === 0) return blank(`winner fetch failed: ${fill.error.message}`);
+    pushUnique(fill.data);
+  }
   if (winnerWallets.length === 0) {
     return { ...blank(), ok: true, error: 'No verified winners yet — run the deep-scan first' };
   }
