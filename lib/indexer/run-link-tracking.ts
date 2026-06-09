@@ -57,15 +57,22 @@ export async function runLinkTracking(opts: LinkTrackingOptions = {}): Promise<L
 
   const supabase = getSupabase();
 
-  // Proven winners worth following. Process the least-recently-checked first via
-  // updated_at so coverage rotates over successive runs.
-  const { data: winners, error: wErr } = await supabase
+  // Proven winners worth following. ROTATE coverage across the FULL set instead
+  // of re-scanning the same top-by-ROI wallets every run: order by links_checked_at
+  // (never-checked first via nullsFirst, then oldest). Probe the column so a
+  // pre-0022 DB still works (falls back to roi_pct order). This is why a high-ROI
+  // wallet that moved its funds to a fresh wallet could sit with no funding edges:
+  // the tracker never reached it.
+  const hasLinkTs = !(await supabase.from('wallet_stats').select('links_checked_at').limit(1)).error;
+  let wq = supabase
     .from('wallet_stats')
     .select('wallet, roi_pct')
     .eq('verified', true)
-    .gt('roi_pct', 0)
-    .order('roi_pct', { ascending: false })
-    .limit(maxWallets);
+    .gt('roi_pct', 0);
+  wq = hasLinkTs
+    ? wq.order('links_checked_at', { ascending: true, nullsFirst: true })
+    : wq.order('roi_pct', { ascending: false });
+  const { data: winners, error: wErr } = await wq.limit(maxWallets);
   if (wErr) return blank(`winner fetch failed: ${wErr.message}`);
   const winnerWallets = (winners ?? []).map((r: any) => r.wallet);
   if (winnerWallets.length === 0) {
@@ -75,10 +82,12 @@ export async function runLinkTracking(opts: LinkTrackingOptions = {}): Promise<L
   let winnersScanned = 0;
   let linksRecorded = 0;
   let walletsEnqueued = 0;
+  const scanned: string[] = []; // every wallet we attempted — stamped to advance the rotation cursor
 
   for (const source of winnerWallets) {
     if (Date.now() - start > timeBudgetMs) break;
     winnersScanned += 1;
+    scanned.push(source);
 
     let dists;
     try {
@@ -111,6 +120,16 @@ export async function runLinkTracking(opts: LinkTrackingOptions = {}): Promise<L
     const stubRows = top.map((d) => ({ wallet: d.target, funded_by: source }));
     const { error: sErr } = await supabase.from('wallet_stats').upsert(stubRows, { onConflict: 'wallet' });
     if (!sErr) walletsEnqueued += stubRows.length;
+  }
+
+  // Advance the rotation cursor: stamp every wallet we attempted this run (even
+  // those with no distributions or a transient error) so the next run moves on to
+  // the least-recently-checked set and coverage sweeps the whole proven set.
+  if (hasLinkTs && scanned.length) {
+    await supabase
+      .from('wallet_stats')
+      .update({ links_checked_at: new Date().toISOString() })
+      .in('wallet', scanned);
   }
 
   await supabase.from('indexer_state').upsert(
