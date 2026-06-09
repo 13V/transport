@@ -121,27 +121,24 @@ export async function persistBursts(): Promise<{ persisted: number }> {
       });
     }
 
-    // Stamp a DexScreener USD baseline (price_at_burst) at persist time for bursts
-    // that don't have one yet — so outcome measurement works on fresh pump.fun
-    // tokens (GeckoTerminal has no candles for them). Batched, cached, zero Helius.
-    // Persisted ~within a minute of the burst forming, so it's a near-burst-time
-    // baseline that every horizon return compares against (same USD unit).
-    const needBaseline = [...new Set(
-      bursts
-        .filter((b) => !((existingById.get(b.id)?.price_at_burst ?? 0) > 0))
-        .map((b) => b.mint)
-    )];
-    const baselineByMint = new Map<string, number>();
-    if (needBaseline.length) {
-      try {
-        const metas = await getTokenMeta(needBaseline, { skipHelius: true, includeTopHolder: false });
-        for (const [mint, m] of metas) {
-          if (typeof m.priceUsd === 'number' && m.priceUsd > 0) baselineByMint.set(mint, m.priceUsd);
-        }
-      } catch (e) {
-        console.error('[BURSTS] baseline price fetch failed:', (e as Error).message);
+    // We stamp a USD baseline (price_at_burst) at persist time for bursts that don't
+    // have one yet — so outcome measurement works on fresh pump.fun tokens. The
+    // baseline is the burst's OWN price (already enriched on the object): prefer
+    // DexScreener priceUsd (matches the horizon source), else derive from the
+    // on-chain first-buy price × SOL/USD (ALWAYS present, so fresh tokens that
+    // DexScreener hasn't indexed yet still get a baseline). One cheap SOL/USD read.
+    const WSOL = 'So11111111111111111111111111111111111111112';
+    let solUsd: number | undefined;
+    try {
+      solUsd = (await getTokenMeta([WSOL], { skipHelius: true, includeTopHolder: false })).get(WSOL)?.priceUsd;
+    } catch { /* leave undefined — on-chain baselines simply skip until a price exists */ }
+    const baselineUsd = (b: { priceUsd?: number; firstBuyPriceSol?: number | null }): number | undefined => {
+      if (typeof b.priceUsd === 'number' && b.priceUsd > 0) return b.priceUsd;
+      if (typeof b.firstBuyPriceSol === 'number' && b.firstBuyPriceSol > 0 && solUsd && solUsd > 0) {
+        return b.firstBuyPriceSol * solUsd;
       }
-    }
+      return undefined;
+    };
 
     // Build upsert rows, merging each burst monotonically against any existing
     // row. price_at_burst / first_seen are deliberately omitted so the derived
@@ -166,10 +163,10 @@ export async function persistBursts(): Promise<{ persisted: number }> {
         ALL_BUYERS_CAP
       );
 
-      // Stamp the baseline ONLY when this burst has none yet (new burst) and we
-      // got a price — so an existing derived baseline survives the conflict update.
+      // Stamp the baseline ONLY when this burst has none yet (new burst) — so an
+      // existing baseline survives the conflict update.
       const needsBaseline = !((prev?.price_at_burst ?? 0) > 0);
-      const baseUsd = needsBaseline ? baselineByMint.get(b.mint) : undefined;
+      const baseUsd = needsBaseline ? baselineUsd(b) : undefined;
 
       return {
         id: b.id,
