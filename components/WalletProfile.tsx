@@ -187,6 +187,10 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
   const [recordLoading, setRecordLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  // Token logo/ticker enrichment (DexScreener-only, zero Helius). Maps mint ->
+  // { symbol, icons } so the token lists show an identifiable name + logo instead
+  // of a truncated address; absent entries fall back to the short mint + letter.
+  const [tokenMeta, setTokenMeta] = useState<Record<string, { symbol?: string; icons?: string[] }>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -266,6 +270,35 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
       cancelled = true;
     };
   }, [walletAddress, reloadKey]);
+
+  // Resolve ticker + logo for every mint shown on the page, in one batched,
+  // DexScreener-only (free) call. Fires whenever the source lists change; the
+  // server caches, so revisits are instant.
+  useEffect(() => {
+    const mints = new Set<string>();
+    for (const t of profile?.perToken?.best ?? []) mints.add(t.mint);
+    for (const t of profile?.perToken?.worst ?? []) mints.add(t.mint);
+    for (const t of profile?.recentTrades ?? []) mints.add(t.mint);
+    for (const h of holdings?.holdings ?? []) mints.add(h.mint);
+    const list = Array.from(mints).filter(Boolean);
+    if (list.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/tokens/meta?mints=${encodeURIComponent(list.join(','))}`);
+        if (!res.ok) return;
+        const json = (await res.json()) as { meta?: Record<string, { symbol?: string; icons?: string[] }> };
+        if (!cancelled && json?.meta) setTokenMeta((prev) => ({ ...prev, ...json.meta }));
+      } catch {
+        /* enrichment only — ignore */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [profile, holdings]);
+
+  // Ticker (symbol when known, else short mint) + logo candidates for a mint.
+  const tLabel = (mint: string) => tokenMeta[mint]?.symbol || f.short(mint, 4, 4);
+  const tIcons = (mint: string) => tokenMeta[mint]?.icons;
 
   const backBtn = (
     <button className="btn ghost sm" onClick={() => router.push('/smart-money')}>
@@ -446,9 +479,9 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
             {newThisWeekRows.map((t, i) => (
               <div className="trade" key={`${t.mint}-${i}`}>
                 <span className="tradetype buy">BUY</span>
-                <TokenMark symbol={f.short(t.mint, 4, 4)} size={22} />
+                <TokenMark symbol={tLabel(t.mint)} icons={tIcons(t.mint)} size={22} />
                 <Link href={`/token/${t.mint}`} style={{ textDecoration: 'none' }}>
-                  <b style={{ fontSize: 12.5 }}>{f.short(t.mint, 4, 4)}</b>
+                  <b style={{ fontSize: 12.5 }}>{tLabel(t.mint)}</b>
                 </Link>
                 <span className="num" style={{ fontSize: 12.5 }}>{f.sol(t.amountSol)} <span className="faint">SOL</span></span>
                 <span className="spacer" />
@@ -501,8 +534,8 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
                     <tr key={h.mint}>
                       <td>
                         <Link href={`/token/${h.mint}`} className="row gap-8" style={{ textDecoration: 'none' }}>
-                          <TokenMark symbol={f.short(h.mint, 4, 4)} size={24} />
-                          <b style={{ fontSize: 12.5 }}>{f.short(h.mint, 4, 4)}</b>
+                          <TokenMark symbol={tLabel(h.mint)} icons={tIcons(h.mint)} size={24} />
+                          <b style={{ fontSize: 12.5 }}>{tLabel(h.mint)}</b>
                         </Link>
                       </td>
                       <td className="r num faint">{f.compact(h.tokens)}</td>
@@ -523,8 +556,8 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
       {/* Best / worst tokens — below the fold; lazy-mounted with reserved space. */}
       <LazySection minH={220}>
         <div className="grid cols-2">
-          <TokenTable title="Best tokens" icon={TrendingUp} tone="pos" rows={best} />
-          <TokenTable title="Worst tokens" icon={TrendingDown} tone="neg" rows={worst} />
+          <TokenTable title="Best tokens" icon={TrendingUp} tone="pos" rows={best} meta={tokenMeta} />
+          <TokenTable title="Worst tokens" icon={TrendingDown} tone="neg" rows={worst} meta={tokenMeta} />
         </div>
       </LazySection>
 
@@ -539,9 +572,9 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
               return (
                 <div className="trade" key={`${t.txHash}-${i}`}>
                   <span className={`tradetype ${sell ? 'sell' : 'buy'}`}>{sell ? 'SELL' : 'BUY'}</span>
-                  <TokenMark symbol={f.short(t.mint, 4, 4)} size={22} />
+                  <TokenMark symbol={tLabel(t.mint)} icons={tIcons(t.mint)} size={22} />
                   <Link href={`/token/${t.mint}`} style={{ textDecoration: 'none' }}>
-                    <b style={{ fontSize: 12.5 }}>{f.short(t.mint, 4, 4)}</b>
+                    <b style={{ fontSize: 12.5 }}>{tLabel(t.mint)}</b>
                   </Link>
                   <span className="num" style={{ fontSize: 12.5 }}>{f.sol(t.amountSol)} <span className="faint">SOL</span></span>
                   {t.source && <SourceBadge source={t.source} />}
@@ -758,13 +791,15 @@ function TrackRecordCard({ record, loading }: { record: WalletRecordResponse | n
 }
 
 function TokenTable({
-  title, icon: Icon, tone, rows,
+  title, icon: Icon, tone, rows, meta,
 }: {
   title: string;
   icon: React.ComponentType<{ size?: number }>;
   tone: 'pos' | 'neg';
   rows: TokenPnl[];
+  meta?: Record<string, { symbol?: string; icons?: string[] }>;
 }) {
+  const label = (mint: string) => meta?.[mint]?.symbol || f.short(mint, 4, 4);
   return (
     <div className="card">
       <div className="card-head">
@@ -783,8 +818,8 @@ function TokenTable({
                 <tr key={r.mint}>
                   <td>
                     <Link href={`/token/${r.mint}`} className="row gap-8" style={{ textDecoration: 'none' }}>
-                      <TokenMark symbol={f.short(r.mint, 4, 4)} size={22} />
-                      <b style={{ fontSize: 12.5 }}>{f.short(r.mint, 4, 4)}</b>
+                      <TokenMark symbol={label(r.mint)} icons={meta?.[r.mint]?.icons} size={22} />
+                      <b style={{ fontSize: 12.5 }}>{label(r.mint)}</b>
                     </Link>
                   </td>
                   <td className="r"><Pnl value={r.realizedPnlSol} unit={false} /></td>

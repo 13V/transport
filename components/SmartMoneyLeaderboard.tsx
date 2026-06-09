@@ -31,6 +31,7 @@ import {
   CopyIconButton,
   WalletLinks,
 } from '@/components/ui';
+import { walletLinks } from '@/lib/trade-links';
 
 /**
  * A wallet as returned by GET /api/smart-money/list (JSON `wallets[]`). Search /
@@ -237,15 +238,17 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
     label,
     align,
     tip,
+    hideSm,
   }: {
     field: SortField;
     label: string;
     align?: 'r' | 'c';
     tip?: string;
+    hideSm?: boolean;
   }) => {
     const on = sortField === field;
     return (
-      <th className={align}>
+      <th className={`${align ?? ''}${hideSm ? ' hide-sm' : ''}`}>
         <button className={`th-sort ${on ? 'sorted' : ''}`} onClick={() => handleSort(field)}>
           {label}
           {tip && (
@@ -503,21 +506,21 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
           <table className="dt ruled compact">
             <thead>
               <tr>
-                <SortTh field="rank" label="#" />
+                <SortTh field="rank" label="#" hideSm />
                 <th>Wallet</th>
-                <th className="c">Tier</th>
+                <th className="c hide-sm">Tier</th>
                 <SortTh
                   field="roiPct"
-                  label="ROI (all-time)"
+                  label="ROI"
                   align="r"
                   tip="Realized ROI = realized PnL ÷ cost of sold tokens, all-time (FIFO)"
                 />
                 <SortTh field="pnl" label="PnL" align="r" />
-                <SortTh field="winRate" label="Win" align="r" />
-                <th className="r" title="Profit consistency across this wallet's traded tokens">Consist</th>
-                <th className="r" title="Total trades · distinct tokens traded">Trades · Tokens</th>
-                <th>Last active</th>
-                <th className="r" style={{ width: 200 }}>Actions</th>
+                <SortTh field="winRate" label="Win" align="r" hideSm />
+                <th className="r hide-sm" title="Profit consistency across this wallet's traded tokens">Consist</th>
+                <th className="r hide-sm" title="Total trades · distinct tokens traded">Trades · Tokens</th>
+                <th className="hide-sm">Last active</th>
+                <th className="r">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -541,7 +544,7 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
                     }
                   >
                     <td
-                      className={`rank ${w.rank <= 3 ? 'top' : ''}`}
+                      className={`rank hide-sm ${w.rank <= 3 ? 'top' : ''}`}
                       style={w.rank <= 3 && tierColor ? { color: tierColor } : undefined}
                     >
                       {w.rank}
@@ -549,6 +552,17 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
                     <td>
                       <div className="row gap-8" style={{ flexWrap: 'nowrap', whiteSpace: 'nowrap' }}>
                         <AddrChip address={w.address} copy={false} />
+                        <a
+                          className="gmgn-btn"
+                          href={walletLinks(w.address).find((l) => l.label === 'GMGN')?.url || `https://gmgn.ai/sol/address/${w.address}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          title="Open this wallet on GMGN"
+                          aria-label="Open on GMGN"
+                        >
+                          GMGN
+                        </a>
                         {w.verified && (
                           <span
                             className="wmark"
@@ -564,7 +578,7 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
                         )}
                       </div>
                     </td>
-                    <td className="c"><TierBadge tier={w.tier} /></td>
+                    <td className="c hide-sm"><TierBadge tier={w.tier} /></td>
                     <td className="r">
                       <div
                         className="row gap-8"
@@ -582,16 +596,16 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
                       </div>
                     </td>
                     <td className="r"><Pnl value={w.pnl} /></td>
-                    <td className="r"><WinBar value={w.winRate} /></td>
-                    <td className="r num faint">
+                    <td className="r hide-sm"><WinBar value={w.winRate} /></td>
+                    <td className="r num faint hide-sm">
                       {consistPct != null ? `${consistPct}%` : '—'}
                     </td>
-                    <td className="r num faint" style={{ whiteSpace: 'nowrap' }}>
+                    <td className="r num faint hide-sm" style={{ whiteSpace: 'nowrap' }}>
                       <span style={{ color: 'var(--text-2)' }}>{w.totalTrades}</span>
                       <span style={{ margin: '0 4px', opacity: 0.5 }}>·</span>
                       {w.tokensTraded}
                     </td>
-                    <td className="faint num" style={{ whiteSpace: 'nowrap' }}>
+                    <td className="faint num hide-sm" style={{ whiteSpace: 'nowrap' }}>
                       {f.ago(lastMs)}
                     </td>
                     <td className="r">
