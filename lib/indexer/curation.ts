@@ -172,6 +172,7 @@ export interface CuratableStat {
   roiPct?: number | null; // accurate all-time ROI%; null when not deep-scanned
   investedSol?: number | null; // capital deployed (cost of sold quantity)
   winRate: number;
+  screenWinRate?: number | null; // GMGN all-position win rate (when screened); for the bag-holder check
   profitFactor?: number | null; // gross wins / gross losses; null when not (re-)scanned
   consistency?: number | null; // share of closed tokens net-positive; null when not (re-)scanned
   realizedEvents?: number | null; // count of realized sell↔lot matches (sample size for suspect rule)
@@ -239,6 +240,20 @@ export function isSmartWallet(
   if (suspectWinRate < 1) {
     const sample = s.realizedEvents ?? s.totalTrades;
     if (s.winRate >= suspectWinRate && sample >= suspectMinEvents) {
+      return false;
+    }
+  }
+
+  // BAG-HOLDER guard: our winRate counts only realized round-trips — a buy that's
+  // never sold (a stuck/rugged bag) books no loss, so a wallet that bag-holds many
+  // rugs can show a near-perfect win rate while GMGN's all-position rate
+  // (screenWinRate) tells the truth. When ours is high but GMGN's is far lower, the
+  // wallet is hiding un-exited losers → exclude it. Only fires when we actually have
+  // GMGN's screen (else a safe no-op), and the threshold is set so it catches only
+  // the egregious tail (≈1% of screened wallets), not the normal definitional gap.
+  if (bool('SMART_BAGHOLDER_ENABLED', true) && s.screenWinRate != null) {
+    const gap = s.winRate - s.screenWinRate;
+    if (s.winRate >= num('SMART_BAGHOLDER_MIN_WR', 0.8) && gap > num('SMART_BAGHOLDER_GAP', 0.4)) {
       return false;
     }
   }

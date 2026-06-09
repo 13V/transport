@@ -211,6 +211,22 @@ describe('broad smart tier (SMART2_* / getBroadSmartCriteria / smartTier / isSma
     expect(smartTier(suspect, NOW)).toBeNull();
   });
 
+  it('bag-holder guard: high realized win rate but far-lower GMGN all-position rate is rejected', () => {
+    // Passes every size floor, not a bot, win rate below the suspect cap — but our
+    // realized win rate (0.9) wildly exceeds GMGN's all-position rate (0.27), the
+    // signature of a wallet hiding un-exited losing bags. Excluded from both tiers.
+    const bagHolder = goodStat({ winRate: 0.9, screenWinRate: 0.27 });
+    expect(isSmartBroad(bagHolder, NOW)).toBe(false);
+    expect(smartTier(bagHolder, NOW)).toBeNull();
+  });
+
+  it('bag-holder guard: no-op when GMGN screen is absent or the gap is small', () => {
+    // No GMGN screen → cannot judge → still smart (safe no-op).
+    expect(isSmartBroad(goodStat({ winRate: 0.9 }), NOW)).toBe(true);
+    // Small gap (0.9 vs 0.7) is within the normal definitional difference → still smart.
+    expect(isSmartBroad(goodStat({ winRate: 0.9, screenWinRate: 0.7 }), NOW)).toBe(true);
+  });
+
   it('broad tier STILL rejects likely bots', () => {
     // High trade count, tiny tokens-traded, near-zero avg trade size → bot-like.
     // This pattern is rejected by detectBot regardless of tier.

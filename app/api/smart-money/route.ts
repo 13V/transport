@@ -43,7 +43,7 @@ async function readLeaderboardFromDb(
     'wallet, score, realized_pnl, win_rate, consistency, total_trades, tokens_traded, last_trade_at, updated_at';
   const extRead = await supabase
     .from('wallet_stats')
-    .select(`${baseColumns}, seeded, roi_pct, invested_sol, profit_factor, verified, funded_by`)
+    .select(`${baseColumns}, seeded, roi_pct, invested_sol, profit_factor, verified, funded_by, screen_win_rate`)
     .order('score', { ascending: false })
     .range(offset, offset + limit - 1);
 
@@ -75,6 +75,7 @@ async function readLeaderboardFromDb(
         roiPct: r.roi_pct == null ? null : Number(r.roi_pct),
         investedSol: r.invested_sol == null ? null : Number(r.invested_sol),
         winRate: Number(r.win_rate),
+        screenWinRate: r.screen_win_rate == null ? null : Number(r.screen_win_rate),
         // Edge floors read these; map null DB values to null so a disabled
         // floor (0) lets them pass and an enabled floor rejects only unscored
         // wallets, matching the indexer gate (lib/indexer/live-bursts.ts).

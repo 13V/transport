@@ -419,8 +419,8 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
         </div>
 
         <div className="kv">
-          <div className="kv-item"><div className="k">Win rate</div><div className="v">{stats?.winRate != null ? `${Math.round(stats.winRate * 100)}%` : '—'}</div></div>
-          <div className="kv-item"><div className="k">Consistency</div><div className="v">{stats?.consistency != null ? `${Math.round(stats.consistency * 100)}/100` : '—'}</div></div>
+          <div className="kv-item"><div className="k" title="Win rate on REALIZED round-trips (tokens actually sold). Excludes un-exited bags, so it can read higher than GMGN's all-position rate.">Realized win rate</div><div className="v">{stats?.winRate != null ? `${Math.round(stats.winRate * 100)}%` : '—'}</div></div>
+          <div className="kv-item"><div className="k" title="Share of CLOSED tokens that ended net-positive (realized round-trips only).">Consistency</div><div className="v">{stats?.consistency != null ? `${Math.round(stats.consistency * 100)}/100` : '—'}</div></div>
           <div className="kv-item"><div className="k">Total trades</div><div className="v num">{f.num(stats?.totalTrades)}</div></div>
           <div className="kv-item"><div className="k">Tokens traded</div><div className="v num">{f.num(stats?.tokensTraded)}</div></div>
           <div className="kv-item"><div className="k">Invested</div><div className="v num">{f.sol(stats?.investedSol)} SOL</div></div>
