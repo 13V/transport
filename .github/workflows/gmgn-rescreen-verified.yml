@@ -1,0 +1,44 @@
+name: GMGN re-screen verified
+
+# Keeps GMGN screen data (screen_win_rate) fresh on the VERIFIED/smart set so the
+# bag-holder gate guard (lib/indexer/curation.ts) stays effective. The standing
+# `GMGN screen` job only screens the verified=false backlog, so without this the
+# smart set would drift out of coverage as wallets verify and GMGN stats go stale.
+# gmgn-cli CANNOT run on Vercel, so this lives in CI. Cheap — GMGN only, no Helius.
+#
+# Uses the same repo secrets as gmgn-screen.yml: GMGN_API_KEY, CRON_SECRET
+# (and optional repo var TRANSPORT_URL).
+
+on:
+  workflow_dispatch: {}
+  # Every 2 days at 03:40 UTC. Schedules run only from the default branch.
+  schedule:
+    - cron: '40 3 */2 * *'
+
+concurrency:
+  group: gmgn-rescreen-verified
+  cancel-in-progress: false
+
+jobs:
+  rescreen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install gmgn-cli
+        run: npm install -g gmgn-cli@1.4.3
+
+      - name: Re-screen verified wallets via GMGN
+        env:
+          TRANSPORT_URL: ${{ vars.TRANSPORT_URL || 'https://transport-topaz-eight.vercel.app' }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
+          MAX: '1200'
+          REFRESH: '1'
+          RATE_LIMIT_MS: '1400'
+        run: node scripts/screen-verified.mjs
