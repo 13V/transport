@@ -10,7 +10,6 @@
 
 import { getSupabase, isSupabaseConfigured } from '../supabase-client';
 import { fetchSolDistributions } from './wallet-links';
-import { fetchSolBalances } from './wallet-balances';
 import { envInt } from './env';
 
 export interface LinkTrackingResult {
@@ -44,9 +43,9 @@ export async function runLinkTracking(opts: LinkTrackingOptions = {}): Promise<L
   const maxLinksPerWallet = opts.maxLinksPerWallet ?? envInt('LINK_MAX_TARGETS', 100);
   const timeBudgetMs = opts.timeBudgetMs ?? envInt('LINK_TIME_BUDGET_MS', 55_000);
   // Drained-winner prioritization: a verified winner whose balance is below this
-  // (profits extracted / likely moved wallets) jumps the link-scan queue.
+  // (profits extracted / likely moved wallets) jumps the link-scan queue. Balance
+  // comes free from the GMGN screen (native_balance) — no Helius balance calls.
   const drainedSol = Number(process.env.LINK_DRAINED_SOL ?? 1.0);
-  const balanceRefresh = envInt('LINK_BALANCE_REFRESH', 400); // wallets to refresh balances for per run
 
   const blank = (error?: string): LinkTrackingResult => ({
     ok: !error,
@@ -62,45 +61,13 @@ export async function runLinkTracking(opts: LinkTrackingOptions = {}): Promise<L
 
   const supabase = getSupabase();
 
-  // Proven winners worth following. ROTATE coverage across the FULL set instead
-  // of re-scanning the same top-by-ROI wallets every run: order by links_checked_at
-  // (never-checked first via nullsFirst, then oldest). Probe the column so a
-  // pre-0022 DB still works (falls back to roi_pct order). This is why a high-ROI
-  // wallet that moved its funds to a fresh wallet could sit with no funding edges:
-  // the tracker never reached it.
   // Probe optional columns so a pre-0022/0023 DB still works (rotation / drained
-  // prioritization simply not applied).
+  // prioritization simply not applied). sol_balance is populated for FREE by the
+  // GMGN screen (native_balance, via /api/ingest/wallet-stats) — no Helius here.
   const hasLinkTs = !(await supabase.from('wallet_stats').select('links_checked_at').limit(1)).error;
   const hasBalance = !(await supabase.from('wallet_stats').select('sol_balance').limit(1)).error;
 
-  // 0) Refresh native SOL balances for the staleest chunk of verified winners
-  // (cheap: ~1 credit / 100 wallets, budget-guarded) so the drained signal below
-  // is current. Rotates via balance_checked_at (never/oldest first).
-  if (hasBalance && balanceRefresh > 0) {
-    const { data: toRefresh } = await supabase
-      .from('wallet_stats')
-      .select('wallet')
-      .eq('verified', true)
-      .gt('roi_pct', 0)
-      .order('balance_checked_at', { ascending: true, nullsFirst: true })
-      .limit(balanceRefresh);
-    const refreshList = (toRefresh ?? []).map((r: any) => r.wallet);
-    if (refreshList.length) {
-      const balances = await fetchSolBalances(refreshList);
-      const nowIso = new Date().toISOString();
-      const rows = [...balances.entries()].map(([wallet, sol]) => ({
-        wallet,
-        sol_balance: Math.round(sol * 1e6) / 1e6,
-        balance_checked_at: nowIso,
-      }));
-      // Chunked upserts keep PostgREST payloads sane.
-      for (let i = 0; i < rows.length; i += 500) {
-        await supabase.from('wallet_stats').upsert(rows.slice(i, i + 500), { onConflict: 'wallet' });
-      }
-    }
-  }
-
-  // 1) Build the candidate list. DRAINED verified winners (balance below the
+  // Build the candidate list. DRAINED verified winners (balance below the
   // threshold — profits pulled / likely on a new wallet) come FIRST, ordered by
   // least-recently link-checked; the rest fill via the normal full-set rotation.
   const winnerWallets: string[] = [];

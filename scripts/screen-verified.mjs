@@ -48,6 +48,7 @@ async function gmgnScreen(wallet) {
         tokenCount: Number(ps.token_num || 0),
         tradeCount: Number(d.buy || 0) + Number(d.sell || 0),
         avgHoldSeconds: Math.round(Number(ps.avg_holding_period || 0)),
+        solBalance: Number(d.native_balance || 0), // GMGN's live SOL balance — drives the drained-winner signal, zero Helius cost
       };
     } catch (e) {
       const msg = String(e?.stdout || e?.message || e);
