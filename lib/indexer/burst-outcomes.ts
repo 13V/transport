@@ -441,8 +441,11 @@ interface BurstRow {
  */
 export async function measureBursts(opts?: {
   maxBursts?: number;
-}): Promise<{ measured: number; scanned: number }> {
+}): Promise<{ measured: number; scanned: number; dbg?: Record<string, number> }> {
   if (!isSupabaseConfigured()) return { measured: 0, scanned: 0 };
+  // Lightweight diagnostics so we can SEE where measurement stalls (baseline
+  // present? current price fetched? legs due?) without DB access.
+  const dbg = { scanned: 0, withBaseline: 0, dueLegs: 0, gotCurrentPrice: 0, noCurrentPrice: 0, legsWritten: 0 };
 
   const maxBursts = opts?.maxBursts ?? 40;
 
@@ -463,7 +466,11 @@ export async function measureBursts(opts?: {
         'id, mint, price_at_burst, peak_price_24h, window_end, ret_15m, ret_1h, ret_24h'
       )
       .lte('window_end', oldestNeeded)
-      .or('price_at_burst.is.null,ret_15m.is.null,ret_1h.is.null,ret_24h.is.null')
+      // MUST have a baseline to measure a return. Requiring it also stops the
+      // pre-fix backlog (null-baseline bursts, oldest window_end) from permanently
+      // clogging the oldest-first scan so newly-baselined bursts never get reached.
+      .not('price_at_burst', 'is', null)
+      .or('ret_15m.is.null,ret_1h.is.null,ret_24h.is.null')
       .order('window_end', { ascending: true })
       .limit(maxBursts);
 
@@ -473,7 +480,8 @@ export async function measureBursts(opts?: {
     }
 
     const rows = (read.data ?? []) as BurstRow[];
-    if (rows.length === 0) return { measured: 0, scanned: 0 };
+    dbg.scanned = rows.length;
+    if (rows.length === 0) return { measured: 0, scanned: 0, dbg };
 
     let measured = 0;
 
@@ -483,6 +491,7 @@ export async function measureBursts(opts?: {
 
       const haveBaseline =
         typeof row.price_at_burst === 'number' && row.price_at_burst > 0;
+      if (haveBaseline) dbg.withBaseline++;
 
       // Which horizon legs are due (elapsed) AND not yet measured?
       const dueLegs = HORIZONS.filter((h) => {
@@ -499,6 +508,7 @@ export async function measureBursts(opts?: {
       // couldn't price at burst time).
       if (!haveBaseline) continue;
       if (dueLegs.length === 0) continue;
+      dbg.dueLegs++;
       const baseline = row.price_at_burst as number;
 
       // SAMPLE-FORWARD via DexScreener (covers fresh pump.fun tokens GeckoTerminal
@@ -508,6 +518,7 @@ export async function measureBursts(opts?: {
       const meta = (await getTokenMeta([row.mint], { maxAgeMs: 30_000, skipHelius: true })).get(row.mint);
       await sleep(120); // gentle pacing
       const cur = typeof meta?.priceUsd === 'number' && meta.priceUsd > 0 ? meta.priceUsd : null;
+      if (cur != null) dbg.gotCurrentPrice++; else dbg.noCurrentPrice++;
       const elapsed = now - endMs;
 
       const update: Record<string, unknown> = {};
@@ -531,9 +542,9 @@ export async function measureBursts(opts?: {
           price = baseline * 0.01;
         }
         const ret = (price / baseline - 1) * 100;
-        if (leg.key === '15m') { update.price_15m = price; update.ret_15m = ret; update.measured_15m_at = nowIso; }
-        else if (leg.key === '1h') { update.price_1h = price; update.ret_1h = ret; update.measured_1h_at = nowIso; }
-        else if (leg.key === '24h') { update.price_24h = price; update.ret_24h = ret; update.measured_24h_at = nowIso; }
+        if (leg.key === '15m') { update.price_15m = price; update.ret_15m = ret; update.measured_15m_at = nowIso; dbg.legsWritten++; }
+        else if (leg.key === '1h') { update.price_1h = price; update.ret_1h = ret; update.measured_1h_at = nowIso; dbg.legsWritten++; }
+        else if (leg.key === '24h') { update.price_24h = price; update.ret_24h = ret; update.measured_24h_at = nowIso; dbg.legsWritten++; }
       }
 
       if (Object.keys(update).length === 0) continue;
@@ -549,7 +560,7 @@ export async function measureBursts(opts?: {
       measured++;
     }
 
-    return { measured, scanned: rows.length };
+    return { measured, scanned: rows.length, dbg };
   } catch (err) {
     console.error('[BURSTS] measure crashed:', (err as Error).message);
     return { measured: 0, scanned: 0 };
