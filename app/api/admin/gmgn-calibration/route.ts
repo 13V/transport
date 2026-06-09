@@ -114,6 +114,26 @@ export async function GET(request: NextRequest) {
   const rows = data ?? [];
   const both = rows.filter(r => r.win_rate != null && r.screen_win_rate != null);
 
+  // ?dump=1 — return the both-scored wallets with OUR roi_pct, so an offline
+  // gmgn-cli pass can fetch each wallet's GMGN ROI (realized_profit_pnl) and run
+  // the final ROI-to-ROI head-to-head with zero Helius cost.
+  if (request.nextUrl.searchParams.get('dump') === '1') {
+    const lim = Math.min(Math.max(parseInt(request.nextUrl.searchParams.get('limit') || '400', 10) || 400, 1), 2000);
+    return NextResponse.json({
+      count: both.length,
+      wallets: both
+        .filter(r => r.roi_pct != null)
+        .slice(0, lim)
+        .map(r => ({
+          wallet: r.wallet,
+          roi_pct: Number(r.roi_pct),
+          win_rate: r.win_rate == null ? null : Number(r.win_rate),
+          screen_win_rate: r.screen_win_rate == null ? null : Number(r.screen_win_rate),
+          screen_profit_usd: r.screen_profit_usd == null ? null : Number(r.screen_profit_usd),
+        })),
+    }, { headers: { 'Cache-Control': 'no-store' } });
+  }
+
   // --- win rate agreement ---
   const wrOurs = both.map(r => Number(r.win_rate));
   const wrGmgn = both.map(r => Number(r.screen_win_rate));
