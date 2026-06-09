@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import {
   ChevronLeft, Clock, ExternalLink, CheckCircle, Star, Wallet,
   TrendingUp, TrendingDown, List, GitBranch, Link as LinkIcon, Sparkles,
-  BarChart3,
+  BarChart3, AlertTriangle,
 } from 'lucide-react';
 import * as f from '@/lib/format';
 import {
@@ -75,6 +75,8 @@ interface ProfileStats {
   seeded: boolean | null;
   fundedBy: string | null;
   lastTradeAt: string | null;
+  solBalance: number | null;
+  balanceCheckedAt: string | null;
 }
 
 interface TokenPnl {
@@ -348,6 +350,15 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
   const holdingList = holdings?.holdings ?? [];
   const unrealizedTotal = holdings?.totals?.unrealizedSol ?? null;
 
+  // "Drained → successor" — this wallet's balance has gone to ~0 (profits pulled /
+  // trader likely moved on). When we've also link-traced an outbound funding, the
+  // largest target is the most likely successor wallet to follow.
+  const DRAINED_SOL = 1;
+  const drained = stats?.solBalance != null && stats.solBalance < DRAINED_SOL;
+  const successor = funded.length
+    ? [...funded].sort((a, b) => (b.amountSol ?? 0) - (a.amountSol ?? 0))[0]
+    : null;
+
   // Cluster ROI: map member wallet -> {roiPct, verified} for the funding section.
   const clusterStatByWallet = new Map<string, ClusterMember>();
   for (const m of clusterMembers ?? []) clusterStatByWallet.set(m.wallet, m);
@@ -422,6 +433,27 @@ export default function WalletProfile({ walletAddress }: WalletProfileProps) {
           {stats?.seeded && (
             <span className="badge" style={{ color: 'var(--tier-s)', borderColor: 'var(--tier-s-ring)', background: 'var(--tier-s-soft)' }}>
               <Star size={12} /> Seeded
+            </span>
+          )}
+          {drained && (
+            <span
+              className="badge"
+              style={{ color: 'var(--warn, #e0a800)', borderColor: 'var(--warn, #e0a800)', background: 'rgba(224,168,0,.08)' }}
+              title={`Balance ~${f.sol(stats?.solBalance)} SOL — this wallet has drained its funds (profits pulled / likely trading from a new wallet).${successor ? ` Largest outbound funding went to ${successor.wallet}.` : ' No outbound successor traced yet.'}`}
+            >
+              <AlertTriangle size={12} /> Drained
+              {successor && (
+                <>
+                  {' → '}
+                  <Link
+                    href={`/smart-money/${successor.wallet}`}
+                    style={{ color: 'inherit', textDecoration: 'underline', fontWeight: 700 }}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {f.short(successor.wallet, 4, 4)}
+                  </Link>
+                </>
+              )}
             </span>
           )}
           <span className="spacer" />
