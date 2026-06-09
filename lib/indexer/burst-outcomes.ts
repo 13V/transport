@@ -26,6 +26,7 @@
 
 import { getSupabase, isSupabaseConfigured } from '../supabase-client';
 import { getLiveBursts } from './live-bursts';
+import { getTokenMeta } from '../token-meta';
 
 const GT = 'https://api.geckoterminal.com/api/v2';
 const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
@@ -40,6 +41,16 @@ const HORIZONS = [
   { key: '1h' as const, ms: HOUR },
   { key: '24h' as const, ms: DAY },
 ];
+
+// Sample-forward grace: a leg is only recorded if the current sample is taken
+// within [horizon, horizon + grace] of window_end, so the sampled price is near
+// the horizon (the 5-min cron easily catches these). Past the window the leg
+// stays NULL (no fabrication) rather than recording a far-off price.
+const GRACE: Record<'15m' | '1h' | '24h', number> = {
+  '15m': 20 * MIN,
+  '1h': 40 * MIN,
+  '24h': 6 * HOUR,
+};
 
 interface Candle {
   t: number; // ms
@@ -89,7 +100,7 @@ export async function persistBursts(): Promise<{ persisted: number }> {
     const existRead = await supabase
       .from('live_bursts')
       .select(
-        'id, buyers, buyer_wallets, sol_total, window_start, window_end, all_buyers'
+        'id, buyers, buyer_wallets, sol_total, window_start, window_end, all_buyers, price_at_burst'
       )
       .in('id', ids);
     if (existRead.error) {
@@ -106,7 +117,30 @@ export async function persistBursts(): Promise<{ persisted: number }> {
         all_buyers: Array.isArray(r.all_buyers)
           ? (r.all_buyers as unknown[]).map((x) => String(x))
           : [],
+        price_at_burst: numOrNull(r.price_at_burst),
       });
+    }
+
+    // Stamp a DexScreener USD baseline (price_at_burst) at persist time for bursts
+    // that don't have one yet — so outcome measurement works on fresh pump.fun
+    // tokens (GeckoTerminal has no candles for them). Batched, cached, zero Helius.
+    // Persisted ~within a minute of the burst forming, so it's a near-burst-time
+    // baseline that every horizon return compares against (same USD unit).
+    const needBaseline = [...new Set(
+      bursts
+        .filter((b) => !((existingById.get(b.id)?.price_at_burst ?? 0) > 0))
+        .map((b) => b.mint)
+    )];
+    const baselineByMint = new Map<string, number>();
+    if (needBaseline.length) {
+      try {
+        const metas = await getTokenMeta(needBaseline, { skipHelius: true, includeTopHolder: false });
+        for (const [mint, m] of metas) {
+          if (typeof m.priceUsd === 'number' && m.priceUsd > 0) baselineByMint.set(mint, m.priceUsd);
+        }
+      } catch (e) {
+        console.error('[BURSTS] baseline price fetch failed:', (e as Error).message);
+      }
     }
 
     // Build upsert rows, merging each burst monotonically against any existing
@@ -132,6 +166,11 @@ export async function persistBursts(): Promise<{ persisted: number }> {
         ALL_BUYERS_CAP
       );
 
+      // Stamp the baseline ONLY when this burst has none yet (new burst) and we
+      // got a price — so an existing derived baseline survives the conflict update.
+      const needsBaseline = !((prev?.price_at_burst ?? 0) > 0);
+      const baseUsd = needsBaseline ? baselineByMint.get(b.mint) : undefined;
+
       return {
         id: b.id,
         mint: b.mint,
@@ -149,6 +188,7 @@ export async function persistBursts(): Promise<{ persisted: number }> {
         sample_buyers: b.sampleBuyers ?? [],
         tiers: (b.tiers ?? []).map((t) => t ?? ''),
         all_buyers: allBuyers,
+        ...(baseUsd != null ? { price_at_burst: baseUsd, first_seen: new Date().toISOString() } : {}),
       } as Record<string, unknown>;
     });
 
@@ -192,6 +232,7 @@ interface ExistingGrowth {
   window_start: string | null;
   window_end: string | null;
   all_buyers: string[];
+  price_at_burst: number | null;
 }
 
 /** Cap on the persisted distinct-buyer union (mirrors live-bursts MAX_ALL_BUYERS). */
@@ -373,6 +414,7 @@ interface BurstRow {
   id: string;
   mint: string;
   price_at_burst: number | null;
+  peak_price_24h: number | null;
   window_end: string;
   ret_15m: number | null;
   ret_1h: number | null;
@@ -421,7 +463,7 @@ export async function measureBursts(opts?: {
     const read = await supabase
       .from('live_bursts')
       .select(
-        'id, mint, price_at_burst, window_end, ret_15m, ret_1h, ret_24h'
+        'id, mint, price_at_burst, peak_price_24h, window_end, ret_15m, ret_1h, ret_24h'
       )
       .lte('window_end', oldestNeeded)
       .or('price_at_burst.is.null,ret_15m.is.null,ret_1h.is.null,ret_24h.is.null')
@@ -455,77 +497,46 @@ export async function measureBursts(opts?: {
         return elapsed && retNull;
       });
 
-      // Nothing to do if the baseline is already set and no leg is due.
-      if (haveBaseline && dueLegs.length === 0) continue;
+      // The baseline is stamped at PERSIST time (DexScreener USD). Without it we
+      // can't compute a return — skip (rare: a pre-fix row, or a token DexScreener
+      // couldn't price at burst time).
+      if (!haveBaseline) continue;
+      if (dueLegs.length === 0) continue;
+      const baseline = row.price_at_burst as number;
 
-      // ONE pool for baseline + every horizon — the deepest-liquidity pool — so
-      // a thin secondary pool can never poison this burst's outcome.
-      const pool = await resolvePool(row.mint);
-      if (!pool) continue; // no real candles available — leave NULL
-      await sleep(250); // pace GT calls (pool lookup)
-
-      // Fetch a fine grid for the baseline + 15m/1h legs (5-min candles, ~20h)
-      // and, if a 24h leg is due, hourly candles too (covers the 24h reach + the
-      // peak window). All candles are USD (currency=usd in fetchCandles).
-      const need24h = dueLegs.some((l) => l.key === '24h');
-      const fine = await fetchCandles(pool, 'minute', 5, 240);
-      await sleep(250);
-      let hourly: Candle[] = [];
-      if (need24h) {
-        hourly = await fetchCandles(pool, 'hour', 1, 168);
-        await sleep(250);
-      }
+      // SAMPLE-FORWARD via DexScreener (covers fresh pump.fun tokens GeckoTerminal
+      // has no candles for — the reason measured was stuck at 0). Read the CURRENT
+      // USD price and record each due leg whose horizon JUST elapsed (within its
+      // grace window, so the sample is near the horizon). Zero Helius.
+      const meta = (await getTokenMeta([row.mint], { maxAgeMs: 30_000, skipHelius: true })).get(row.mint);
+      await sleep(120); // gentle pacing
+      const cur = typeof meta?.priceUsd === 'number' && meta.priceUsd > 0 ? meta.priceUsd : null;
+      const elapsed = now - endMs;
 
       const update: Record<string, unknown> = {};
       const nowIso = new Date().toISOString();
 
-      // Derive the USD baseline ONCE: the forward-only close of the candle
-      // at/nearest window_end from the SAME pool/series the horizons read. This
-      // is what makes baseline and measurements unit-consistent (both USD) and
-      // removes the post-hoc SOL-spot timing bias. Prefer the fine grid; fall
-      // back to hourly if that's all we have for this burst.
-      let baseline = haveBaseline ? (row.price_at_burst as number) : null;
-      if (baseline == null) {
-        const derived =
-          closeForward(fine, endMs, 10 * MIN) ??
-          (hourly.length ? closeForward(hourly, endMs, 90 * MIN) : null);
-        if (derived != null && derived > 0) {
-          baseline = derived;
-          update.price_at_burst = derived;
-        }
+      // Ratchet the 24h peak from each in-window sample.
+      if (cur != null && elapsed <= HORIZONS[2].ms + GRACE['24h']) {
+        const prevPeak = typeof row.peak_price_24h === 'number' ? row.peak_price_24h : 0;
+        if (cur > prevPeak) update.peak_price_24h = cur;
       }
 
-      // Without a baseline we can't compute any return — leave everything NULL
-      // for now (it stays a candidate and we retry once candles exist).
-      if (!(typeof baseline === 'number' && baseline > 0)) continue;
-
       for (const leg of dueLegs) {
-        const targetMs = endMs + leg.ms;
-        // Tolerance scales with the horizon's candle granularity.
-        if (leg.key === '15m') {
-          const price = closeForward(fine, targetMs, 10 * MIN);
-          if (price != null) {
-            update.price_15m = price;
-            update.ret_15m = (price / baseline - 1) * 100;
-            update.measured_15m_at = nowIso;
-          }
-        } else if (leg.key === '1h') {
-          const price = closeForward(fine, targetMs, 20 * MIN);
-          if (price != null) {
-            update.price_1h = price;
-            update.ret_1h = (price / baseline - 1) * 100;
-            update.measured_1h_at = nowIso;
-          }
-        } else if (leg.key === '24h') {
-          const price = closeForward(hourly, targetMs, 90 * MIN);
-          const peak = peakHigh(hourly, endMs, targetMs);
-          if (price != null) {
-            update.price_24h = price;
-            update.ret_24h = (price / baseline - 1) * 100;
-            update.measured_24h_at = nowIso;
-          }
-          if (peak != null) update.peak_price_24h = peak;
+        // Only record if we're still near this horizon (sample-forward window).
+        if (elapsed > leg.ms + GRACE[leg.key]) continue;
+        let price = cur;
+        if (price == null) {
+          // Had a baseline but DexScreener now has no priced pair = liquidity
+          // pulled (rug). Record a near-total loss for the 1h/24h legs so the
+          // dataset captures the LEFT TAIL (not just survivors). Too soon at 15m.
+          if (leg.key === '15m') continue;
+          price = baseline * 0.01;
         }
+        const ret = (price / baseline - 1) * 100;
+        if (leg.key === '15m') { update.price_15m = price; update.ret_15m = ret; update.measured_15m_at = nowIso; }
+        else if (leg.key === '1h') { update.price_1h = price; update.ret_1h = ret; update.measured_1h_at = nowIso; }
+        else if (leg.key === '24h') { update.price_24h = price; update.ret_24h = ret; update.measured_24h_at = nowIso; }
       }
 
       if (Object.keys(update).length === 0) continue;
