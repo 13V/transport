@@ -311,6 +311,39 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
           }}
         />
       </div>
+      {/* Explicit sort control — works everywhere (the sortable column headers are
+          hidden on phones), so users can sort by ROI / PnL / Win rate on mobile. */}
+      <div className="row gap-4" style={{ flexShrink: 0 }}>
+        <select
+          className="select sm"
+          value={sortField}
+          aria-label="Sort by"
+          title="Sort the leaderboard"
+          onChange={(e) => {
+            const fld = e.target.value as SortField;
+            setSortField(fld);
+            setSortDirection(fld === 'rank' ? 'asc' : 'desc');
+            setCurrentPage(0);
+          }}
+        >
+          <option value="rank">Sort: Rank</option>
+          <option value="roiPct">Sort: ROI</option>
+          <option value="pnl">Sort: PnL</option>
+          <option value="winRate">Sort: Win rate</option>
+        </select>
+        <button
+          type="button"
+          className="iconbtn"
+          title={sortDirection === 'asc' ? 'Ascending — tap for descending' : 'Descending — tap for ascending'}
+          aria-label="Toggle sort direction"
+          onClick={() => {
+            setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
+            setCurrentPage(0);
+          }}
+        >
+          {sortDirection === 'asc' ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+        </button>
+      </div>
       <div className="seg" title="Filter by quality tier">
         {(['All', 'S', 'A', 'B', 'C'] as const).map((t) => (
           <button
