@@ -1223,22 +1223,37 @@ export async function getLiveBursts(opts: {
     // ascending in memory anyway.
     const sinceMs = now - hours * 3_600_000;
     const sinceIso = new Date(sinceMs).toISOString();
-    const trades: any[] = [];
+    let trades: any[] = [];
 
-    for (const group of chunk(smartWallets, WALLET_CHUNK)) {
-      if (trades.length >= MAX_TRADE_ROWS) break;
-      const remaining = MAX_TRADE_ROWS - trades.length;
-      const tradeRead = await supabase
-        .from('trades')
-        .select('wallet, token_mint, amount, price, block_time')
-        .eq('trade_type', 'BUY')
-        .in('wallet', group)
-        .gte('block_time', sinceIso)
-        .order('block_time', { ascending: false })
-        .limit(remaining);
-
+    // Two fixed bugs here:
+    //  (a) `.limit(remaining)` with remaining > ~1000 silently CLAMPED to the
+    //      PostgREST page cap (db-paginate.ts documents this) — the sweep never
+    //      actually received MAX_TRADE_ROWS rows. fetchAllRows paginates past it.
+    //  (b) consuming the global budget chunk-by-chunk with an early break starved
+    //      LATER chunks entirely — lower-scored (A-tier) wallets' trades were
+    //      dropped wholesale under load. Every chunk now gets a fair budget and
+    //      the global newest-first trim keeps the freshest rows across ALL
+    //      wallets, not whichever chunks came first.
+    const groups = chunk(smartWallets, WALLET_CHUNK);
+    const perChunkCap = Math.max(400, Math.ceil((MAX_TRADE_ROWS * 2) / Math.max(1, groups.length)));
+    for (const group of groups) {
+      const tradeRead = await fetchAllRows<any>(
+        () =>
+          supabase
+            .from('trades')
+            .select('wallet, token_mint, amount, price, block_time')
+            .eq('trade_type', 'BUY')
+            .in('wallet', group)
+            .gte('block_time', sinceIso)
+            .order('block_time', { ascending: false }) as any,
+        { cap: perChunkCap }
+      );
       if (tradeRead.error) return empty;
-      if (tradeRead.data) trades.push(...tradeRead.data);
+      trades.push(...tradeRead.data);
+    }
+    if (trades.length > MAX_TRADE_ROWS) {
+      trades.sort((a, b) => new Date(b.block_time).getTime() - new Date(a.block_time).getTime());
+      trades = trades.slice(0, MAX_TRADE_ROWS);
     }
 
     // 3. Bucket buys per token.

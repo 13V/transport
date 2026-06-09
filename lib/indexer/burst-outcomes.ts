@@ -27,6 +27,7 @@
 import { getSupabase, isSupabaseConfigured } from '../supabase-client';
 import { getLiveBursts } from './live-bursts';
 import { getTokenMeta } from '../token-meta';
+import { fetchAllRows } from '../db-paginate';
 
 const GT = 'https://api.geckoterminal.com/api/v2';
 const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
@@ -521,12 +522,15 @@ export async function measureBursts(opts?: {
       const baseline = row.price_at_burst as number;
 
       // SAMPLE-FORWARD via DexScreener (covers fresh pump.fun tokens GeckoTerminal
-      // has no candles for — the reason measured was stuck at 0). Read the CURRENT
-      // USD price and record each due leg whose horizon JUST elapsed (within its
-      // grace window, so the sample is near the horizon). Zero Helius.
-      const meta = (await getTokenMeta([row.mint], { maxAgeMs: 30_000, skipHelius: true })).get(row.mint);
+      // has no candles for). Direct fetch — NOT getTokenMeta — because we must
+      // distinguish "DexScreener answered and lists NO pair" (genuine delist/rug →
+      // record the left tail) from "the fetch FAILED" (outage/rate-limit → skip and
+      // retry next pass). getTokenMeta swallows that difference, and treating an
+      // outage as a rug would permanently fabricate −99% outcomes. Zero Helius.
+      const probe = await dexCurrentUsd(row.mint);
       await sleep(120); // gentle pacing
-      const cur = typeof meta?.priceUsd === 'number' && meta.priceUsd > 0 ? meta.priceUsd : null;
+      if (!probe.ok) { dbg.noCurrentPrice++; continue; } // transient — leave legs NULL, retry
+      const cur = probe.priceUsd; // number when priced; null when genuinely unlisted
       if (cur != null) dbg.gotCurrentPrice++; else dbg.noCurrentPrice++;
       const elapsed = now - endMs;
 
@@ -544,9 +548,9 @@ export async function measureBursts(opts?: {
         if (elapsed > leg.ms + GRACE[leg.key]) continue;
         let price = cur;
         if (price == null) {
-          // Had a baseline but DexScreener now has no priced pair = liquidity
-          // pulled (rug). Record a near-total loss for the 1h/24h legs so the
-          // dataset captures the LEFT TAIL (not just survivors). Too soon at 15m.
+          // DexScreener RESPONDED and lists no priced pair = liquidity pulled
+          // (rug). Record a near-total loss for the 1h/24h legs so the dataset
+          // captures the LEFT TAIL (not just survivors). Too soon to call at 15m.
           if (leg.key === '15m') continue;
           price = baseline * 0.01;
         }
@@ -578,6 +582,29 @@ export async function measureBursts(opts?: {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Current DexScreener USD price with EXPLICIT failure semantics:
+ *   { ok: true,  priceUsd: number } — answered, priced (highest-liquidity Solana pair)
+ *   { ok: true,  priceUsd: null }   — answered, NO priced pair (genuine delist/rug)
+ *   { ok: false }                    — fetch failed (outage/timeout/rate-limit) — unknown
+ * The ok:false case must NEVER be recorded as a rug (it would fabricate −99% rows).
+ */
+async function dexCurrentUsd(mint: string): Promise<{ ok: boolean; priceUsd: number | null }> {
+  try {
+    const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`, {
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return { ok: false, priceUsd: null }; // 429/5xx — unknown, retry later
+    const j = (await res.json()) as { pairs?: any[] };
+    const pairs = (j.pairs ?? []).filter((p) => p?.chainId === 'solana' && Number(p?.priceUsd) > 0);
+    if (!pairs.length) return { ok: true, priceUsd: null }; // answered: genuinely unlisted
+    pairs.sort((a, b) => (Number(b?.liquidity?.usd) || 0) - (Number(a?.liquidity?.usd) || 0));
+    return { ok: true, priceUsd: Number(pairs[0].priceUsd) };
+  } catch {
+    return { ok: false, priceUsd: null };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -644,22 +671,34 @@ export async function getBurstStats(windowHours = 24): Promise<BurstStats> {
     // Try selecting `type` (migration 0021) for the per-type breakdown; on a
     // pre-migration DB this errors on the unknown column, so fall back to the
     // legacy column set so the overall stats keep working.
+    // Ordered + paginated: `.limit(2000)` alone clamps at the ~1000-row PostgREST
+    // page cap AND (with no .order) returns an ARBITRARY subset once the window
+    // exceeds it — making the public hit-rate/median stats nondeterministic at
+    // today's ~1000-bursts/day volume. Newest-first + fetchAllRows fixes both.
     let data: any[] | null = null;
     let hasType = true;
     {
-      const withType = await supabase
-        .from('live_bursts')
-        .select('mint, symbol, window_end, first_seen, ret_1h, ret_24h, type')
-        .gte('window_end', sinceIso)
-        .limit(2000);
-      if (withType.error) {
-        if (isMissingColumnError(withType.error, 'type')) {
-          hasType = false;
-          const legacy = await supabase
+      const withType = await fetchAllRows<any>(
+        () =>
+          supabase
             .from('live_bursts')
-            .select('mint, symbol, window_end, first_seen, ret_1h, ret_24h')
+            .select('mint, symbol, window_end, first_seen, ret_1h, ret_24h, type')
             .gte('window_end', sinceIso)
-            .limit(2000);
+            .order('window_end', { ascending: false }) as any,
+        { cap: 6000 }
+      );
+      if (withType.error) {
+        if (isMissingColumnError(withType.error as any, 'type')) {
+          hasType = false;
+          const legacy = await fetchAllRows<any>(
+            () =>
+              supabase
+                .from('live_bursts')
+                .select('mint, symbol, window_end, first_seen, ret_1h, ret_24h')
+                .gte('window_end', sinceIso)
+                .order('window_end', { ascending: false }) as any,
+            { cap: 6000 }
+          );
           if (legacy.error || !legacy.data) {
             if (legacy.error) console.error('[BURSTS] stats read failed:', legacy.error.message);
             return empty;

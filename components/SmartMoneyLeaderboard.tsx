@@ -549,7 +549,9 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
                   tip="Realized ROI = realized PnL ÷ cost of sold tokens, all-time (FIFO)"
                 />
                 <SortTh field="pnl" label="PnL" align="r" />
-                <SortTh field="winRate" label="Win" align="r" hideSm />
+                {/* When sorting BY win rate, keep the column visible on phones —
+                    otherwise the mobile sort dropdown orders by an invisible metric. */}
+                <SortTh field="winRate" label="Win" align="r" hideSm={sortField !== 'winRate'} />
                 <th className="r hide-sm" title="Profit consistency across this wallet's traded tokens">Consist</th>
                 <th className="r hide-sm" title="Total trades · distinct tokens traded">Trades · Tokens</th>
                 <th className="hide-sm">Last active</th>
@@ -629,7 +631,7 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
                       </div>
                     </td>
                     <td className="r"><Pnl value={w.pnl} /></td>
-                    <td className="r hide-sm"><WinBar value={w.winRate} /></td>
+                    <td className={`r${sortField === 'winRate' ? '' : ' hide-sm'}`}><WinBar value={w.winRate} /></td>
                     <td className="r num faint hide-sm">
                       {consistPct != null ? `${consistPct}%` : '—'}
                     </td>
