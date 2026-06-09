@@ -447,7 +447,7 @@ export async function measureBursts(opts?: {
   // present? current price fetched? legs due?) without DB access.
   const dbg = { scanned: 0, withBaseline: 0, dueLegs: 0, gotCurrentPrice: 0, noCurrentPrice: 0, legsWritten: 0 };
 
-  const maxBursts = opts?.maxBursts ?? 40;
+  const maxBursts = opts?.maxBursts ?? 80;
 
   try {
     const supabase = getSupabase();
@@ -471,7 +471,11 @@ export async function measureBursts(opts?: {
       // clogging the oldest-first scan so newly-baselined bursts never get reached.
       .not('price_at_burst', 'is', null)
       .or('ret_15m.is.null,ret_1h.is.null,ret_24h.is.null')
-      .order('window_end', { ascending: true })
+      // NEWEST-first: sample-forward must catch a burst WHILE it's inside a leg's
+      // grace window (just past 15m / 1h / 24h). Oldest-first grabbed bursts already
+      // past their short-horizon grace (0 legs written); newest-first measures each
+      // burst as it crosses each horizon.
+      .order('window_end', { ascending: false })
       .limit(maxBursts);
 
     if (read.error) {
