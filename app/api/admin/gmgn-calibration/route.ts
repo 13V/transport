@@ -61,6 +61,38 @@ const median = (a: number[]) => {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 };
 
+// Fractional (average) ranks — ties share the mean rank. Used for Spearman.
+function ranks(xs: number[]): number[] {
+  const idx = xs.map((v, i) => [v, i] as const).sort((a, b) => a[0] - b[0]);
+  const r = new Array(xs.length).fill(0);
+  let i = 0;
+  while (i < idx.length) {
+    let j = i;
+    while (j + 1 < idx.length && idx[j + 1][0] === idx[i][0]) j++;
+    const avg = (i + j) / 2 + 1; // 1-based average rank for the tie group
+    for (let k = i; k <= j; k++) r[idx[k][1]] = avg;
+    i = j + 1;
+  }
+  return r;
+}
+// Spearman = Pearson on ranks — unit-free, so it survives the SOL-vs-USD and
+// different-token-universe definitional gaps and answers "same ORDERING?".
+const spearman = (xs: number[], ys: number[]) => pearson(ranks(xs), ranks(ys));
+
+// Selection overlap @ top fraction f: of the both-scored set, how much do the
+// "top by our metric" and "top by GMGN metric" sets coincide (Jaccard). This is
+// the decision-relevant number: would a GMGN gate pick ~the same wallets?
+function overlapAtTop(ours: number[], gmgn: number[], f: number): number {
+  const n = ours.length;
+  const k = Math.max(1, Math.round(n * f));
+  const topIdx = (arr: number[]) =>
+    new Set(arr.map((v, i) => [v, i] as const).sort((a, b) => b[0] - a[0]).slice(0, k).map(p => p[1]));
+  const a = topIdx(ours), b = topIdx(gmgn);
+  let inter = 0;
+  for (const i of a) if (b.has(i)) inter++;
+  return inter / (a.size + b.size - inter); // Jaccard
+}
+
 export async function GET(request: NextRequest) {
   if (cronAuthFails(request)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   if (!isSupabaseConfigured()) return NextResponse.json({ error: 'Supabase not configured' }, { status: 503 });
@@ -104,6 +136,43 @@ export async function GET(request: NextRequest) {
   // --- would GMGN's own screen have re-selected the wallets WE verified as smart? ---
   const screenPassRate = both.length ? both.filter(r => r.screen_pass === true).length / both.length : NaN;
 
+  // --- RANK / SELECTION agreement (the decision-relevant view). Rank correlations
+  //     are unit-free, so they bypass the SOL-vs-USD + different-token-universe
+  //     definitional gaps and ask only "do the two AGREE ON ORDERING?". Selection
+  //     overlap asks the bottom line: would a GMGN gate pick the same wallets? ---
+  const profOurs = pf.map(r => Number(r.realized_pnl));
+  const profGmgn = pf.map(r => Number(r.screen_profit_usd));
+  const rank = {
+    win_rate_spearman: round(spearman(wrOurs, wrGmgn)),
+    profit_spearman: round(spearman(profOurs, profGmgn)),
+    // overlap of the top quartile / top half by profit (ours vs GMGN), Jaccard
+    profit_overlap_top25pct: round(overlapAtTop(profOurs, profGmgn, 0.25)),
+    profit_overlap_top50pct: round(overlapAtTop(profOurs, profGmgn, 0.50)),
+  };
+
+  // --- segment by activity: does agreement tighten for more-active (cleaner-
+  //     signal) wallets? Buckets on OUR total_trades. ---
+  function seg(label: string, pred: (r: Row) => boolean) {
+    const g = both.filter(pred);
+    const o = g.map(r => Number(r.win_rate)), m = g.map(r => Number(r.screen_win_rate));
+    const ae = g.map((_, i) => Math.abs(o[i] - m[i]));
+    const pfg = g.filter(r => r.realized_pnl != null && r.screen_profit_usd != null);
+    return {
+      bucket: label, n: g.length,
+      win_rate_mae: g.length ? round(ae.reduce((a, b) => a + b, 0) / ae.length) : null,
+      win_rate_spearman: g.length > 2 ? round(spearman(o, m)) : null,
+      profit_sign_agreement: pfg.length
+        ? round(pfg.filter(r => Math.sign(Number(r.realized_pnl)) === Math.sign(Number(r.screen_profit_usd))).length / pfg.length)
+        : null,
+    };
+  }
+  const tt = (r: Row) => Number(r.tokens_traded ?? 0);
+  const byActivity = [
+    seg('tokens<20', r => tt(r) < 20),
+    seg('tokens20-50', r => tt(r) >= 20 && tt(r) < 50),
+    seg('tokens50+', r => tt(r) >= 50),
+  ];
+
   return NextResponse.json({
     pairs_scored_both_ways: both.length,
     win_rate: {
@@ -118,6 +187,8 @@ export async function GET(request: NextRequest) {
     },
     profit_sign_agreement: round(signAgree),
     gmgn_screen_pass_rate_on_our_verified: round(screenPassRate),
-    note: 'win_rate & token_count are directly comparable; profit differs in units (SOL vs USD) so only sign/rank is meaningful. High win-rate correlation + low MAE + high sign-agreement ⇒ GMGN faithfully tracks chain reality and its ROI can be trusted for a GMGN-verified tier.',
+    rank_and_selection: rank,
+    by_activity: byActivity,
+    note: 'Absolute numbers differ by DEFINITION (GMGN counts ~2.6x more tokens incl. dust; profit is USD vs our SOL), so the decision-relevant metrics are the RANK correlations and selection overlap: if profit_spearman and profit_overlap_top25pct are high, a GMGN gate would pick ~the same wallets as Helius even though the raw numbers disagree.',
   }, { headers: { 'Cache-Control': 'no-store' } });
 }
