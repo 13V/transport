@@ -395,6 +395,19 @@ async function handleGetLeaderboard(
     const limit = Math.min(parseInt(searchParams.get('limit') || '100', 10), 100);
     const offset = parseInt(searchParams.get('offset') || '0', 10);
 
+    // NaN passes both range guards below (NaN < 1 and NaN < 0 are false) and
+    // would flow into .range(NaN, …) → empty 200 response that then gets CACHED.
+    if (!Number.isFinite(limit) || !Number.isFinite(offset)) {
+      return NextResponse.json(
+        {
+          error: 'Invalid limit/offset — must be numbers.',
+          code: 'INVALID_PARAMETER',
+          timestamp: new Date().toISOString(),
+        } as ErrorResponse,
+        { status: 400 }
+      );
+    }
+
     if (limit < 1 || limit > 100) {
       return NextResponse.json(
         {

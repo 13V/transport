@@ -27,6 +27,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getLiveBursts, type LiveBurst } from '../../../../../lib/indexer/live-bursts';
 import { validateApiKey, rateLimit, TIER_LIMITS } from '../../../../../lib/api-keys';
+import { envInt } from '../../../../../lib/indexer/env';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60; // Hobby cap; client reconnects via Last-Event-ID.
@@ -87,9 +88,12 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  // 3. Detection params (mirrors /live; SSE focuses on fresh bursts).
+  // 3. Detection params (mirrors /live; SSE focuses on fresh bursts). The default
+  // MUST match /live's env-tuned window: the old hardcoded 30 was the window the
+  // free feed abandoned because it "essentially never fired" — paying stream
+  // customers were getting a near-silent feed by default.
   const { searchParams } = request.nextUrl;
-  const windowSec = clampInt(searchParams.get('windowSec'), 30, 5, 300);
+  const windowSec = clampInt(searchParams.get('windowSec'), envInt('BURST_WINDOW_SEC', 180), 5, 300);
   const minBuyers = clampInt(searchParams.get('minBuyers'), 3, 2, 20);
 
   // 4. Resume cursor: Last-Event-ID header takes precedence over ?since=.

@@ -886,7 +886,7 @@ function ProofHeader({ stats }: { stats: LiveStats | null }) {
   const best = stats.bestCall;
   if (best && best.symbol && best.ret != null && Number.isFinite(best.ret)) {
     const inner = (
-      <>best <b>{best.symbol}</b> <span className="pos">+{f.pct(best.ret)}</span></>
+      <>best <b>{best.symbol}</b> <span className={best.ret >= 0 ? 'pos' : 'neg'}>{f.pct(best.ret)}</span></>
     );
     legs.push(
       best.mint ? (
@@ -1170,10 +1170,19 @@ export default function LiveFeed() {
     for (const b of incoming) seenRef.current.add(b.id);
   }, []);
 
+  // Server timestamp (ms) of the last applied payload — poll snapshots, SSE
+  // snapshots and SSE deltas all race; a snapshot generated BEFORE the data we
+  // already show must be discarded, or rows SSE just upserted vanish for a poll
+  // cycle and reappear (visible flicker), and the freshness dot lies.
+  const lastAppliedGenRef = useRef(0);
+
   // SNAPSHOT path — REPLACE the burst set with the authoritative current window.
   // Used by the poll fetch and by the SSE `snapshot` event. Self-heals aged-out
   // bursts because anything no longer present is dropped.
   const applySnapshot = useCallback((next: Burst[], genAt?: string | null, solUsd?: number) => {
+    const genMs = genAt ? +new Date(genAt) : Date.now();
+    if (Number.isFinite(genMs) && genMs < lastAppliedGenRef.current) return; // stale payload — ignore
+    lastAppliedGenRef.current = Number.isFinite(genMs) ? genMs : Date.now();
     flagNewIds(next);
     setBursts(next);
     setGeneratedAt(genAt ?? new Date().toISOString());
@@ -1191,6 +1200,10 @@ export default function LiveFeed() {
   // ids are appended (client-side sort/group re-rank them on render). Used by the
   // SSE `bursts` event. Never blanks the feed.
   const upsertBursts = useCallback((delta: Burst[], genAt?: string | null) => {
+    // Advance the ordering watermark so an older poll snapshot can't clobber
+    // rows this delta just applied (upserts themselves are safe to apply).
+    const genMs = genAt ? +new Date(genAt) : Date.now();
+    if (Number.isFinite(genMs) && genMs > lastAppliedGenRef.current) lastAppliedGenRef.current = genMs;
     if (!delta.length) {
       setGeneratedAt(genAt ?? new Date().toISOString());
       setLastOkAt(Date.now());
@@ -1207,20 +1220,26 @@ export default function LiveFeed() {
     setError(null);
   }, [flagNewIds]);
 
+  // Monotonic request sequence: a slow in-flight response from OLDER filter
+  // params (or an older poll) must not overwrite state written by a newer
+  // request — even the generatedAt watermark can't catch wrong-params data.
+  const fetchSeqRef = useRef(0);
+
   const fetchLive = useCallback(async (min: number, win: number, sol: number, srt: 'quality' | 'recent', early: boolean) => {
+    const seq = ++fetchSeqRef.current;
     try {
       const res = await fetch(
         `/api/smart-money/live?windowSec=${win}&minBuyers=${min}&minSol=${sol}&hours=6&limit=50&sort=${srt}${early ? '&tier=early' : ''}`
       );
       if (!res.ok) throw new Error('Failed to fetch live feed');
       const json = (await res.json()) as LiveResponse;
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || seq !== fetchSeqRef.current) return; // superseded — discard
       applySnapshot(json.bursts ?? [], json.generatedAt, json.solPriceUsd);
     } catch (err) {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || seq !== fetchSeqRef.current) return;
       setError(err instanceof Error ? err.message : 'Failed to load live feed');
     } finally {
-      if (mountedRef.current) setLoading(false);
+      if (mountedRef.current && seq === fetchSeqRef.current) setLoading(false);
     }
   }, [applySnapshot]);
 
@@ -1405,6 +1424,10 @@ export default function LiveFeed() {
       es.close();
       lastServerFrameAtRef.current = 0;
       setSseFrameFresh(false);
+      // Also drop sseOk: until the NEW stream's first frame there is no healthy
+      // push channel — leaving it true makes the freshness label claim "live"
+      // and suppresses realtime-triggered refetches with no stream attached.
+      setSseOk(false);
       if (esRef.current === es) esRef.current = null;
     };
   }, [applySnapshot, upsertBursts, minBuyers, windowSec, minSol, sort, layer]);
@@ -1820,7 +1843,10 @@ export default function LiveFeed() {
     );
   }
 
-  if (error) {
+  // Full-screen error ONLY when we have nothing to show. A single failed poll on
+  // a POPULATED live tape must not blank it into a dead-looking error card for a
+  // poll cycle — keep the rows; the freshness dot already signals degraded state.
+  if (error && bursts.length === 0) {
     return (
       <div className="view stack gap-24">
         <Header
@@ -2059,7 +2085,7 @@ export default function LiveFeed() {
         const parts = [f.short(addr, 4, 4)];
         if (t) parts.push(`${t}-tier`);
         if (roi != null && Number.isFinite(roi)) parts.push(`${roi >= 0 ? '+' : ''}${Math.round(roi)}% ROI`);
-        if (wr != null && Number.isFinite(wr)) parts.push(`${Math.round(wr)}% win`);
+        if (wr != null && Number.isFinite(wr)) parts.push(`${Math.round(wr * 100)}% win`); // winRate is a 0–1 fraction
         return parts.join(' ');
       })
       .join('\n');

@@ -14,12 +14,12 @@ export function short(a?: string | null, l = 4, r = 4): string {
 }
 
 export function num(n: number | null | undefined): string {
-  if (n == null || Number.isNaN(n)) return '—';
+  if (n == null || !Number.isFinite(n)) return '—'; // guards Infinity too, not just NaN
   return Number(n).toLocaleString('en-US');
 }
 
 export function compact(n: number | null | undefined): string {
-  if (n == null || Number.isNaN(n)) return '—';
+  if (n == null || !Number.isFinite(n)) return '—'; // "InfinityM" is not a number
   const a = Math.abs(n);
   const sign = n < 0 ? '-' : '';
   if (a >= 1e6) return `${sign}${round(a / 1e6, 2)}M`;

@@ -33,7 +33,11 @@ import { tokenLinks } from '../../../../lib/trade-links';
 import { evaluateWatchRules, type EvalRule } from '../../../../lib/watch-eval';
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 30;
+// The route ACKs 200 immediately and does ALL persistence in after(); if that
+// background work exceeds maxDuration it is killed and Helius will NOT retry
+// (it already got the 200) — trades would be silently lost. 60s (the Vercel
+// Hobby ceiling) gives the upsert + alert fan-out the full budget.
+export const maxDuration = 60;
 
 const CHUNK = 500;
 
@@ -422,10 +426,14 @@ async function runWatchRules(bursts: LiveBurst[], now: number): Promise<void> {
     let query = supabase
       .from('watch_rules')
       .select('id, owner, label, wallets, min_buyers, min_sol, holding_only, channels, muted');
-    if (batchWallets.length > 0) {
+    // Defense-in-depth: these strings derive from the (secret-gated) webhook
+    // payload and are string-joined into a PostgREST filter expression — keep
+    // only well-formed base58 addresses so nothing can mangle the filter.
+    const safeWallets = batchWallets.filter((w) => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(w));
+    if (safeWallets.length > 0) {
       // any-wallet rules (empty array OR null) OR rules overlapping the batch.
       query = query.or(
-        `wallets.ov.{${batchWallets.join(',')}},wallets.eq.{},wallets.is.null`
+        `wallets.ov.{${safeWallets.join(',')}},wallets.eq.{},wallets.is.null`
       );
     } else {
       // No wallets in this batch → only any-wallet rules can match.

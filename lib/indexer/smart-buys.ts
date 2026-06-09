@@ -154,8 +154,12 @@ export async function getSmartMoneyBuys(
     // 1. Resolve the smart-wallet set. Only verified (deep-scanned) wallets have
     // a trustworthy all-time ROI, so we restrict to them and then apply the
     // full curation gate in JS.
+    // profit_factor + consistency MUST be selected and passed through: if either
+    // SMART_MIN_* floor is enabled, isSmartWallet treats a missing value as a fail
+    // (`?? -1`), so omitting them would silently collapse THIS feed to empty while
+    // the live feed (which selects them — see live-bursts.ts) kept working.
     const statCols =
-      'wallet, realized_pnl, roi_pct, invested_sol, win_rate, total_trades, tokens_traded, last_trade_at, seeded';
+      'wallet, realized_pnl, roi_pct, invested_sol, win_rate, profit_factor, consistency, total_trades, tokens_traded, last_trade_at, seeded';
     // PUSH THE CHEAP GATE INTO SQL FIRST (mirrors app/api/status/route.ts's
     // buildGate). The OLD query fetched the top-SMART_SET_MAX verified rows BY
     // SCORE and only filtered to smart in JS — so once the verified set exceeds
@@ -213,6 +217,8 @@ export async function getSmartMoneyBuys(
             roiPct: r.roi_pct == null ? null : Number(r.roi_pct),
             investedSol: r.invested_sol == null ? null : Number(r.invested_sol),
             winRate: Number(r.win_rate),
+            profitFactor: r.profit_factor == null ? null : Number(r.profit_factor),
+            consistency: r.consistency == null ? null : Number(r.consistency),
             totalTrades: Number(r.total_trades),
             tokensTraded: Number(r.tokens_traded),
             lastTradeAt: r.last_trade_at,
@@ -246,22 +252,32 @@ export async function getSmartMoneyBuys(
     // chunks. We need SELLs to compute net buy/sell pressure for each token.
     const sinceMs = now - hours * 3_600_000;
     const sinceIso = new Date(sinceMs).toISOString();
-    const trades: any[] = [];
+    let trades: any[] = [];
 
-    for (const group of chunk(smartWallets, WALLET_CHUNK)) {
-      if (trades.length >= MAX_TRADE_ROWS) break;
-      const remaining = MAX_TRADE_ROWS - trades.length;
-      const tradeRead = await supabase
-        .from('trades')
-        .select('wallet, token_mint, trade_type, amount, price, block_time')
-        .in('trade_type', ['BUY', 'SELL'])
-        .in('wallet', group)
-        .gte('block_time', sinceIso)
-        .order('block_time', { ascending: false })
-        .limit(remaining);
-
+    // Same two fixes as live-bursts' sweep: (a) `.limit(>1000)` silently clamped
+    // to the PostgREST page cap — paginate via fetchAllRows; (b) the chunk-by-chunk
+    // budget with an early break starved later (lower-scored) wallets' trades
+    // entirely — fair per-chunk budget + global newest-first trim instead.
+    const groups = chunk(smartWallets, WALLET_CHUNK);
+    const perChunkCap = Math.max(400, Math.ceil((MAX_TRADE_ROWS * 2) / Math.max(1, groups.length)));
+    for (const group of groups) {
+      const tradeRead = await fetchAllRows<any>(
+        () =>
+          supabase
+            .from('trades')
+            .select('wallet, token_mint, trade_type, amount, price, block_time')
+            .in('trade_type', ['BUY', 'SELL'])
+            .in('wallet', group)
+            .gte('block_time', sinceIso)
+            .order('block_time', { ascending: false }) as any,
+        { cap: perChunkCap }
+      );
       if (tradeRead.error) return empty;
-      if (tradeRead.data) trades.push(...tradeRead.data);
+      trades.push(...tradeRead.data);
+    }
+    if (trades.length > MAX_TRADE_ROWS) {
+      trades.sort((a, b) => new Date(b.block_time).getTime() - new Date(a.block_time).getTime());
+      trades = trades.slice(0, MAX_TRADE_ROWS);
     }
 
     // 3. Aggregate by token_mint. Buys and sells are tracked separately so we

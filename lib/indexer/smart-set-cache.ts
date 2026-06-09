@@ -155,6 +155,12 @@ export async function readSnapshot(): Promise<SmartSet | null> {
 export async function writeSnapshot(set: SmartSet): Promise<void> {
   if (!isSupabaseConfigured()) return;
   if (!set || set.wallets.size === 0) return; // don't persist an empty snapshot
+  // NEVER persist a set whose entity (funding-cluster) resolve FAILED: the blob
+  // has no field for that flag, so other instances would rebuild it as "verified"
+  // with an EMPTY entity map for the full TTL — re-opening the split-wallet sybil
+  // inflation the fail-closed design exists to prevent. Skipping just means the
+  // next caller re-resolves.
+  if (set.entitiesUnverified) return;
 
   try {
     const blob: SnapshotBlob = {
