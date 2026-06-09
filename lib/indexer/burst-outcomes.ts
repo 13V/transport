@@ -459,31 +459,36 @@ export async function measureBursts(opts?: {
     // below.) The baseline is NO LONGER a precondition — measureBursts derives it
     // from the same USD candle series, so a row with a NULL price_at_burst is a
     // valid candidate (its baseline gets stamped on this pass).
-    const oldestNeeded = new Date(now - HORIZONS[0].ms).toISOString();
-    const read = await supabase
-      .from('live_bursts')
-      .select(
-        'id, mint, price_at_burst, peak_price_24h, window_end, ret_15m, ret_1h, ret_24h'
-      )
-      .lte('window_end', oldestNeeded)
-      // MUST have a baseline to measure a return. Requiring it also stops the
-      // pre-fix backlog (null-baseline bursts, oldest window_end) from permanently
-      // clogging the oldest-first scan so newly-baselined bursts never get reached.
-      .not('price_at_burst', 'is', null)
-      .or('ret_15m.is.null,ret_1h.is.null,ret_24h.is.null')
-      // NEWEST-first: sample-forward must catch a burst WHILE it's inside a leg's
-      // grace window (just past 15m / 1h / 24h). Oldest-first grabbed bursts already
-      // past their short-horizon grace (0 legs written); newest-first measures each
-      // burst as it crosses each horizon.
-      .order('window_end', { ascending: false })
-      .limit(maxBursts);
-
-    if (read.error) {
-      console.error('[BURSTS] measure read failed:', read.error.message);
-      return { measured: 0, scanned: 0 };
+    // PER-LEG candidate selection. Sample-forward must catch a burst WHILE it sits
+    // inside a horizon's grace window [now - h - grace, now - h]. A single scan
+    // can't cover all three windows at high burst volume (the newest-N fills up
+    // with fresh 15m-crossers and never reaches the 1h/24h-crossers), which biased
+    // the dataset to 15m only. So query EACH leg's window directly and union by id;
+    // the per-burst loop below then writes whichever legs are in-grace. Requiring a
+    // baseline also excludes the dead pre-fix backlog.
+    const cols = 'id, mint, price_at_burst, peak_price_24h, window_end, ret_15m, ret_1h, ret_24h';
+    const retCol = (k: '15m' | '1h' | '24h') => (k === '15m' ? 'ret_15m' : k === '1h' ? 'ret_1h' : 'ret_24h');
+    const legReads = await Promise.all(
+      HORIZONS.map((h) => {
+        const hi = new Date(now - h.ms).toISOString();             // horizon elapsed
+        const lo = new Date(now - h.ms - GRACE[h.key]).toISOString(); // ...but still in grace
+        return supabase
+          .from('live_bursts')
+          .select(cols)
+          .not('price_at_burst', 'is', null)
+          .is(retCol(h.key), null)
+          .gte('window_end', lo)
+          .lte('window_end', hi)
+          .order('window_end', { ascending: false })
+          .limit(maxBursts);
+      })
+    );
+    const byId = new Map<string, BurstRow>();
+    for (const r of legReads) {
+      if (r.error) { console.error('[BURSTS] measure read failed:', r.error.message); continue; }
+      for (const row of (r.data ?? []) as BurstRow[]) byId.set(row.id, row);
     }
-
-    const rows = (read.data ?? []) as BurstRow[];
+    const rows = [...byId.values()];
     dbg.scanned = rows.length;
     if (rows.length === 0) return { measured: 0, scanned: 0, dbg };
 
