@@ -438,6 +438,10 @@ export interface GetTokenMetaOptions {
   // When false, skips the extra getTokenLargestAccounts RPC per mint so a
   // large enrichment batch can stay within its request budget. Defaults on.
   includeTopHolder?: boolean;
+  // When true, skip the Helius DAS image fallback entirely (DexScreener-only) so
+  // the call spends ZERO Helius credits. Used for the wallet-page logo/ticker
+  // enrichment, where most tokens are DexScreener-listed and credit budget matters.
+  skipHelius?: boolean;
   /**
    * Override the cache freshness window for THIS call (ms). A cached entry is
    * only served when it is younger than this; older entries are force-refreshed
@@ -475,8 +479,13 @@ export async function getTokenMeta(
 
   const acc = new Map<string, Acc>();
   // DexScreener (names/symbols + fast CDN) and Helius (pump.fun image) in
-  // parallel so we always have the IPFS image as a fallback candidate.
-  await Promise.all([fetchDexScreener(toFetch, acc), fetchHelius(toFetch, acc)]);
+  // parallel so we always have the IPFS image as a fallback candidate. Callers
+  // that must avoid Helius credit spend (e.g. wallet-page logo enrichment) pass
+  // skipHelius — DexScreener-only, free; unlisted/fresh mints just get no logo.
+  await Promise.all([
+    fetchDexScreener(toFetch, acc),
+    options?.skipHelius ? Promise.resolve() : fetchHelius(toFetch, acc),
+  ]);
 
   // ONE cheap extra signal: largest non-pool holder %. Best-effort, gated to the
   // mints being resolved THIS cycle (cache absorbs the cost), capped concurrency
