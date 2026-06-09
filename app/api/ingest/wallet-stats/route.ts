@@ -68,6 +68,7 @@ interface ScreenInput {
   tokenCount?: number;
   tradeCount?: number;
   avgHoldSeconds?: number;
+  solBalance?: number; // GMGN native_balance — free balance for the drained-winner signal (no Helius)
 }
 
 /** POST — store GMGN screen results and flag the promising wallets. */
@@ -124,6 +125,20 @@ export async function POST(request: NextRequest) {
     upserted += rows.slice(i, i + CHUNK).length;
   }
 
+  // Best-effort: store the GMGN-reported SOL balance (drives the link-tracker's
+  // drained-winner prioritization) WITHOUT Helius. Kept separate + tolerant so a
+  // pre-0023 DB (no sol_balance column) never fails the screen ingest above.
+  const balRows = items
+    .filter((w) => typeof w?.address === 'string' && w.address.length >= 32 && w.address.length <= 44 && Number.isFinite(Number(w.solBalance)))
+    .map((w) => ({ wallet: w.address, sol_balance: Number(w.solBalance), balance_checked_at: now }));
+  let balanceStored = 0;
+  for (let i = 0; i < balRows.length; i += CHUNK) {
+    const slice = balRows.slice(i, i + CHUNK);
+    const { error } = await supabase.from('wallet_stats').upsert(slice, { onConflict: 'wallet' });
+    if (error) break; // column likely missing (pre-0023) — skip silently, screening already succeeded
+    balanceStored += slice.length;
+  }
+
   const passed = rows.filter((r) => r.screen_pass).length;
-  return NextResponse.json({ ok: true, received: items.length, upserted, screenPass: passed });
+  return NextResponse.json({ ok: true, received: items.length, upserted, screenPass: passed, balanceStored });
 }

@@ -93,6 +93,7 @@ async function main() {
           tokenCount: s.pnl_stat?.token_num ?? 0,
           tradeCount: (s.buy ?? 0) + (s.sell ?? 0),
           avgHoldSeconds: Math.round(s.pnl_stat?.avg_holding_period ?? 0),
+          solBalance: Number(s.native_balance ?? 0),
         });
       }
     } catch (err) {
