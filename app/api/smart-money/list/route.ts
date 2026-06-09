@@ -135,7 +135,7 @@ export async function GET(request: NextRequest) {
   // applied in JS below so the final set matches the gate exactly.
   const baseCols =
     'wallet, score, realized_pnl, win_rate, consistency, total_trades, tokens_traded, last_trade_at';
-  const extCols = `${baseCols}, seeded, roi_pct, invested_sol, verified`;
+  const extCols = `${baseCols}, seeded, roi_pct, invested_sol, verified, screen_win_rate`;
   // Map the requested sort to a DB column so ORDER BY happens in PostgREST (the
   // page comes back already sorted, matching the JS comparators below). `recent`
   // and `roi` sort nulls last in desc, which the JS comparators emulate via the
@@ -259,6 +259,7 @@ export async function GET(request: NextRequest) {
         roiPct: r.roi_pct == null ? null : Number(r.roi_pct),
         investedSol: r.invested_sol == null ? null : Number(r.invested_sol),
         winRate: Number(r.win_rate),
+        screenWinRate: r.screen_win_rate == null ? null : Number(r.screen_win_rate),
         totalTrades: Number(r.total_trades),
         tokensTraded: Number(r.tokens_traded),
         lastTradeAt: r.last_trade_at,

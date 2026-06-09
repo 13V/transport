@@ -25,7 +25,7 @@ export default function PnLLeaderboard({ wallets }: PnLLeaderboardProps) {
             <th className="text-left py-3 px-2">Rank</th>
             <th className="text-left py-3 px-2">Address</th>
             <th className="text-right py-3 px-2">Realized PnL</th>
-            <th className="text-right py-3 px-2">Win Rate</th>
+            <th className="text-right py-3 px-2" title="Win rate on realized round-trips (tokens actually sold); excludes un-exited bags">Realized Win</th>
             <th className="text-right py-3 px-2">Trades</th>
           </tr>
         </thead>
