@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import {
   ChevronUp,
   ChevronDown,
@@ -54,6 +55,10 @@ interface ListWallet {
   tokensTraded: number;
   lastTradeAt: string | null;
   seeded: boolean;
+  // "Track them forever" successor intel (optional — absent from older API
+  // responses / pre-migration DBs, so both render nothing when missing).
+  drained?: boolean;
+  fundedBy?: string | null;
 }
 
 interface ListResponse {
@@ -610,6 +615,42 @@ export default function SmartMoneyLeaderboard({ initialQuery = '' }: { initialQu
                           <span className="wmark faint" title="Trusted smart wallet">
                             <Sparkles size={12} />
                           </span>
+                        )}
+                        {/* "Track them forever": drained dot + heir hint. Deliberately
+                            NOT hide-sm — the successor trail is the whole point of
+                            keeping a drained winner on the board, so it must survive
+                            the mobile column cull. Kept tiny so the row stays scannable. */}
+                        {w.drained && (
+                          <span
+                            title="Balance ~0 — profits moved; open the wallet to see the successor"
+                            aria-label="Drained wallet"
+                            style={{
+                              width: 7,
+                              height: 7,
+                              borderRadius: '50%',
+                              background: 'var(--warn, #e0a800)',
+                              display: 'inline-block',
+                              flexShrink: 0,
+                            }}
+                          />
+                        )}
+                        {w.fundedBy && (
+                          <Link
+                            href={`/smart-money/${w.fundedBy}`}
+                            // Row click opens THIS wallet; the heir hint must navigate
+                            // to the FUNDER instead (same pattern as the GMGN button).
+                            onClick={(e) => e.stopPropagation()}
+                            title={`Funded by a tracked wallet (${f.short(w.fundedBy, 4, 4)}) — open the funder`}
+                            style={{
+                              fontSize: 10,
+                              color: 'var(--warn, #e0a800)',
+                              textDecoration: 'none',
+                              whiteSpace: 'nowrap',
+                              flexShrink: 0,
+                            }}
+                          >
+                            ↳ heir
+                          </Link>
                         )}
                       </div>
                     </td>
