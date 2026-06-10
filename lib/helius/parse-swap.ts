@@ -15,9 +15,10 @@
  * `tokenTransfers` + `nativeTransfers`.
  */
 
+import { isQuoteMint } from '../quote-mints';
+
 const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 const LAMPORTS_PER_SOL = 1e9;
-
 /** A row matching the `trades` table (mirrors lib/indexer/run-indexer.ts). */
 export interface TradeRow {
   wallet: string;
@@ -177,7 +178,9 @@ function fromSwapEvent(
     const amount = Math.abs(legTokenAmount(out));
     let sol = Number.isFinite(nativeInputSol) ? nativeInputSol : 0;
     sol += sumWsol(wsolInputs);
-    if (out.mint && Number.isFinite(amount) && amount > 0 && sol > 0) {
+    // A SOL→USDC/USDT swap parses here as "buying" the stablecoin; reject it so
+    // quote/settlement assets never enter `trades` as a traded token.
+    if (out.mint && !isQuoteMint(out.mint) && Number.isFinite(amount) && amount > 0 && sol > 0) {
       return { token_mint: out.mint, trade_type: 'BUY', amount, sol_amount: sol };
     }
   }
@@ -188,7 +191,7 @@ function fromSwapEvent(
     const amount = Math.abs(legTokenAmount(inp));
     let sol = Number.isFinite(nativeOutputSol) ? nativeOutputSol : 0;
     sol += sumWsol(wsolOutputs);
-    if (inp.mint && Number.isFinite(amount) && amount > 0 && sol > 0) {
+    if (inp.mint && !isQuoteMint(inp.mint) && Number.isFinite(amount) && amount > 0 && sol > 0) {
       return { token_mint: inp.mint, trade_type: 'SELL', amount, sol_amount: sol };
     }
   }

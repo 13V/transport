@@ -17,6 +17,7 @@
  */
 
 import { getSupabase, isSupabaseConfigured } from '../supabase-client';
+import { isQuoteMint } from '../quote-mints';
 import { fetchTokenPricesSol } from '../prices/price-oracle';
 import { getBroadSmartCriteria, isSmartWallet } from './curation';
 import { buildClusters } from './clusters';
@@ -306,6 +307,7 @@ export async function getSmartMoneyBuys(
     for (const t of trades) {
       const mint = String(t.token_mint);
       if (!mint) continue;
+      if (isQuoteMint(mint)) continue; // never burst on USDC/USDT/WSOL etc.
       const wallet = String(t.wallet);
       const type = String(t.trade_type);
       const amount = Number(t.amount);

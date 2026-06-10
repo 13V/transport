@@ -25,6 +25,7 @@
 
 import { createHash } from 'crypto';
 import { getSupabase, isSupabaseConfigured } from '../supabase-client';
+import { isQuoteMint } from '../quote-mints';
 import { getBroadSmartCriteria, isSmartWallet } from './curation';
 import { buildClusters } from './clusters';
 import { tierFromScore } from '../format';
@@ -1194,6 +1195,7 @@ async function advanceLastTradeWithSells(
     const latestSell = new Map<string, { price: number; ts: number }>();
     for (const row of data as any[]) {
       const mint = String(row.token_mint);
+      if (isQuoteMint(mint)) continue;
       if (!mint || latestSell.has(mint)) continue; // newest-first: first wins
       const price = Number(row.price);
       const ts = row.block_time ? new Date(row.block_time).getTime() : NaN;
@@ -1306,6 +1308,7 @@ export async function getLiveBursts(opts: {
     for (const t of trades) {
       const mint = String(t.token_mint);
       if (!mint) continue;
+      if (isQuoteMint(mint)) continue; // never burst on USDC/USDT/WSOL etc.
       const wallet = String(t.wallet);
       const amount = Number(t.amount);
       const price = Number(t.price);
@@ -1485,6 +1488,7 @@ export async function detectBurstsForMintsBothSides(
       if (!wallets.has(wallet)) continue; // smart-money only
       const mint = String(t.token_mint);
       if (!mint) continue;
+      if (isQuoteMint(mint)) continue; // never burst on USDC/USDT/WSOL etc.
       const amount = Number(t.amount);
       const price = Number(t.price);
       const sol =
