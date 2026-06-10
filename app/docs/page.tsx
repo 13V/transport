@@ -108,12 +108,14 @@ const ENDPOINTS: EndpointDoc[] = [
     cache: 'public, 300s',
     res: {
       count: 1486,
-      criteria: { minRoiPct: 50, minWinRate: 0.5, minTrades: 20 },
+      criteria: { minRoiPct: 15, minInvestedSol: 2, minTrades: 15, minTokens: 8 },
       generatedAt: '2026-06-06T12:00:00Z',
       wallets: [
         {
           address: '9xQe…stub',
           score: 88.1,
+          tier: 'S',
+          smartTier: 'S',
           pnl: 642.3,
           roiPct: 3920.0,
           investedSol: 16.4,
@@ -124,6 +126,11 @@ const ENDPOINTS: EndpointDoc[] = [
           tokensTraded: 96,
           lastTradeAt: '2026-06-06T10:14:00Z',
           seeded: false,
+          // "Track them forever" successor intel: drained = balance ~0 (profits
+          // pulled / trader likely on a new wallet); fundedBy = the proven wallet
+          // that funded THIS one (its lineage). Both omitted on pre-migration DBs.
+          drained: false,
+          fundedBy: null,
         },
       ],
     },
@@ -163,18 +170,18 @@ const ENDPOINTS: EndpointDoc[] = [
     name: 'Live buy bursts',
     desc: 'Buy bursts — moments where ≥N distinct smart-money entities bought the SAME token inside a short window. The live, time-sensitive feed: "smart money just piled into X." Each burst has a stable content-hash id (constant as the window absorbs more buys, so clients can dedupe), a finalized flag, and the response carries a nextCursor for ?since= polling. Free and key-less.',
     params: [
-      ['windowSec', 'number', 'Burst window in seconds — clamped 5–300 (default 30).'],
+      ['windowSec', 'number', 'Burst window in seconds — clamped 5–300 (default 180).'],
       ['minBuyers', 'number', 'Distinct entities required to fire — clamped 2–20 (default 3).'],
       ['hours', 'number', 'Look-back window in hours — clamped 1–48 (default 6).'],
       ['limit', 'number', 'Max bursts to return — clamped 1–200 (default 50).'],
       ['minSol', 'number', 'Only bursts with solTotal ≥ minSol (default 0).'],
       ['since', 'iso | ms', 'Only bursts with windowEnd > since — pass back the prior nextCursor to fetch only newer bursts (bot polling).'],
-      ['sort', 'quality | recent', 'Ranking — quality (default, tier-weighted conviction + size) or recent (newest first).'],
+      ['sort', 'quality | recent', 'Ranking — quality (default) or recent (newest first). The quality score blends conviction (buyer tiers + size), buyer QUALITY (mean verified ROI of the buyers), an S-tier lead-buyer bonus, funded-fresh "heir" buyers, the signal type\'s MEASURED hit-rate, and demotes bursts whose own buyers are already exiting. Stablecoins / quote mints (USDC, USDT, wSOL, …) are never surfaced.'],
     ],
     cache: 'public, 2s + SWR',
     res: {
       generatedAt: '2026-06-06T12:00:00Z',
-      windowSec: 30,
+      windowSec: 180,
       minBuyers: 3,
       count: 1,
       nextCursor: '2026-06-06T11:59:48Z',
@@ -189,11 +196,17 @@ const ENDPOINTS: EndpointDoc[] = [
           windowEnd: '2026-06-06T11:59:48Z',
           sampleBuyers: ['7Np4…', '9xQe…'],
           tiers: ['S', 'A', null, 'B'],
+          leadTier: 'S',
           finalized: true,
           symbol: 'WIF',
           marketCapUsd: 184000000,
           liquidityUsd: 920000,
           priceChange24h: 12.4,
+          // Smart-money EXIT signal (when known): are the buyers already selling?
+          someBuyersExited: false,
+          netSolFlow: 128.42,
+          // GMGN token-security (rug/bundle avoidance) — present once covered.
+          security: { bundlerRate: 0.08, sniperCount: 2, creatorRugCount: 0, isHoneypot: false },
         },
       ],
     },
@@ -456,8 +469,8 @@ function OverviewSection() {
           <ul className="muted" style={{ margin: 0, paddingLeft: 18, fontSize: 13.5, lineHeight: 1.6 }}>
             <li>
               <b>Bursts</b> = ≥N distinct verified entities buying the same token
-              in a short window (default 3 buyers / 30s; tunable per query and per
-              alert).
+              in a short window (default 3 buyers / 180s; tunable per query and per
+              alert). Stablecoins / quote mints are excluded — only real tokens.
             </li>
             <li>
               <b>Entity clustering</b> collapses one actor&apos;s many wallets into
@@ -466,17 +479,35 @@ function OverviewSection() {
             </li>
             <li>
               <b>Accurate PnL.</b> Wallets are <b>FIFO-replayed</b> over their
-              on-chain swap history for accurate all-time realized PnL, ROI%, win
-              rate, and consistency (SOL-denominated).
+              on-chain swap history for accurate all-time realized PnL, ROI%,
+              <b> realized</b> win rate, and consistency (SOL-denominated).
+            </li>
+            <li>
+              <b>Quality ranking, not just loudest.</b> The feed orders bursts by a
+              composite that weighs buyer quality (verified ROI), an S-tier
+              first-mover, funded-fresh &quot;heir&quot; buyers, the signal type&apos;s
+              measured hit-rate, and demotes bursts whose buyers are already exiting.
+            </li>
+            <li>
+              <b>Safety, loud.</b> Each card carries a verdict plus GMGN
+              token-security warnings — <b>bundled supply</b>, <b>serial-rugger
+              creators</b>, honeypots and sell-tax force a DANGER flag, so you avoid
+              the rugs, not just chase the runners.
+            </li>
+            <li>
+              <b>Track them forever.</b> When a proven wallet drains its balance and
+              moves to a fresh wallet, the funding graph follows the SOL to surface
+              the successor — so a winner switching wallets doesn&apos;t lose you.
             </li>
             <li>
               <b>Every call is measured.</b> Each burst&apos;s outcome is tracked
               against real price history and published — wins <i>and</i> losses.
-              See the{' '}
+              Per-signal hit-rates appear right on the cards (📊 badge) once a real
+              sample exists. See the{' '}
               <a className="endpoint" style={{ textDecoration: 'underline' }} href="/backtest">
                 /backtest
               </a>{' '}
-              page for the measured hit-rates and returns.
+              page for the full measured hit-rates and returns.
             </li>
           </ul>
         </div>
@@ -679,6 +710,13 @@ function AlertsSection() {
           Push is the delivery channel on this page (rules are keyed to your
           device). Each rule can be <b>muted</b> individually to pause it without
           deleting it. Telegram delivery is handled separately by the bot above.
+        </p>
+        <p className="muted" style={P}>
+          <b>Signal, not noise.</b> The broadcast burst alerts run through a
+          quality gate before sending: a signal type with a <b>measured</b> losing
+          record (low 1h hit-rate over a real sample), a weak burst (no S-tier
+          wallet and few buyers), or a <b>bundle-flagged</b> token is suppressed.
+          Your own watch-rule pushes are explicit opt-ins and are never gated.
         </p>
       </div>
     </section>
