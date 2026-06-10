@@ -18,10 +18,40 @@
  */
 
 import { getLiveBursts, qualityScore, type LiveBurst } from './live-bursts';
+import { getBurstStats } from './burst-outcomes';
 import { getTokenMeta } from '../token-meta';
 import { fetchTokenPricesSol } from '../prices/price-oracle';
 import { getSupabase, isSupabaseConfigured } from '../supabase-client';
 import { envInt } from './env';
+
+/**
+ * MEASURED-TYPE PRIORS for the quality ranking — the outcome engine's per-type
+ * hit-rates folded back into selection (audit: outcomes were measured but never
+ * used to rank). A type with a PROVEN edge ranks up; a proven loser ranks down;
+ * unmeasured/small-n types get 0 (no bias — innocent until measured).
+ * Bonus = (hitRate1h − 30) / 20, clamped to ±2, only when n ≥ 20.
+ * Cached 10 min module-wide: getBurstStats reads the DB, the feed builds ~every
+ * 2s, and priors only move as fast as outcomes accrue. FAIL-OPEN: any error
+ * yields an empty map (ranking degrades to the prior-less score, never breaks).
+ */
+let typePriorCache: { at: number; map: Map<string, number> } | null = null;
+const TYPE_PRIOR_TTL_MS = 10 * 60_000;
+async function getTypePriors(): Promise<Map<string, number>> {
+  if (typePriorCache && Date.now() - typePriorCache.at < TYPE_PRIOR_TTL_MS) return typePriorCache.map;
+  const map = new Map<string, number>();
+  try {
+    const stats = await getBurstStats(72);
+    for (const [type, s] of Object.entries(stats.byType ?? {})) {
+      if (s.n >= 20 && s.hitRate1h != null && Number.isFinite(s.hitRate1h)) {
+        map.set(type, Math.max(-2, Math.min(2, (s.hitRate1h - 30) / 20)));
+      }
+    }
+  } catch {
+    // fail-open: empty priors
+  }
+  typePriorCache = { at: Date.now(), map };
+  return map;
+}
 
 /** Inputs to buildLiveFeed — already clamped/parsed by the caller (the routes). */
 export interface BuildLiveFeedParams {
@@ -129,12 +159,15 @@ async function computeLiveFeed(p: BuildLiveFeedParams): Promise<LiveFeedResult> 
     return true;
   });
 
+  // Quality ranking now folds in the measured-type priors (proven hit-rates per
+  // signal type) on top of the buyer-quality/lead-tier upgrades in qualityScore.
+  const priors = sort === 'quality' ? await getTypePriors() : undefined;
   bursts.sort((a, b) => {
     if (sort === 'recent') {
       return new Date(b.windowEnd).getTime() - new Date(a.windowEnd).getTime();
     }
     // quality: composite desc, recency as tiebreak.
-    const q = qualityScore(b) - qualityScore(a);
+    const q = qualityScore(b, priors) - qualityScore(a, priors);
     if (q !== 0) return q;
     return new Date(b.windowEnd).getTime() - new Date(a.windowEnd).getTime();
   });
@@ -221,6 +254,25 @@ async function computeLiveFeed(p: BuildLiveFeedParams): Promise<LiveFeedResult> 
   // indexed SELL query for the whole (capped) feed. Resilient: on any failure
   // the bursts are returned unchanged (fields stay undefined).
   bursts = await annotateSmartSells(bursts, hours);
+
+  // EXIT-AWARE RE-RANK (quality sort only). netSolFlow/someBuyersExited only
+  // exist AFTER enrichment, so the detection-time sort above can't see them: a
+  // burst whose own smart buyers are already dumping must not sit at the top of
+  // the feed like fresh accumulation (audit: these were computed and DISPLAYED
+  // but never ranked on). This re-orders only the visible (capped) page —
+  // page membership was decided by the detection-time score, deliberately, so
+  // the cheap pass stays cheap.
+  if (sort === 'quality') {
+    const adj = (b: LiveBurst): number =>
+      qualityScore(b, priors) -
+      (b.someBuyersExited ? 2 : 0) -
+      (typeof b.netSolFlow === 'number' && b.netSolFlow < 0 ? 1.5 : 0);
+    bursts.sort((a, b) => {
+      const q = adj(b) - adj(a);
+      if (q !== 0) return q;
+      return new Date(b.windowEnd).getTime() - new Date(a.windowEnd).getTime();
+    });
+  }
 
   // ONE SOL/USD price read per feed build, for client USD conversions (avg ape
   // size). getTokenMeta is batched + ~2min cached, so this is effectively free.

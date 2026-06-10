@@ -64,7 +64,18 @@ interface SmartWalletRow {
   tokensTraded: number;
   lastTradeAt: string | null;
   seeded: boolean;
+  // "Track them forever" successor intel (migrations 0022/0023). drained = the
+  // wallet's SOL balance has gone to ~0 (profits pulled / trader likely moved to
+  // a fresh wallet); fundedBy = the proven wallet that funded THIS one, so the
+  // UI can point back at the lineage. Both degrade (false/null) pre-migration.
+  drained: boolean;
+  fundedBy: string | null;
 }
+
+// Balance below this ⇒ "drained". MUST mirror DRAINED_SOL in
+// components/WalletProfile.tsx so the leaderboard dot and the profile badge
+// agree on which wallets read as drained.
+const DRAINED_SOL = 1;
 
 function csvEscape(v: unknown): string {
   const s = String(v ?? '');
@@ -136,6 +147,11 @@ export async function GET(request: NextRequest) {
   const baseCols =
     'wallet, score, realized_pnl, win_rate, consistency, total_trades, tokens_traded, last_trade_at';
   const extCols = `${baseCols}, seeded, roi_pct, invested_sol, verified, screen_win_rate`;
+  // Successor-intel columns (sol_balance from 0023, funded_by from the link
+  // tracker) get their OWN select tier: a DB that has the accurate columns but
+  // not these yet degrades to the plain extended fetch (keeping roi/verified)
+  // instead of collapsing all the way to baseCols.
+  const extColsWithSuccessor = `${extCols}, sol_balance, funded_by`;
   // Map the requested sort to a DB column so ORDER BY happens in PostgREST (the
   // page comes back already sorted, matching the JS comparators below). `recent`
   // and `roi` sort nulls last in desc, which the JS comparators emulate via the
@@ -209,7 +225,11 @@ export async function GET(request: NextRequest) {
   const fetchScan = (cols: string) =>
     fetchAllRows(() => buildExt(cols), { cap: scanTarget, pageSize: scanPageSize });
 
-  const extRead = await fetchScan(extCols);
+  // Tiered tolerance (mirrors the screen_win_rate addition): try the widest
+  // column set first, drop the successor columns on a pre-migration DB, and only
+  // then fall back to the base columns below.
+  const extSuccessorRead = await fetchScan(extColsWithSuccessor);
+  const extRead = extSuccessorRead.error ? await fetchScan(extCols) : extSuccessorRead;
 
   // Degraded / pre-migration fallback: if the accurate columns (or gate filters)
   // aren't available, fall back to a base-column fetch (scanned the same way).
@@ -428,6 +448,10 @@ export async function GET(request: NextRequest) {
     tokensTraded: Number(r.tokens_traded),
     lastTradeAt: r.last_trade_at ?? null,
     seeded: Boolean(r.seeded),
+    // null/missing sol_balance (unchecked or pre-0023) is NOT drained — only an
+    // actually-measured ~0 balance earns the flag, matching WalletProfile.
+    drained: r.sol_balance != null && Number(r.sol_balance) < DRAINED_SOL,
+    fundedBy: r.funded_by == null ? null : String(r.funded_by),
   }));
 
   if (format === 'addresses') {

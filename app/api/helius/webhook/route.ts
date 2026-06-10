@@ -28,6 +28,7 @@ import {
 } from '../../../../lib/indexer/live-bursts';
 import { readCooldowns, writeCooldowns } from '../../../../lib/alerts/cooldowns';
 import { sendAlert, escapeHtml } from '../../../../lib/alerts/notifier';
+import { shouldAlert } from '../../../../lib/alerts/quality-gate';
 import { sendWebPushToAll, sendWebPushToOwner } from '../../../../lib/push';
 import { tokenLinks } from '../../../../lib/trade-links';
 import { evaluateWatchRules, type EvalRule } from '../../../../lib/watch-eval';
@@ -166,6 +167,22 @@ async function runBurstAlerts(touchedMints: string[]): Promise<void> {
     for (const [mint, b] of bestByMint) {
       const last = cooldowns[mint];
       if (typeof last === 'number' && now - last < cooldownMs) continue; // cooling
+
+      // OUTCOME-PROVEN QUALITY GATE — last check before the sends. Suppresses
+      // measured-loser signal types, weak no-S/low-buyer bursts, and flagged
+      // bundles (lib/alerts/quality-gate; fail-open, env kill-switch). Checked
+      // AFTER the cooldown so a suppressed burst never burns the mint's cooldown
+      // and a cooling mint never costs a stats read.
+      const gate = await shouldAlert({
+        type: b.type,
+        tiers: b.tiers,
+        buyers: b.buyers,
+        bundleFlag: b.bundleFlag,
+      });
+      if (!gate.ok) {
+        console.log(`[ALERT-GATE] suppressed ${mint}: ${gate.reason}`);
+        continue;
+      }
 
       const symbol = b.symbol ? `$${b.symbol}` : `${mint.slice(0, 6)}…`;
       const mix = tierMix(b.tiers);
