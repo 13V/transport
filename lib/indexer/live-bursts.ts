@@ -229,6 +229,20 @@ export interface LiveBurst {
   bundleFlag?: boolean;
   /** Where bundleFlag came from (for transparency/debugging). undefined when unchecked. */
   bundleSource?: 'gmgn' | 'none';
+  /**
+   * GMGN token-security snapshot (token_security table, fed by the CI worker —
+   * see app/api/ingest/token-security). undefined when no row exists yet; the
+   * card renders warnings only from present fields, never fabricates.
+   */
+  security?: {
+    bundlerRate?: number | null;     // bundler wallets / holders, 0..1
+    sniperCount?: number | null;
+    top10HolderRate?: number | null; // 0..1
+    rugRatio?: number | null;        // 0..1
+    isHoneypot?: boolean | null;
+    sellTax?: number | null;         // 0..1
+    creatorRugCount?: number | null; // rug-pattern tokens in the creator's history
+  };
 }
 
 export interface LiveBurstsResult {
