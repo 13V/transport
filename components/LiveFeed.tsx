@@ -108,6 +108,9 @@ interface LiveStats {
   hitRate24h?: number | null;
   bestCall?: { symbol?: string | null; mint?: string | null; ret?: number | null } | null;
   windowHours?: number | null;
+  /** Per-signal-type measured outcomes (absent pre-migration-0021). Powers the
+   *  per-card "measured edge" badge — proof, not promises. */
+  byType?: Record<string, { n: number; medianRet1h: number | null; hitRate1h: number | null }>;
 }
 
 // --- Wave 3: inline price sparkline series (from /api/token/ohlcv/batch) ---
@@ -2064,6 +2067,15 @@ export default function LiveFeed() {
     const earlyTag = earlyBadge(b);
     const showBundle = b.bundleFlag === true;
 
+    // MEASURED EDGE — this signal type's REAL forward-return record (proof, not
+    // promises): hit-rate + median 1h return measured by the outcome engine.
+    // Only rendered with a meaningful sample (n ≥ 20); nothing is fabricated.
+    const typeStats = stats?.byType?.[b.type ?? 'burst'];
+    const measured =
+      typeStats && typeStats.n >= 20 && typeStats.hitRate1h != null && Number.isFinite(typeStats.hitRate1h)
+        ? typeStats
+        : null;
+
     // --- EXIT SIGNAL (Part B). Render only when a field is present. ---
     const hasExitData =
       b.someBuyersExited != null || b.netSolFlow != null || b.smartSellWallets != null;
@@ -2244,6 +2256,31 @@ export default function LiveFeed() {
                 }}
               >
                 ⚡ {earlyTag.label}
+              </span>
+            )}
+            {/* MEASURED EDGE badge — this signal type's real, measured forward
+                returns. The differentiator: receipts, not vibes. */}
+            {measured && (
+              <span
+                title={`Measured outcomes for "${b.type ?? 'burst'}" signals (last 24h, n=${measured.n}): ${Math.round(measured.hitRate1h!)}% were up at 1h${measured.medianRet1h != null ? `, median ${measured.medianRet1h >= 0 ? '+' : ''}${measured.medianRet1h.toFixed(1)}%` : ''}. Measured from real price history by the outcome tracker.`}
+                style={{
+                  fontSize: '10px',
+                  fontWeight: 700,
+                  letterSpacing: '0.02em',
+                  padding: '1px 6px',
+                  borderRadius: '4px',
+                  whiteSpace: 'nowrap',
+                  background: 'var(--surface-2)',
+                  border: '1px solid var(--border)',
+                  color:
+                    measured.medianRet1h != null && measured.medianRet1h >= 0
+                      ? 'var(--pos)'
+                      : 'var(--neg)',
+                }}
+              >
+                📊 {Math.round(measured.hitRate1h!)}% hit
+                {measured.medianRet1h != null &&
+                  ` · med ${measured.medianRet1h >= 0 ? '+' : ''}${measured.medianRet1h.toFixed(0)}% 1h`}
               </span>
             )}
             {/* BUNDLE / sniper risk chip — the user's one real pump.fun risk.

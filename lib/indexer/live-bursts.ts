@@ -1104,11 +1104,42 @@ export function detectEarlySignalsForRows(
   return out;
 }
 
-/** Composite "quality" score for a burst: tier-weighted conviction + size. */
-function qualityScore(b: LiveBurst): number {
+/**
+ * Composite "quality" score for a burst — the feed's ranking heart. Beyond the
+ * original tier-weighted conviction + size, it now folds in the quality signals
+ * we compute anyway (audit finding: selection ranked on almost none of them):
+ *  - WHO is buying: mean verified ROI of the buyers (a burst of +300%-ROI wallets
+ *    outranks one of barely-passing wallets at equal size), bounded so one
+ *    outlier wallet can't dominate;
+ *  - WHO leads: an S-tier wallet being FIRST into the streak is the strongest
+ *    early-conviction precursor (+1);
+ *  - inherited buyers: a funded-fresh wallet of a proven winner buying is high
+ *    signal (+0.5 each, capped);
+ *  - WHAT the signal type is worth: optional measured-outcome prior from
+ *    getBurstStats().byType — types with a PROVEN hit-rate rank up, proven
+ *    losers rank down (supplied by the feed; detection-time callers omit it).
+ */
+function qualityScore(b: LiveBurst, typePrior?: Map<string, number>): number {
   let tierSum = 0;
   for (const t of b.tiers) tierSum += t ? TIER_WEIGHT[t] ?? 0.5 : 0.5;
-  return tierSum + Math.log1p(Math.max(0, b.solTotal));
+  let score = tierSum + Math.log1p(Math.max(0, b.solTotal));
+
+  // Buyer quality: mean ROI of buyers with verified stats, normalized so +300%
+  // mean ROI ≈ +1.5 score. Capped per-wallet at 500% so one 100x wallet doesn't
+  // swamp the conviction count.
+  const rois = (b.buyerStats ?? [])
+    .map((s) => (s.roiPct != null && Number.isFinite(s.roiPct) ? Math.min(s.roiPct, 500) : null))
+    .filter((r): r is number => r != null);
+  if (rois.length) {
+    const mean = rois.reduce((a, r) => a + r, 0) / rois.length;
+    score += Math.max(-0.5, Math.min(1.5, mean / 200));
+  }
+
+  if (b.leadTier === 'S') score += 1;
+  if (b.inheritedBuyers) score += Math.min(1, b.inheritedBuyers * 0.5);
+
+  if (typePrior) score += typePrior.get(b.type ?? 'burst') ?? 0;
+  return score;
 }
 
 /**
