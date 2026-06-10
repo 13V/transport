@@ -1,0 +1,42 @@
+name: GMGN token security
+
+# Rug/bundle avoidance data: fetches GMGN token-security (bundler/sniper rates,
+# holder concentration, honeypot/taxes, creator rug history) for the tokens our
+# bursts fire on, so the live feed can flag dangerous tokens loudly. gmgn-cli
+# CANNOT run on Vercel, so this lives in CI. Zero Helius.
+#
+# Uses the same repo secrets as gmgn-screen.yml: GMGN_API_KEY, CRON_SECRET
+# (and optional repo var TRANSPORT_URL).
+
+on:
+  workflow_dispatch: {}
+  # Every 30 min (offset from the other gmgn jobs). Schedules run only from the
+  # default branch.
+  schedule:
+    - cron: '7,37 * * * *'
+
+concurrency:
+  group: gmgn-token-security
+  cancel-in-progress: false
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install gmgn-cli
+        run: npm install -g gmgn-cli@1.4.3
+
+      - name: Fetch token security via GMGN
+        env:
+          TRANSPORT_URL: ${{ vars.TRANSPORT_URL || 'https://transport-topaz-eight.vercel.app' }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
+          MAX_TOKENS: '60'
+        run: node scripts/gmgn-token-security.mjs

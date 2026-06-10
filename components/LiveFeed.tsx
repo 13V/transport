@@ -85,6 +85,17 @@ interface Burst {
   netSolFlow?: number | null;          // buys − sells SOL (+ accumulating, − distributing)
   smartSellWallets?: number | null;    // count of smart wallets that SOLD in-window
   someBuyersExited?: boolean | null;   // a buyer flipped to selling
+  /** GMGN token-security snapshot (rug/bundle avoidance) — absent until the CI
+   *  worker has covered this mint; render warnings only from present fields. */
+  security?: {
+    bundlerRate?: number | null;
+    sniperCount?: number | null;
+    top10HolderRate?: number | null;
+    rugRatio?: number | null;
+    isHoneypot?: boolean | null;
+    sellTax?: number | null;
+    creatorRugCount?: number | null;
+  } | null;
 }
 
 interface LiveResponse {
@@ -2041,7 +2052,20 @@ export default function LiveFeed() {
     if (lowLiq) safetyReasons.push('Low liquidity');
     if (whale) safetyReasons.push(`Top holder ${Math.round(b.topHolderPct!)}%`);
     if (veryNew && ageLabel) safetyReasons.push(`Very new (${ageLabel} old)`);
-    const isDanger = mintLive || freezeLive || noSells || thinLiq || lowLiq;
+    // GMGN token-security (rug/bundle avoidance) — the loud warnings. Any of
+    // these is a hard DANGER: they're the patterns that take ALL the money.
+    const sec = b.security;
+    const secBundled = sec?.bundlerRate != null && sec.bundlerRate > 0.25;
+    const secDevRugs = (sec?.creatorRugCount ?? 0) >= 1;
+    const secHoneypot = sec?.isHoneypot === true;
+    const secSellTax = sec?.sellTax != null && sec.sellTax > 0.1;
+    if (secBundled) safetyReasons.push(`Bundled supply ${Math.round(sec!.bundlerRate! * 100)}%`);
+    if (secDevRugs) safetyReasons.push(`Dev rugged ${sec!.creatorRugCount} prior token${sec!.creatorRugCount === 1 ? '' : 's'}`);
+    if (secHoneypot) safetyReasons.push('Honeypot (GMGN)');
+    if (secSellTax) safetyReasons.push(`Sell tax ${Math.round(sec!.sellTax! * 100)}%`);
+    const isDanger =
+      mintLive || freezeLive || noSells || thinLiq || lowLiq ||
+      secBundled || secDevRugs || secHoneypot || secSellTax;
     const isCaution = !isDanger && (whale || veryNew);
     // We only know it's SAFE if both authorities are renounced AND nothing flagged.
     const verdict: 'safe' | 'caution' | 'danger' | 'unknown' = isDanger
@@ -2299,7 +2323,25 @@ export default function LiveFeed() {
                   color: '#ff6b6b',
                 }}
               >
-                ⚠ BUNDLE
+                ⚠ BUNDLE{sec?.bundlerRate != null ? ` ${Math.round(sec.bundlerRate * 100)}%` : ''}
+              </span>
+            )}
+            {/* SERIAL-RUGGER chip — the single loudest warning we can give: this
+                token's creator has rug-pattern history (GMGN holdings analysis). */}
+            {(sec?.creatorRugCount ?? 0) >= 3 && (
+              <span
+                title={`This token's creator has ${sec!.creatorRugCount} prior tokens matching the rug pattern (sold for profit, now worthless) per GMGN holdings analysis.`}
+                style={{
+                  fontSize: '10px',
+                  fontWeight: 800,
+                  padding: '1px 6px',
+                  borderRadius: '4px',
+                  whiteSpace: 'nowrap',
+                  background: 'rgba(255,60,60,0.28)',
+                  color: '#ff5252',
+                }}
+              >
+                ☠ DEV RUGS ×{sec!.creatorRugCount}
               </span>
             )}
             <span

@@ -238,6 +238,12 @@ async function computeLiveFeed(p: BuildLiveFeedParams): Promise<LiveFeedResult> 
     bursts = await annotateBundleFlag(bursts);
   }
 
+  // GMGN TOKEN-SECURITY (rug/bundle avoidance — ALL layers, not just Early):
+  // one batched read of token_security for the visible mints; attaches the
+  // security snapshot and sets bundleFlag when bundler concentration crosses
+  // the threshold. Resilient: pre-migration DB / no rows → bursts unchanged.
+  bursts = await annotateTokenSecurity(bursts);
+
   // LIVE entry→now price change. The burst card's hero % and the "$entry → $now"
   // market-cap pair must update every poll AND cover fresh pre-graduation
   // pump.fun tokens that DexScreener/GeckoTerminal can't price yet.
@@ -472,6 +478,57 @@ export async function annotateBundleFlag(bursts: LiveBurst[]): Promise<LiveBurst
   // yet (see the TODO above). When GMGN token-security is wired here, replace
   // this with one batched lookup over the capped feed mints and set bundleFlag.
   return bursts;
+}
+
+/**
+ * Annotate bursts with the GMGN token-security snapshot (token_security table,
+ * populated by the gmgn-token-security CI worker): bundler/sniper concentration,
+ * holder concentration, honeypot/sell-tax, and the creator's rug history — the
+ * "don't get rugged" data the cards warn on. Also sets the real bundleFlag when
+ * bundler concentration crosses BUNDLE_RATE_FLAG (default 0.25), superseding the
+ * annotateBundleFlag stub above.
+ *
+ * Cost: ONE indexed .in() read over the capped feed mints per (2s-cached) feed
+ * build, zero Helius. FULLY RESILIENT: a pre-0024 DB (missing table), no rows,
+ * or any error → bursts returned unchanged.
+ */
+async function annotateTokenSecurity(bursts: LiveBurst[]): Promise<LiveBurst[]> {
+  if (bursts.length === 0 || !isSupabaseConfigured()) return bursts;
+  try {
+    const supabase = getSupabase();
+    const mints = [...new Set(bursts.map((b) => b.mint).filter(Boolean))];
+    const { data, error } = await supabase
+      .from('token_security')
+      .select('mint, bundler_rate, sniper_count, top10_holder_rate, rug_ratio, is_honeypot, sell_tax, creator_rug_count')
+      .in('mint', mints);
+    if (error || !data) return bursts; // missing table (pre-0024) or query error
+
+    const byMint = new Map<string, any>();
+    for (const r of data as any[]) byMint.set(String(r.mint), r);
+    if (byMint.size === 0) return bursts;
+
+    const bundleThreshold = Number(process.env.BUNDLE_RATE_FLAG ?? 0.25);
+    for (const b of bursts) {
+      const r = byMint.get(b.mint);
+      if (!r) continue;
+      b.security = {
+        bundlerRate: r.bundler_rate == null ? null : Number(r.bundler_rate),
+        sniperCount: r.sniper_count == null ? null : Number(r.sniper_count),
+        top10HolderRate: r.top10_holder_rate == null ? null : Number(r.top10_holder_rate),
+        rugRatio: r.rug_ratio == null ? null : Number(r.rug_ratio),
+        isHoneypot: r.is_honeypot == null ? null : Boolean(r.is_honeypot),
+        sellTax: r.sell_tax == null ? null : Number(r.sell_tax),
+        creatorRugCount: r.creator_rug_count == null ? null : Number(r.creator_rug_count),
+      };
+      if (b.security.bundlerRate != null && b.security.bundlerRate > bundleThreshold) {
+        b.bundleFlag = true;
+        b.bundleSource = 'gmgn';
+      }
+    }
+    return bursts;
+  } catch {
+    return bursts; // never break the feed over security enrichment
+  }
 }
 
 /**
