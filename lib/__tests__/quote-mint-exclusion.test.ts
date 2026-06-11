@@ -41,3 +41,31 @@ describe('quote-mint exclusion', () => {
     expect(rows.find((r) => r.token_mint === MEME && r.trade_type === 'BUY')).toBeTruthy();
   });
 });
+
+describe('vault-funded fill / dust floor', () => {
+  // Jupiter DCA / limit-order fill: tokens arrive at the wallet, but payment
+  // leaves the PROGRAM's vault — the wallet's own SOL movement is fee dust.
+  // Ingesting it would record price = dust/amount (~100-1000x low) and poison
+  // burst baselines and wallet PnL.
+  const vaultFill = {
+    signature: 'sig2',
+    timestamp: 1_700_000_000,
+    feePayer: WALLET,
+    tokenTransfers: [
+      { fromUserAccount: 'VauLt111111111111111111111111111111111111111', toUserAccount: WALLET, mint: MEME, tokenAmount: 680_000 },
+    ],
+    nativeTransfers: [
+      { fromUserAccount: WALLET, toUserAccount: 'Fee1111111111111111111111111111111111111111', amount: 3_700_000 }, // 0.0037 SOL dust
+    ],
+  };
+
+  it('does NOT ingest a vault-funded fill priced off fee dust', () => {
+    expect(parseHeliusSwaps([vaultFill])).toHaveLength(0);
+  });
+
+  it('still ingests a small but real buy (above the 0.01 SOL floor)', () => {
+    const rows = parseHeliusSwaps([tx(MEME, 'buy')]); // 2 SOL
+    expect(rows).toHaveLength(1);
+    expect(rows[0].sol_amount).toBeGreaterThan(0.01);
+  });
+});

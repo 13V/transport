@@ -19,6 +19,14 @@ import { isQuoteMint } from '../quote-mints';
 
 const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 const LAMPORTS_PER_SOL = 1e9;
+/**
+ * Minimum SOL side for a swap to count as a trade. Vault-funded fills (Jupiter
+ * DCA / limit orders) deliver tokens to the wallet while the payment leaves the
+ * PROGRAM's vault — the wallet's own SOL movement is just fee dust, so the row
+ * would record an absurd price (sol_amount/amount ~100-1000x low) and poison
+ * burst baselines + wallet PnL. Below this floor there is no trade signal.
+ */
+const MIN_TRADE_SOL = 0.01;
 /** A row matching the `trades` table (mirrors lib/indexer/run-indexer.ts). */
 export interface TradeRow {
   wallet: string;
@@ -303,6 +311,11 @@ export function parseHeliusSwaps(payload: unknown, subscribed?: Set<string>): Tr
           sol_amount += feeLamports / LAMPORTS_PER_SOL;
         }
       }
+
+      // Dust floor AFTER the fee add-back: a sub-0.01-SOL "swap" is either noise
+      // or a vault-funded fill whose real payment never touched the wallet —
+      // either way its implied price is garbage. Skip, never guess.
+      if (sol_amount < MIN_TRADE_SOL) continue;
 
       const price = sol_amount / amount;
       if (!Number.isFinite(price) || price <= 0) continue; // guard div-by-zero / NaN

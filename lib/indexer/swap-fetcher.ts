@@ -33,8 +33,13 @@ import type { Trade } from '../pnl-engine';
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const WSOL_MINT = 'So11111111111111111111111111111111111111112';
-// Ignore dust / fee-only noise (a few lamports of rent shouldn't count as a trade).
-const MIN_SOL_VALUE = 0.001;
+// Ignore dust / fee-only noise — AND vault-funded fills (Jupiter DCA / limit
+// orders), where tokens reach the wallet but the payment leaves the program's
+// vault, so the wallet's own SOL movement is fee dust and the implied price is
+// ~100-1000x wrong (poisoned burst baselines + wallet PnL). 0.001 let those
+// through (observed corrupt rows at 0.0037 SOL); keep in sync with
+// MIN_TRADE_SOL in lib/helius/parse-swap.ts.
+const MIN_SOL_VALUE = 0.01;
 
 function heliusBase(): string | null {
   // Current Enhanced API host. The legacy api.helius.xyz host rejects newer
