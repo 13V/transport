@@ -761,7 +761,13 @@ export async function getBurstStats(windowHours = 24): Promise<BurstStats> {
           : r1 != null && Number.isFinite(r1)
           ? r1
           : null;
-      if (candidateRet != null && (best == null || candidateRet > best.ret)) {
+      // Baseline-corruption guard (bestCall ONLY — medians/hit-rates are
+      // rank/sign-based and stay untouched): a burst fires after ≥N smart buys,
+      // i.e. from a non-trivial mcap; +50,000% (500x) from that base within 24h
+      // has only ever appeared here via corrupted baselines (~1000x-low decimals
+      // slips in rare trade rows). Don't let one bad row own the headline stat.
+      const plausible = candidateRet != null && candidateRet <= 50_000;
+      if (candidateRet != null && plausible && (best == null || candidateRet > best.ret)) {
         best = {
           symbol: r.symbol == null ? null : String(r.symbol),
           mint: String(r.mint),
