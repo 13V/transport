@@ -28,6 +28,7 @@ import { getSupabase, isSupabaseConfigured } from '../supabase-client';
 import { getLiveBursts } from './live-bursts';
 import { getTokenMeta } from '../token-meta';
 import { fetchAllRows } from '../db-paginate';
+import { isQuoteMint } from '../quote-mints';
 
 const GT = 'https://api.geckoterminal.com/api/v2';
 const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
@@ -725,6 +726,11 @@ export async function getBurstStats(windowHours = 24): Promise<BurstStats> {
 
     let burstsToday = 0;
     for (const r of data as any[]) {
+      // Rows persisted BEFORE the quote-mint ingestion fix (e.g. a USDC "burst"
+      // whose corrupted baseline shows a +457k% return) must never feed the
+      // public stats/bestCall. Skip at read so the backlog ages out of the
+      // window naturally instead of needing a destructive cleanup.
+      if (isQuoteMint(r.mint)) continue;
       const fs = r.first_seen ? new Date(r.first_seen).getTime() : NaN;
       if (Number.isFinite(fs) && fs >= todaySince) burstsToday++;
 
